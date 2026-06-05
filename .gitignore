@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+*.moved-aside
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Node / Electron (if used for GUI)
+node_modules/
+dist/
+out/
+*.log
+
+# Python (if smartcut is bundled/ported)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Media work files / large samples
+*.mp4
+*.mov
+*.mkv
+*.m4v
+*.avi
+*.webm
+tmp/
+samples/
+
+# Env
+.env
+.env.local
