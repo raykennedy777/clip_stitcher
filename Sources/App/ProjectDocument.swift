@@ -26,6 +26,10 @@ final class ProjectDocument: ReferenceFileDocument {
     /// document dirty. May be nil very early in a window's lifetime.
     var undoManager: UndoManager?
 
+    /// Resolved source URLs, keyed by clip id. Populated on import and lazily when
+    /// resolving a saved clip's bookmark.
+    private var urlCache: [Clip.ID: URL] = [:]
+
     init() {
         self.project = VidProject()
     }
@@ -66,6 +70,7 @@ final class ProjectDocument: ReferenceFileDocument {
             let clip = Clip(bookmark: bookmark, displayName: url.lastPathComponent)
             p.clips.append(clip)
             pending.append((clip.id, url))
+            urlCache[clip.id] = url
             importStates[clip.id] = .probing
         }
         if p.targetClipID == nil {
@@ -114,6 +119,29 @@ final class ProjectDocument: ReferenceFileDocument {
         var p = project
         p.output = output
         commit(p)
+    }
+
+    func setInOut(id: Clip.ID, inPoint: Int?, outPoint: Int?) {
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        var p = project
+        p.clips[i].inPoint = inPoint
+        p.clips[i].outPoint = outPoint
+        commit(p)
+    }
+
+    /// Resolves a clip's source file URL from its bookmark (cached). Returns nil if
+    /// the source can no longer be found.
+    func url(for clip: Clip) -> URL? {
+        if let cached = urlCache[clip.id] { return cached }
+        var isStale = false
+        guard let resolved = try? URL(
+            resolvingBookmarkData: clip.bookmark,
+            options: [],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else { return nil }
+        urlCache[clip.id] = resolved
+        return resolved
     }
 
     // MARK: - Import pipeline

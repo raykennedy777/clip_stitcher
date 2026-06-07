@@ -38,6 +38,7 @@ struct ClipRowView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 statusLine
+                selectionLine
             }
 
             Spacer(minLength: 0)
@@ -106,6 +107,18 @@ struct ClipRowView: View {
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.caption).foregroundStyle(.red).lineLimit(2)
+        }
+    }
+
+    /// Shown only when the clip has a selection narrower than the whole clip.
+    @ViewBuilder
+    private var selectionLine: some View {
+        if clip.inPoint != nil || clip.outPoint != nil {
+            let inFrame = clip.inPoint ?? 0
+            let outFrame = clip.outPoint ?? max(0, (clip.frameCount ?? 1) - 1)
+            Label("In \(inFrame) – Out \(outFrame) · \(max(0, outFrame - inFrame + 1)) frames", systemImage: "scissors")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.tint)
         }
     }
 

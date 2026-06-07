@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct SourceView: View {
     @ObservedObject var document: ProjectDocument
+    @EnvironmentObject private var cutEditor: CutEditorPresenter
     @State private var selection: Clip.ID?
     @State private var importing = false
 
@@ -45,9 +46,21 @@ struct SourceView: View {
                         state: document.importStates[clip.id] ?? .ready
                     )
                     .tag(clip.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        selection = clip.id
+                        openCutEditor(for: clip)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onKeyPress(.return) {
+                if let id = selection, let clip = document.project.clips.first(where: { $0.id == id }) {
+                    openCutEditor(for: clip)
+                    return .handled
+                }
+                return .ignored
+            }
         }
     }
 
@@ -120,6 +133,10 @@ struct SourceView: View {
         guard let id = selection else { return }
         document.deleteClip(id: id)
         selection = nil
+    }
+
+    private func openCutEditor(for clip: Clip) {
+        cutEditor.open(clip: clip, document: document)
     }
 
     // MARK: - Importable types

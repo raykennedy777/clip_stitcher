@@ -25,6 +25,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 struct RootView: View {
     @ObservedObject var document: ProjectDocument
     @Environment(\.undoManager) private var undoManager
+    @StateObject private var cutEditor = CutEditorPresenter()
     @State private var section: AppSection? = .source
 
     var body: some View {
@@ -41,6 +42,7 @@ struct RootView: View {
             case .preview: PreviewView()
             }
         }
+        .environmentObject(cutEditor)
         .onAppear { document.undoManager = undoManager }
     }
 }
