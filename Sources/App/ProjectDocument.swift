@@ -62,17 +62,21 @@ final class ProjectDocument: ReferenceFileDocument {
         }
     }
 
-    func addFiles(_ urls: [URL]) {
+    /// Imports `urls`, inserting them at `index` (clamped) or appending when nil.
+    func addFiles(_ urls: [URL], at index: Int? = nil) {
         var p = project
         var pending: [(Clip.ID, URL)] = []
+        var newClips: [Clip] = []
         for url in urls {
             let bookmark = (try? url.bookmarkData()) ?? Data()
             let clip = Clip(bookmark: bookmark, displayName: url.lastPathComponent)
-            p.clips.append(clip)
+            newClips.append(clip)
             pending.append((clip.id, url))
             urlCache[clip.id] = url
             importStates[clip.id] = .probing
         }
+        let insertAt = min(max(0, index ?? p.clips.count), p.clips.count)
+        p.clips.insert(contentsOf: newClips, at: insertAt)
         if p.targetClipID == nil {
             p.targetClipID = p.clips.first?.id
         }

@@ -6,6 +6,7 @@ struct SourceView: View {
     @EnvironmentObject private var cutEditor: CutEditorPresenter
     @State private var selection: Clip.ID?
     @State private var importing = false
+    @State private var isDropTargeted = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -14,6 +15,15 @@ struct SourceView: View {
             actionPanel
         }
         .navigationTitle("Source")
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted, perform: handleDrop)
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .background(Color.accentColor.opacity(0.08))
+                    .allowsHitTesting(false)
+            }
+        }
         .fileImporter(
             isPresented: $importing,
             allowedContentTypes: Self.contentTypes,
@@ -33,7 +43,7 @@ struct SourceView: View {
             ContentUnavailableView(
                 "No Clips",
                 systemImage: "film.stack",
-                description: Text("Add a video file to begin building the timeline.")
+                description: Text("Add a video file — or drag one here — to begin building the timeline.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -50,6 +60,11 @@ struct SourceView: View {
                     .onTapGesture(count: 2) {
                         selection = clip.id
                         openCutEditor(for: clip)
+                    }
+                }
+                .onInsert(of: [.fileURL]) { index, providers in
+                    loadVideoURLs(from: providers) { urls in
+                        if !urls.isEmpty { document.addFiles(urls, at: index) }
                     }
                 }
             }
@@ -139,15 +154,65 @@ struct SourceView: View {
         cutEditor.open(clip: clip, document: document)
     }
 
+    // MARK: - Drag & drop
+
+    /// Append-drop onto the window chrome / empty state. Positional drops between
+    /// rows are handled by the list's `onInsert`.
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard providers.contains(where: {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }) else { return false }
+        loadVideoURLs(from: providers) { urls in
+            if !urls.isEmpty { document.addFiles(urls) }
+        }
+        return true
+    }
+
+    /// Loads file URLs from drop providers, keeping only importable videos and
+    /// preserving drop order, then delivers them on the main actor.
+    private func loadVideoURLs(from providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
+        let fileProviders = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }
+        guard !fileProviders.isEmpty else { completion([]); return }
+
+        var results = [URL?](repeating: nil, count: fileProviders.count)
+        let lock = NSLock()
+        let group = DispatchGroup()
+        for (i, provider) in fileProviders.enumerated() {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url, Self.isImportable(url) {
+                    lock.lock(); results[i] = url; lock.unlock()
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            completion(results.compactMap { $0 })
+        }
+    }
+
     // MARK: - Importable types
+
+    static let acceptedExtensions: Set<String> =
+        ["ts", "m2ts", "mts", "mkv", "mpg", "mpeg", "m2v", "vob", "mp4", "mov", "m4v"]
 
     static let contentTypes: [UTType] = {
         var types: [UTType] = [.movie, .video, .audiovisualContent, .mpeg4Movie, .quickTimeMovie, .mpeg2Video]
-        for ext in ["ts", "m2ts", "mts", "mkv", "mpg", "mpeg", "m2v", "vob", "mp4", "mov"] {
+        for ext in acceptedExtensions {
             if let type = UTType(filenameExtension: ext) {
                 types.append(type)
             }
         }
         return types
     }()
+
+    /// Whether a dropped file looks like an importable video — by extension, or by
+    /// its type conforming to one we accept. Keeps stray files (text, images) out.
+    static func isImportable(_ url: URL) -> Bool {
+        if acceptedExtensions.contains(url.pathExtension.lowercased()) { return true }
+        guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return false }
+        return contentTypes.contains { type.conforms(to: $0) }
+    }
 }
