@@ -1,0 +1,136 @@
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct SourceView: View {
+    @ObservedObject var document: ProjectDocument
+    @State private var selection: Clip.ID?
+    @State private var importing = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            clipList
+            Divider()
+            actionPanel
+        }
+        .navigationTitle("Source")
+        .fileImporter(
+            isPresented: $importing,
+            allowedContentTypes: Self.contentTypes,
+            allowsMultipleSelection: true
+        ) { result in
+            if case .success(let urls) = result {
+                document.addFiles(urls)
+            }
+        }
+    }
+
+    // MARK: - Clip list
+
+    @ViewBuilder
+    private var clipList: some View {
+        if document.project.clips.isEmpty {
+            ContentUnavailableView(
+                "No Clips",
+                systemImage: "film.stack",
+                description: Text("Add a video file to begin building the timeline.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(selection: $selection) {
+                ForEach(Array(document.project.clips.enumerated()), id: \.element.id) { index, clip in
+                    ClipRowView(
+                        position: index + 1,
+                        clip: clip,
+                        role: role(for: clip),
+                        state: document.importStates[clip.id] ?? .ready
+                    )
+                    .tag(clip.id)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func role(for clip: Clip) -> ClipRole {
+        if clip.id == document.project.targetClipID { return .target }
+        guard let targetID = document.project.targetClipID,
+              let target = document.project.clips.first(where: { $0.id == targetID }),
+              clip.video != nil else {
+            return .unknown
+        }
+        return MatchEvaluator.matches(clip, target: target) ? .smartRender : .reEncode
+    }
+
+    // MARK: - Action panel
+
+    private var actionPanel: some View {
+        VStack(spacing: 8) {
+            action("Add File", systemImage: "plus") { importing = true }
+
+            Divider().padding(.vertical, 6)
+
+            action("Move Up", systemImage: "arrow.up", enabled: canMove(by: -1)) { move(by: -1) }
+            action("Move Down", systemImage: "arrow.down", enabled: canMove(by: 1)) { move(by: 1) }
+            action("Delete", systemImage: "trash", enabled: selection != nil) { deleteSelected() }
+            action("Clear", systemImage: "xmark.bin", enabled: !document.project.clips.isEmpty) {
+                document.clearAll()
+                selection = nil
+            }
+
+            Divider().padding(.vertical, 6)
+
+            action("Set as Target Clip", systemImage: "target", enabled: canSetTarget) {
+                if let id = selection { document.setTarget(id: id) }
+            }
+
+            Spacer()
+        }
+        .padding()
+        .frame(width: 200)
+    }
+
+    private func action(_ title: String, systemImage: String, enabled: Bool = true, perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.bordered)
+        .disabled(!enabled)
+    }
+
+    // MARK: - Actions
+
+    private func canMove(by delta: Int) -> Bool {
+        guard let id = selection,
+              let i = document.project.clips.firstIndex(where: { $0.id == id }) else { return false }
+        return document.project.clips.indices.contains(i + delta)
+    }
+
+    private var canSetTarget: Bool {
+        guard let id = selection else { return false }
+        return id != document.project.targetClipID
+    }
+
+    private func move(by delta: Int) {
+        guard let id = selection else { return }
+        document.move(id: id, by: delta)
+    }
+
+    private func deleteSelected() {
+        guard let id = selection else { return }
+        document.deleteClip(id: id)
+        selection = nil
+    }
+
+    // MARK: - Importable types
+
+    static let contentTypes: [UTType] = {
+        var types: [UTType] = [.movie, .video, .audiovisualContent, .mpeg4Movie, .quickTimeMovie, .mpeg2Video]
+        for ext in ["ts", "m2ts", "mts", "mkv", "mpg", "mpeg", "m2v", "vob", "mp4", "mov"] {
+            if let type = UTType(filenameExtension: ext) {
+                types.append(type)
+            }
+        }
+        return types
+    }()
+}
