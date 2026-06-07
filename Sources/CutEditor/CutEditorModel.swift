@@ -25,6 +25,11 @@ final class CutEditorModel: ObservableObject {
     private var decoder: FrameStreamDecoder?
     private var playTask: Task<Void, Never>?
 
+    /// Display-corrected preview dimensions (SAR applied), resolved once at load and
+    /// reused by the decoder and the fallback extractor so both render alike.
+    private var previewW = 0
+    private var previewH = 0
+
     /// The latest frame the user wants displayed that isn't cached yet, and whether
     /// arriving there is a jump (worth an instant keyframe preview). A single decode
     /// worker drains this toward the most recent request, so holding an arrow key
@@ -57,7 +62,12 @@ final class CutEditorModel: ObservableObject {
             index = built
             frameCount = built.count
             let (w, h) = Self.previewSize(for: clip.video)
-            decoder = FrameStreamDecoder(url: url, index: built, width: w, height: h, useHardware: true, windowSize: cacheCap)
+            previewW = w
+            previewH = h
+            decoder = FrameStreamDecoder(
+                url: url, index: built, width: w, height: h,
+                useHardware: true, windowSize: cacheCap
+            )
             isIndexing = false
             seek(to: inPoint ?? 0)
         } catch {
@@ -117,7 +127,9 @@ final class CutEditorModel: ObservableObject {
                 for entry in result.window { self.cacheInsert(entry.frame, entry.image) }
                 var produced = result.image
                 if produced == nil,
-                   let data = try? await FrameExtractor.imageData(url: self.url, index: index, frame: target) {
+                   let data = try? await FrameExtractor.imageData(
+                       url: self.url, index: index, frame: target,
+                       width: self.previewW, height: self.previewH) {
                     produced = NSImage(data: data)
                 }
                 if let produced {
@@ -222,20 +234,48 @@ final class CutEditorModel: ObservableObject {
 
     // MARK: - Helpers
 
-    /// Preview decode size: source dimensions capped at 1280 wide (kept even), which
-    /// bounds the per-frame raw size and decode cost. (Pixel aspect ratio is not yet
-    /// applied — anamorphic content previews at storage dimensions for now.)
+    /// Preview decode size: the clip's **display** dimensions (pixel aspect ratio
+    /// applied), capped at 1280 wide and kept even. Applying SAR means anamorphic
+    /// content — e.g. PAL 720×576 with SAR 64:45 — previews at its true 1024×576
+    /// (16:9) shape instead of squished into storage dimensions.
     static func previewSize(for video: VideoProperties?) -> (Int, Int) {
-        let sourceW = video?.width ?? 1280
-        let sourceH = video?.height ?? 720
-        guard sourceW > 0, sourceH > 0 else { return (1280, 720) }
-        let maxWidth = 1280
-        guard sourceW > maxWidth else { return (even(sourceW), even(sourceH)) }
-        let scaledH = Int((Double(sourceH) * Double(maxWidth) / Double(sourceW)).rounded())
-        return (maxWidth, even(scaledH))
+        let storedW = video?.width ?? 1280
+        let storedH = video?.height ?? 720
+        guard storedW > 0, storedH > 0 else { return (1280, 720) }
+
+        var displayW = Double(storedW)
+        var displayH = Double(storedH)
+        let (sarN, sarD) = parseAspectRatio(video?.sampleAspectRatio)
+        if sarN > 0, sarD > 0, sarN != sarD {
+            // Stretch the storage axis that the non-square pixels compress, so the
+            // result has square pixels at the correct display aspect ratio.
+            if sarN > sarD {
+                displayW = Double(storedW) * Double(sarN) / Double(sarD)
+            } else {
+                displayH = Double(storedH) * Double(sarD) / Double(sarN)
+            }
+        }
+
+        let maxWidth = 1280.0
+        if displayW > maxWidth {
+            displayH *= maxWidth / displayW
+            displayW = maxWidth
+        }
+        return (even(Int(displayW.rounded())), even(Int(displayH.rounded())))
     }
 
     private static func even(_ value: Int) -> Int { value - (value % 2) }
+
+    /// Parses an "N:M" aspect-ratio string (ffprobe's SAR form). Returns (1, 1) for
+    /// nil, "N/A", or "0:1" (unknown / square).
+    static func parseAspectRatio(_ raw: String?) -> (Int, Int) {
+        guard let raw, raw.contains(":") else { return (1, 1) }
+        let parts = raw.split(separator: ":")
+        guard parts.count == 2, let n = Int(parts[0]), let d = Int(parts[1]), n > 0, d > 0 else {
+            return (1, 1)
+        }
+        return (n, d)
+    }
 
     func timecode(forFrame frame: Int) -> String {
         guard fps > 0 else { return "--:--:--:--" }

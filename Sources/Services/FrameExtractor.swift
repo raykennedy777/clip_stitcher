@@ -15,7 +15,10 @@ enum FrameExtractor {
     ///  1. input-seek to the keyframe at/before the target, select the offset-th frame, stop;
     ///  2. for the final 1-2 frames (a B-frame/EOF-flush quirk), grab via end-relative `-sseof`;
     ///  3. output-seek to a midpoint just before the target — slow but always correct.
-    static func imageData(url: URL, index: FrameIndex, frame n: Int) async throws -> Data? {
+    static func imageData(
+        url: URL, index: FrameIndex, frame n: Int,
+        width: Int, height: Int
+    ) async throws -> Data? {
         guard index.count > 0, n >= 0, n < index.count else { return nil }
         let ffmpeg = try FFTools.ffmpegURL()
         let tmp = FileManager.default.temporaryDirectory
@@ -26,11 +29,14 @@ enum FrameExtractor {
         let offset = n - anchor
         let anchorPTS = String(format: "%.6f", index.pts[anchor])
 
+        // Match the persistent decoder: scale to the display dimensions (SAR applied).
+        let scale = "scale=\(width):\(height)"
+
         // 1. Fast path.
         _ = try? await ProcessRunner.run(ffmpeg, [
             "-hide_banner", "-loglevel", "error",
             "-ss", anchorPTS, "-i", url.path,
-            "-an", "-vf", "select=eq(n\\,\(offset)),\(previewScale)",
+            "-an", "-vf", "select=eq(n\\,\(offset)),\(scale)",
             "-frames:v", "1", "-fps_mode", "passthrough",
             "-y", tmp.path,
         ])
@@ -42,7 +48,7 @@ enum FrameExtractor {
             _ = try? await ProcessRunner.run(ffmpeg, [
                 "-hide_banner", "-loglevel", "error",
                 "-sseof", "-2", "-i", url.path,
-                "-an", "-vf", previewScale, "-update", "1", "-y", tmp.path,
+                "-an", "-vf", scale, "-update", "1", "-y", tmp.path,
             ])
             if let data = try? Data(contentsOf: tmp) { return data }
         }
@@ -55,7 +61,7 @@ enum FrameExtractor {
         _ = try? await ProcessRunner.run(ffmpeg, [
             "-hide_banner", "-loglevel", "error",
             "-i", url.path, "-ss", midpoint,
-            "-an", "-vf", previewScale, "-frames:v", "1", "-y", tmp.path,
+            "-an", "-vf", scale, "-frames:v", "1", "-y", tmp.path,
         ])
         return try? Data(contentsOf: tmp)
     }
