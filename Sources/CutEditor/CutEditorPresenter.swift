@@ -40,7 +40,7 @@ final class CutEditorPresenter: NSObject, ObservableObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
               let id = windows.first(where: { $0.value === window })?.key else { return }
-        models[id]?.stop()
+        models[id]?.teardown()
         windows[id] = nil
         models[id] = nil
     }

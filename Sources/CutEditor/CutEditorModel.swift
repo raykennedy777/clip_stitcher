@@ -22,17 +22,23 @@ final class CutEditorModel: ObservableObject {
     var onClose: (() -> Void)?
 
     private var index: FrameIndex?
-    private var extractTask: Task<Void, Never>?
-    private var prefetchTask: Task<Void, Never>?
+    private var decoder: FrameStreamDecoder?
     private var playTask: Task<Void, Never>?
 
-    /// Frames as compressed PNG **data** keyed by frame number, batch-filled around
-    /// the current position. Storing bytes (not decoded images) keeps the cache to
-    /// a few MB; only the displayed frame is decoded into an `NSImage`.
-    private var cache: [Int: Data] = [:]
-    private let windowBack = 6
-    private let windowAhead = 30
-    private let cacheCap = 240
+    /// The latest frame the user wants displayed that isn't cached yet, and whether
+    /// arriving there is a jump (worth an instant keyframe preview). A single decode
+    /// worker drains this toward the most recent request, so holding an arrow key
+    /// never cancels an in-flight decode — it just retargets the worker.
+    private var pendingFrame: Int?
+    private var pendingIsJump = false
+    private var decodeTask: Task<Void, Never>?
+
+    /// Small cache of recently shown frames (FIFO) so backward stepping over
+    /// just-viewed frames is instant. Forward stepping is served directly by the
+    /// decoder, which keeps these bounded and modest in memory.
+    private var cache: [Int: NSImage] = [:]
+    private var cacheOrder: [Int] = []
+    private let cacheCap = 48
 
     init(clip: Clip, url: URL, document: ProjectDocument) {
         self.clip = clip
@@ -50,6 +56,8 @@ final class CutEditorModel: ObservableObject {
             let built = try await FrameIndexer.buildIndex(url: url)
             index = built
             frameCount = built.count
+            let (w, h) = Self.previewSize(for: clip.video)
+            decoder = FrameStreamDecoder(url: url, index: built, width: w, height: h, useHardware: true, windowSize: cacheCap)
             isIndexing = false
             seek(to: inPoint ?? 0)
         } catch {
@@ -62,26 +70,61 @@ final class CutEditorModel: ObservableObject {
 
     func seek(to frame: Int) {
         guard let index else { return }
+        let previous = currentFrame
         let clamped = min(max(0, frame), max(0, index.count - 1))
         currentFrame = clamped
 
-        // Instant path: serve from cache and keep the window topped up ahead.
+        // Instant path: a recently-decoded frame (e.g. stepping back over the cache).
         if let cached = cache[clamped] {
-            image = NSImage(data: cached)
-            prefetchForward(from: clamped)
+            image = cached
+            pendingFrame = nil
             return
         }
 
-        // Cache miss: debounce, then batch-decode a window around the target.
-        extractTask?.cancel()
-        extractTask = Task { @MainActor [weak self] in
+        // Otherwise hand the frame to the decode worker. A move beyond a contiguous
+        // run is a "jump" worth an instant keyframe preview; ±1 steps are not (a
+        // keyframe flash there would be jarring).
+        pendingFrame = clamped
+        pendingIsJump = abs(clamped - previous) > cacheCap
+        startDecodeWorker()
+    }
+
+    /// Drives the decoder toward `pendingFrame`, retargeting whenever the user moves
+    /// again, until the cache (or a decode) satisfies the latest request. Only one
+    /// worker runs at a time; subsequent seeks just update `pendingFrame`.
+    private func startDecodeWorker() {
+        guard decodeTask == nil else { return }
+        decodeTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            do { try await Task.sleep(nanoseconds: 40_000_000) } catch { return }
-            await self.loadWindow(around: clamped, index: index)
-            if Task.isCancelled { return }
-            if self.currentFrame == clamped, let data = self.cache[clamped] {
-                self.image = NSImage(data: data)
-                self.prefetchForward(from: clamped)
+            defer { self.decodeTask = nil }
+            while let target = self.pendingFrame, let decoder = self.decoder, let index = self.index {
+                let jump = self.pendingIsJump
+
+                if let cached = self.cache[target] {
+                    if self.currentFrame == target { self.image = cached }
+                    if self.pendingFrame == target { self.pendingFrame = nil }
+                    continue
+                }
+
+                // Show the GOP keyframe immediately on a jump to mask the warm-up.
+                if jump, let preview = await decoder.keyframePreview(forFrameAt: target) {
+                    self.cacheInsert(preview.frame, preview.image)
+                    if self.currentFrame == target { self.image = preview.image }
+                    if self.pendingFrame != target { continue } // user moved on
+                }
+
+                let result = await decoder.image(at: target)
+                for entry in result.window { self.cacheInsert(entry.frame, entry.image) }
+                var produced = result.image
+                if produced == nil,
+                   let data = try? await FrameExtractor.imageData(url: self.url, index: index, frame: target) {
+                    produced = NSImage(data: data)
+                }
+                if let produced {
+                    self.cacheInsert(target, produced)
+                    if self.currentFrame == target { self.image = produced }
+                }
+                if self.pendingFrame == target { self.pendingFrame = nil }
             }
         }
     }
@@ -90,43 +133,12 @@ final class CutEditorModel: ObservableObject {
     func goToStart() { seek(to: 0) }
     func goToEnd() { seek(to: lastFrame) }
 
-    /// Batch-decodes a window around `n` into the cache, backfilling `n` itself with
-    /// a single-frame decode if the window missed it (e.g. the final frame).
-    private func loadWindow(around n: Int, index: FrameIndex) async {
-        let lo = max(0, n - windowBack)
-        let hi = min(index.count - 1, n + windowAhead)
-        let frames = (try? await FrameExtractor.images(url: url, index: index, from: lo, to: hi)) ?? [:]
-        merge(frames)
-        if cache[n] == nil, let single = try? await FrameExtractor.imageData(url: url, index: index, frame: n) {
-            cache[n] = single
+    private func cacheInsert(_ frame: Int, _ image: NSImage) {
+        if cache[frame] == nil { cacheOrder.append(frame) }
+        cache[frame] = image
+        while cacheOrder.count > cacheCap {
+            cache[cacheOrder.removeFirst()] = nil
         }
-    }
-
-    /// When stepping forward into the tail of the cached window, decode the next
-    /// window ahead in the background so forward stepping stays instant.
-    private func prefetchForward(from n: Int) {
-        guard let index, prefetchTask == nil else { return }
-        let nextStart = n + windowAhead / 2
-        guard nextStart < index.count, cache[nextStart] == nil else { return }
-        let lo = n + 1
-        let hi = min(index.count - 1, n + windowAhead)
-        guard lo <= hi else { return }
-        prefetchTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let frames = (try? await FrameExtractor.images(url: self.url, index: index, from: lo, to: hi)) ?? [:]
-            self.merge(frames)
-            self.prefetchTask = nil
-        }
-    }
-
-    /// Inserts frame data and evicts entries farthest from the current position
-    /// once the cache exceeds its cap.
-    private func merge(_ frames: [Int: Data]) {
-        for (frame, data) in frames { cache[frame] = data }
-        guard cache.count > cacheCap else { return }
-        let half = cacheCap / 2
-        let keep = (currentFrame - half)...(currentFrame + half)
-        for key in cache.keys where !keep.contains(key) { cache[key] = nil }
     }
 
     // MARK: - In / out points
@@ -143,23 +155,27 @@ final class CutEditorModel: ObservableObject {
 
     /// OK: write the selection back to the document, then close.
     func confirm() {
-        stop()
         document?.setInOut(id: clip.id, inPoint: inPoint, outPoint: outPoint)
+        teardown()
         onClose?()
     }
 
     /// Cancel: close without writing the selection back.
     func cancel() {
-        stop()
+        teardown()
         onClose?()
     }
 
     // MARK: - Playback (best-effort, no audio in v1 — ADR-0003)
 
-    func togglePlay() { isPlaying ? stop() : play() }
+    func togglePlay() { isPlaying ? stopPlayback() : play() }
 
     func play() {
-        guard let index, !isPlaying, frameCount > 0 else { return }
+        guard let index, let decoder, !isPlaying, frameCount > 0 else { return }
+        // Playback owns the decoder while running; stand the seek worker down.
+        decodeTask?.cancel()
+        decodeTask = nil
+        pendingFrame = nil
         isPlaying = true
         let frameDuration = UInt64(1_000_000_000 / max(1.0, fps))
         playTask = Task { @MainActor [weak self] in
@@ -169,25 +185,57 @@ final class CutEditorModel: ObservableObject {
                 if self.currentFrame >= end { self.isPlaying = false; break }
                 let next = self.currentFrame + 1
                 self.currentFrame = next
+                let frame: NSImage?
                 if let cached = self.cache[next] {
-                    self.image = NSImage(data: cached)
-                    self.prefetchForward(from: next)
-                } else if let data = try? await FrameExtractor.imageData(url: self.url, index: index, frame: next) {
-                    if !self.isPlaying || Task.isCancelled { break }
-                    self.image = NSImage(data: data)
+                    frame = cached
+                } else {
+                    let result = await decoder.image(at: next)
+                    for entry in result.window { self.cacheInsert(entry.frame, entry.image) }
+                    frame = result.image
+                }
+                if !self.isPlaying || Task.isCancelled { break }
+                if let frame {
+                    self.image = frame
+                    self.cacheInsert(next, frame)
                 }
                 try? await Task.sleep(nanoseconds: frameDuration)
             }
         }
     }
 
-    func stop() {
+    func stopPlayback() {
         isPlaying = false
         playTask?.cancel()
         playTask = nil
     }
 
+    /// Stop playback and tear down the decoder process. Called on OK/Cancel and on
+    /// window close so no ffmpeg process is left running.
+    func teardown() {
+        stopPlayback()
+        decodeTask?.cancel()
+        decodeTask = nil
+        pendingFrame = nil
+        decoder?.stop()
+        decoder = nil
+    }
+
     // MARK: - Helpers
+
+    /// Preview decode size: source dimensions capped at 1280 wide (kept even), which
+    /// bounds the per-frame raw size and decode cost. (Pixel aspect ratio is not yet
+    /// applied — anamorphic content previews at storage dimensions for now.)
+    static func previewSize(for video: VideoProperties?) -> (Int, Int) {
+        let sourceW = video?.width ?? 1280
+        let sourceH = video?.height ?? 720
+        guard sourceW > 0, sourceH > 0 else { return (1280, 720) }
+        let maxWidth = 1280
+        guard sourceW > maxWidth else { return (even(sourceW), even(sourceH)) }
+        let scaledH = Int((Double(sourceH) * Double(maxWidth) / Double(sourceW)).rounded())
+        return (maxWidth, even(scaledH))
+    }
+
+    private static func even(_ value: Int) -> Int { value - (value % 2) }
 
     func timecode(forFrame frame: Int) -> String {
         guard fps > 0 else { return "--:--:--:--" }
