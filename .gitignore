@@ -38,6 +38,7 @@ venv/
 *.webm
 tmp/
 samples/
+tmpgenc_screenshots/
 
 # Env
 .env
