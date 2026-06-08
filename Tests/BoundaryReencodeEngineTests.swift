@@ -63,22 +63,33 @@ struct BoundaryReencodeEngineTests {
 
     // MARK: middle stream-copy
 
-    /// Stream-copies the keyframe-bounded middle by cutting the segment muxer at both
-    /// copy-safe boundaries (start_time-corrected DTS midpoints) and keeping the piece
-    /// between them — segment index 1.
-    @Test func copyMiddleCutsAtBothBoundaries() {
+    /// A copy segment is executed by mapping it onto M1's validated segment-muxer cut: an
+    /// interior span (neither end a clip boundary) cuts at both copy-safe boundaries and
+    /// keeps the middle piece. The DTS-midpoint cut times are start_time-corrected.
+    @Test func copySegmentBecomesAnInteriorTwoCutPlan() {
         let index = FrameIndex(
             pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
             keyframeFlags: [true, false, false, false, true, false, false, true])
-        // copyRange 4..<7: cut at frame 4 -> (0.36+0.40)/2 - 0.24 = 0.14;
-        //                  cut at frame 7 -> (0.48+0.52)/2 - 0.24 = 0.26.
-        let args = BoundaryReencodeEngine.copyMiddleArguments(
-            source: src, copyRange: 4..<7, index: index, segmentPattern: "/tmp/mid_%03d.ts")
-        #expect(args == [
-            "-v", "error", "-i", src.path, "-map", "0:v:0", "-c", "copy",
-            "-f", "segment", "-segment_times", "0.14,0.26",
-            "-reset_timestamps", "1", "/tmp/mid_%03d.ts",
-        ])
-        #expect(BoundaryReencodeEngine.middleSegmentIndex == 1)
+        // copy 4..<7 with 8 frames total: both ends interior -> cut at 4 and 7.
+        let plan = BoundaryReencodeEngine.copySegmentPlan(copyRange: 4..<7, index: index)
+        #expect(abs((plan.inSegmentTime ?? -1) - 0.14) < 1e-9)   // (0.36+0.40)/2 - 0.24
+        #expect(abs((plan.outSegmentTime ?? -1) - 0.26) < 1e-9)  // (0.48+0.52)/2 - 0.24
+        #expect(ExportEngine.wantedSegmentIndex(plan: plan) == 1)
+        #expect(ExportEngine.needsCut(plan))
+    }
+
+    /// A copy that runs to the file end needs no out-cut, and one from the file start
+    /// needs no in-cut — so a whole-clip copy is a plain remux (M1 behaviour reused).
+    @Test func copySegmentOmitsCutsAtClipBoundaries() {
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            keyframeFlags: [true, false, false, false, true, false, false, true])
+        let whole = BoundaryReencodeEngine.copySegmentPlan(copyRange: 0..<8, index: index)
+        #expect(whole.inSegmentTime == nil && whole.outSegmentTime == nil)
+        #expect(!ExportEngine.needsCut(whole))
+
+        let toEnd = BoundaryReencodeEngine.copySegmentPlan(copyRange: 4..<8, index: index)
+        #expect(toEnd.inSegmentTime != nil && toEnd.outSegmentTime == nil)
+        #expect(ExportEngine.wantedSegmentIndex(plan: toEnd) == 1)
     }
 }
