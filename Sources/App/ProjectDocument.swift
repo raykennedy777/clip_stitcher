@@ -247,32 +247,51 @@ final class ProjectDocument: ReferenceFileDocument {
         do {
             var items: [ExportItem] = []
             var warnings: [String] = []
-            for (i, clip) in project.clips.enumerated() {
+            for clip in project.clips {
                 guard let url = url(for: clip) else {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await frameIndex(for: clip)
-                let copySafe = CopySafeBoundaryDetector.copySafeFlags(
-                    keyframeFlags: index.keyframeFlags, dts: index.dts)
-                let segments = BoundaryReencodePlanner.plan(
-                    copySafeFlags: copySafe, frameCount: index.count,
-                    inFrame: clip.inPoint, outFrame: clip.outPoint)
-                guard !segments.isEmpty else { throw ExportError.invalidPlan }
-                // Re-encode args matched to the source so the edges concat cleanly with the
-                // copied middle (ADR-0009).
-                let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
-                    codec: clip.video?.codec,
-                    profile: clip.video?.profile,
-                    pixelFormat: clip.video?.pixelFormat,
-                    fieldOrder: clip.video?.fieldOrder)
-                // The audio is re-encoded over the same kept range as the video, in source
-                // presentation time. A `nil` point means that end is the clip boundary (no
-                // cut there), so the audio runs to the file's start/end too.
+                // The kept range as a time window, in source presentation time. A `nil` point
+                // means that end is the clip boundary (no cut there), so audio — and a
+                // conformed clip's video — runs to the file's start/end too.
                 let audioStart = clip.inPoint.map { index.pts[$0] }
                 let audioEnd = clip.outPoint.map { index.pts[$0] }
-                items.append(ExportItem(source: url, codec: clip.video?.codec,
-                                        segments: segments, index: index, encoder: encoder,
-                                        audioStart: audioStart, audioEnd: audioEnd))
+
+                // A clip that doesn't match the target is conformed: a full re-encode of its
+                // kept range to the target spec (ADR-0011). A matching clip is smart-rendered.
+                let target = project.targetClip
+                if let target, let tv = target.video, let cv = clip.video,
+                   !MatchEvaluator.matches(clip, target: target) {
+                    // Resample/remix the audio to the target only when it actually differs, so
+                    // a video-only mismatch keeps the plain audio concat (ADR-0011).
+                    var audioConform: ExportEngine.AudioConform? = nil
+                    if let ca = clip.audio, let ta = target.audio,
+                       ca.sampleRate != ta.sampleRate || ca.channels != ta.channels {
+                        audioConform = ExportEngine.AudioConform(sampleRate: ta.sampleRate, channels: ta.channels)
+                    }
+                    items.append(ExportItem(source: url, codec: tv.codec,
+                                            audioStart: audioStart, audioEnd: audioEnd,
+                                            audioConform: audioConform,
+                                            conform: ConformEngine.VideoConform(sourceVideo: cv, targetVideo: tv)))
+                } else {
+                    let copySafe = CopySafeBoundaryDetector.copySafeFlags(
+                        keyframeFlags: index.keyframeFlags, dts: index.dts)
+                    let segments = BoundaryReencodePlanner.plan(
+                        copySafeFlags: copySafe, frameCount: index.count,
+                        inFrame: clip.inPoint, outFrame: clip.outPoint)
+                    guard !segments.isEmpty else { throw ExportError.invalidPlan }
+                    // Re-encode args matched to the source so the edges concat cleanly with the
+                    // copied middle (ADR-0009).
+                    let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
+                        codec: clip.video?.codec,
+                        profile: clip.video?.profile,
+                        pixelFormat: clip.video?.pixelFormat,
+                        fieldOrder: clip.video?.fieldOrder)
+                    items.append(ExportItem(source: url, codec: clip.video?.codec,
+                                            segments: segments, index: index, encoder: encoder,
+                                            audioStart: audioStart, audioEnd: audioEnd))
+                }
             }
             // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins
             // and mislabels the audio; TS is the right container for this footage (ADR-0008).
