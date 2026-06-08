@@ -19,7 +19,9 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
 4. **Engine Milestone 2 — boundary re-encode.** Frame-exact cuts between keyframes via
    partial-GOP re-encode (Swift + ffmpeg; smartcut as reference). CLI-only, copying only between
    leading-picture-free keyframes. See ADR-0004 and ADR-0009.
-5. **Engine Milestone 3 — conform.** Full re-encode of non-matching clips to the target spec.
+5. **Engine Milestone 3 — conform.** ✅ Full re-encode of non-matching clips to the target spec
+   (display-aspect-aware scale/letterbox, scan-type conversion, color/bit-depth, audio
+   resample/remix), self-verified against the target before shipping. See ADR-0011.
 6. **Output preview.** Sidebar "Preview" plays back the whole assembled timeline.
 
 ### Deferred
