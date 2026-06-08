@@ -279,7 +279,16 @@ final class ProjectDocument: ReferenceFileDocument {
             if project.output.container == .mp4 && items.contains(where: { $0.codec == "mpeg2video" }) {
                 warnings.append("MPEG-2 video sits awkwardly in MP4 (possible glitch at joins) — choose the TS container for this footage.")
             }
-            try await ExportEngine.export(items: items, settings: project.output, to: destination) { p in
+            // The rebuilt audio conforms to the target clip's codec (ADR-0010), falling back
+            // to AAC when that codec can't sit in the chosen container.
+            let targetAudioCodec = project.targetClip?.audio?.codec
+            let audio = ExportEngine.resolveAudioCodec(
+                targetCodec: targetAudioCodec, container: project.output.container)
+            if audio.fellBack, let wanted = targetAudioCodec {
+                warnings.append("\(wanted.uppercased()) audio can’t go in the \(project.output.container.fileExtension.uppercased()) container — exporting AAC audio instead.")
+            }
+            try await ExportEngine.export(items: items, settings: project.output,
+                                          audioCodec: audio.encoder, to: destination) { p in
                 Task { @MainActor in
                     if case .running = self.exportStatus { self.exportStatus = .running(p) }
                 }

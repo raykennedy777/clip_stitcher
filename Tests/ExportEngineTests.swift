@@ -105,7 +105,7 @@ struct ExportEngineTests {
             ExportItem(source: src, codec: "mpeg2video", audioStart: 5.0, audioEnd: 7.0),
         ]
         let args = ExportEngine.audioMuxArguments(videoInput: video, items: items,
-                                                  output: URL(fileURLWithPath: "/tmp/out.ts"))
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.ts"))
         // video copied, audio re-encoded
         #expect(args.contains("0:v:0") && args.contains("-c:v") && args.contains("copy"))
         #expect(args.contains("-c:a") && args.contains("aac"))
@@ -119,10 +119,50 @@ struct ExportEngineTests {
         // audio-only export: no video input, so the first audio source is input 0.
         let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
-                                                  output: URL(fileURLWithPath: "/tmp/a.m4a"))
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/a.m4a"))
         #expect(!args.contains("0:v:0"))
         #expect(!args.contains("-c:v"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
         #expect(fc == "[0:a:0]concat=n=1:v=0:a=1[a]")
+    }
+
+    @Test func audioMuxEncodesToTheGivenCodec() {
+        let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
+                                                  audioCodec: "mp2", output: URL(fileURLWithPath: "/tmp/a.ts"))
+        let ca = args[args.firstIndex(of: "-c:a")! + 1]
+        #expect(ca == "mp2")
+    }
+
+    // MARK: audio codec resolution (ADR-0010)
+
+    @Test func resolvesToTargetCodecWhenContainerAllowsIt() {
+        // mp2 source -> TS: keep mp2, map to its encoder, no fallback warning.
+        let choice = ExportEngine.resolveAudioCodec(targetCodec: "mp2", container: .ts)
+        #expect(choice == ExportEngine.AudioEncodeChoice(codec: "mp2", encoder: "mp2", fellBack: false))
+        // mp3 maps to libmp3lame.
+        #expect(ExportEngine.resolveAudioCodec(targetCodec: "mp3", container: .mkv).encoder == "libmp3lame")
+    }
+
+    @Test func fallsBackToAACForMp2InMp4() {
+        // The one awkward combo: mp2 can't sit cleanly in MP4, so fall back + flag a warning.
+        let choice = ExportEngine.resolveAudioCodec(targetCodec: "mp2", container: .mp4)
+        #expect(choice == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: true))
+    }
+
+    @Test func fallsBackToAACForAnUnmappableCodec() {
+        let choice = ExportEngine.resolveAudioCodec(targetCodec: "dts", container: .mkv)
+        #expect(choice.encoder == "aac" && choice.fellBack)
+    }
+
+    @Test func anAACTargetUsesAACWithoutFlaggingAFallback() {
+        // No codec was declined, so no warning.
+        #expect(ExportEngine.resolveAudioCodec(targetCodec: "aac", container: .mp4)
+                == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
+    }
+
+    @Test func noTargetAudioDefaultsToAACWithoutAWarning() {
+        #expect(ExportEngine.resolveAudioCodec(targetCodec: nil, container: .ts)
+                == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
     }
 }

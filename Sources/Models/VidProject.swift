@@ -7,4 +7,9 @@ struct VidProject: Codable, Equatable {
     var clips: [Clip] = []
     var targetClipID: Clip.ID? = nil
     var output: OutputSettings = OutputSettings()
+
+    /// The clip whose properties define the output spec, if one is set and still present.
+    var targetClip: Clip? {
+        targetClipID.flatMap { id in clips.first { $0.id == id } }
+    }
 }

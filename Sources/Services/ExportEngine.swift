@@ -58,10 +58,54 @@ enum ExportError: LocalizedError {
 /// The argument builders are pure so the exact command shape can be unit-tested; the
 /// recipes themselves were validated against real H.264/HEVC/MPEG-2 footage in the shell.
 enum ExportEngine {
-    /// Re-encode target for the rebuilt audio track. AAC is broadly supported across the
-    /// TS/MKV/MP4 containers and audibly transparent at this bitrate.
-    private static let audioCodec = "aac"
+    /// Fallback audio codec when the target clip's codec can't be used (ADR-0010): AAC is
+    /// broadly supported across the TS/MKV/MP4 containers and audibly transparent at this
+    /// bitrate.
+    static let fallbackAudioCodec = "aac"
     private static let audioBitrate = "192k"
+
+    /// The audio codec the export will actually encode to, and whether it had to fall back.
+    /// The rebuilt audio conforms to the target clip's codec (ADR-0010); `encoder` is the
+    /// ffmpeg encoder name for it, which differs from the ffprobe `codec` for some codecs.
+    struct AudioEncodeChoice: Equatable {
+        var codec: String     // ffprobe codec_name being targeted, e.g. "mp2"
+        var encoder: String   // ffmpeg encoder, e.g. "mp2", "libmp3lame", "aac"
+        var fellBack: Bool     // true when the target codec was declined for AAC (warn the user)
+    }
+
+    /// Resolves the rebuilt audio's codec (ADR-0010): the target clip's audio codec when it
+    /// maps to an encoder and sits cleanly in the chosen container, else AAC. `fellBack` is
+    /// true only when a real target codec was *declined* (container-incompatible or
+    /// unmappable) — not when the target is already AAC, and not when there is no target
+    /// audio (then AAC is just the default, no warning).
+    static func resolveAudioCodec(targetCodec: String?, container: Container) -> AudioEncodeChoice {
+        guard let target = targetCodec else {
+            return AudioEncodeChoice(codec: fallbackAudioCodec, encoder: fallbackAudioCodec, fellBack: false)
+        }
+        if let encoder = audioEncoder(for: target), audioCodecFitsContainer(target, container) {
+            return AudioEncodeChoice(codec: target, encoder: encoder, fellBack: false)
+        }
+        return AudioEncodeChoice(codec: fallbackAudioCodec, encoder: fallbackAudioCodec, fellBack: true)
+    }
+
+    /// The ffmpeg encoder for an ffprobe audio `codec_name`, or `nil` if we don't carry one
+    /// (then the export falls back to AAC). Covers the broadcast codecs seen in this domain.
+    static func audioEncoder(for codec: String) -> String? {
+        switch codec {
+        case "aac": return "aac"
+        case "mp2": return "mp2"
+        case "ac3": return "ac3"
+        case "mp3": return "libmp3lame"
+        default: return nil
+        }
+    }
+
+    /// Whether an audio codec sits cleanly in a container. Verified in the shell: the only
+    /// awkward combo among the supported codecs is mp2 in MP4 (the MP4 muxer relabels it
+    /// mp3); TS and MKV carry mp2/aac/ac3/mp3, and MP4 carries aac/ac3/mp3.
+    static func audioCodecFitsContainer(_ codec: String, _ container: Container) -> Bool {
+        !(container == .mp4 && codec == "mp2")
+    }
 
     /// Whether a codec can be stream-copied into a container. Matroska rejects MPEG-2's
     /// unknown/non-monotonic timestamps at the cut joins (verified in the shell — it fails
@@ -130,7 +174,7 @@ enum ExportEngine {
     /// Final-mux args: copy `videoInput`'s video (when present) and build one continuous,
     /// re-encoded audio track by concatenating each item's source audio range at the
     /// sample level. `videoInput` is `nil` for an audio-only export.
-    static func audioMuxArguments(videoInput: URL?, items: [ExportItem], output: URL) -> [String] {
+    static func audioMuxArguments(videoInput: URL?, items: [ExportItem], audioCodec: String, output: URL) -> [String] {
         var args = ["-v", "error"]
         var audioBase = 0
         if let videoInput {
@@ -168,6 +212,7 @@ enum ExportEngine {
     static func export(
         items: [ExportItem],
         settings: OutputSettings,
+        audioCodec: String = fallbackAudioCodec,
         to destination: URL,
         progress: @escaping (Double) -> Void = { _ in }
     ) async throws {
@@ -219,7 +264,7 @@ enum ExportEngine {
                 }
             }
             if wantsAudio {
-                try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, output: destination),
+                try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, audioCodec: audioCodec, output: destination),
                                     failure: ExportError.concatFailed)
             } else {
                 try placeFile(videoInput!, at: destination)
@@ -230,7 +275,7 @@ enum ExportEngine {
                 let out = separateURL(destination: destination, index: i, count: items.count, ext: ext)
                 let videoInput = wantsVideo ? videoPieces[i] : nil
                 if wantsAudio {
-                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], output: out),
+                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], audioCodec: audioCodec, output: out),
                                         failure: ExportError.cutFailed)
                 } else {
                     try placeFile(videoInput!, at: out)
