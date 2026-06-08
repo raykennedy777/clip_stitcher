@@ -3,10 +3,17 @@ import Foundation
 /// One clip's contribution to an export: where it lives and the keyframe-aligned plan
 /// of what to keep (ADR-0008). `codec` is the ffprobe `codec_name`, used to refuse a
 /// stream-copy concat across different codecs (that is conform — Milestone 3 — not M1).
+///
+/// `audioStart`/`audioEnd` are the clip's kept range in **source presentation time**
+/// (seconds) — the audio is re-encoded over exactly this window so it stays aligned with
+/// the copied video and the joins are gap-free (ADR-0008). `nil` means that end is the
+/// clip boundary (no cut there), matching the video plan's `inSegmentTime`/`outSegmentTime`.
 struct ExportItem {
     var source: URL
     var plan: SegmentPlan
     var codec: String?
+    var audioStart: Double? = nil
+    var audioEnd: Double? = nil
 }
 
 enum ExportError: LocalizedError {
@@ -29,13 +36,24 @@ enum ExportError: LocalizedError {
     }
 }
 
-/// Milestone 1 export: cut each clip at its clean cut points with a pure stream-copy
-/// (the ffmpeg segment muxer), then either concat the pieces into one file or write
-/// them out separately (ADR-0008). No re-encode — frame-exact or it does not cut there.
+/// Milestone 1 export: cut each clip at its clean cut points with a pure video
+/// stream-copy (the ffmpeg segment muxer), then connect or separate the pieces
+/// (ADR-0008). No video re-encode — frame-exact or it does not cut there.
+///
+/// Audio is **re-encoded** rather than copied: a stream-copied audio cut lands on an
+/// audio-packet boundary, not the video cut, leaving the two ~tens of ms apart at every
+/// join (measured ~120 ms on real footage). Instead each clip's audio is decoded over
+/// its exact kept range and concatenated at the sample level into one continuous track
+/// (a single encode — no per-join priming gaps), then muxed against the copied video.
 ///
 /// The argument builders are pure so the exact command shape can be unit-tested; the
 /// recipes themselves were validated against real H.264/HEVC/MPEG-2 footage in the shell.
 enum ExportEngine {
+    /// Re-encode target for the rebuilt audio track. AAC is broadly supported across the
+    /// TS/MKV/MP4 containers and audibly transparent at this bitrate.
+    private static let audioCodec = "aac"
+    private static let audioBitrate = "192k"
+
     /// Whether the plan trims either end. When neither end is cut the clip is copied
     /// whole with a plain remux — the segment muxer would otherwise split it at *every*
     /// keyframe (it only honours explicit cut points).
@@ -49,32 +67,27 @@ enum ExportEngine {
         plan.inSegmentTime == nil ? 0 : 1
     }
 
-    /// ffmpeg args to cut one clip into segments at its clean cut points, copying the
-    /// streams selected by `type`. Cuts are placed by **decode** time (ADR-0008): the
-    /// muxer splits at the first keyframe whose DTS reaches the segment time. With
-    /// explicit `-segment_times` the muxer splits *only* there, so internal keyframes
-    /// are carried through untouched. Assumes `needsCut(plan)`.
-    static func cutArguments(source: URL, plan: SegmentPlan, type: OutputType, segmentPattern: String) -> [String] {
-        var args = ["-v", "error", "-i", source.path]
-        args += streamMaps(type)
-        args += ["-c", "copy", "-f", "segment"]
+    /// ffmpeg args to cut one clip's **video** into segments at its clean cut points.
+    /// Cuts are placed by **decode** time (ADR-0008): the muxer splits at the first
+    /// keyframe whose DTS reaches the segment time. With explicit `-segment_times` the
+    /// muxer splits *only* there, so internal keyframes are carried through untouched.
+    /// Assumes `needsCut(plan)`.
+    static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String) -> [String] {
+        var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy", "-f", "segment"]
         let times = [plan.inSegmentTime, plan.outSegmentTime].compactMap { $0 }
         args += ["-segment_times", times.map(Self.timeString).joined(separator: ",")]
         args += ["-reset_timestamps", "1", segmentPattern]
         return args
     }
 
-    /// ffmpeg args to copy a whole clip to a single file (no cut), selecting streams by
-    /// `type`. Used when the plan trims neither end.
-    static func remuxArguments(source: URL, type: OutputType, output: URL) -> [String] {
-        var args = ["-v", "error", "-i", source.path]
-        args += streamMaps(type)
-        args += ["-c", "copy", output.path]
-        return args
+    /// ffmpeg args to copy a whole clip's **video** to a single file (no cut). Used when
+    /// the plan trims neither end.
+    static func remuxArguments(source: URL, output: URL) -> [String] {
+        ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy", output.path]
     }
 
-    /// ffmpeg args to join already-cut, same-codec pieces with the concat demuxer — a
-    /// pure stream-copy, so the join is frame-exact.
+    /// ffmpeg args to join already-cut, same-codec video pieces with the concat demuxer —
+    /// a pure stream-copy, so the join is frame-exact.
     static func concatArguments(listFile: URL, output: URL) -> [String] {
         ["-v", "error", "-f", "concat", "-safe", "0", "-i", listFile.path, "-c", "copy", output.path]
     }
@@ -86,12 +99,35 @@ enum ExportEngine {
             .joined(separator: "\n") + "\n"
     }
 
-    private static func streamMaps(_ type: OutputType) -> [String] {
-        switch type {
-        case .videoAndAudio: return ["-map", "0:v:0", "-map", "0:a:0?"]
-        case .videoOnly:     return ["-map", "0:v:0"]
-        case .audioOnly:     return ["-map", "0:a:0"]
+    /// Input args selecting one clip's audio source range: a fast seek to `start` and a
+    /// read duration. `-ss`/`-t` before `-i` are input options. An open start/end omits
+    /// the corresponding flag (read from the file start / to the file end).
+    static func audioInputArgs(source: URL, start: Double?, end: Double?) -> [String] {
+        var a: [String] = []
+        if let start { a += ["-ss", timeString(start)] }
+        if let end { a += ["-t", timeString(end - (start ?? 0))] }
+        a += ["-i", source.path]
+        return a
+    }
+
+    /// Final-mux args: copy `videoInput`'s video (when present) and build one continuous,
+    /// re-encoded audio track by concatenating each item's source audio range at the
+    /// sample level. `videoInput` is `nil` for an audio-only export.
+    static func audioMuxArguments(videoInput: URL?, items: [ExportItem], output: URL) -> [String] {
+        var args = ["-v", "error"]
+        var audioBase = 0
+        if let videoInput {
+            args += ["-i", videoInput.path]
+            audioBase = 1
         }
+        for item in items {
+            args += audioInputArgs(source: item.source, start: item.audioStart, end: item.audioEnd)
+        }
+        let labels = (0..<items.count).map { "[\(audioBase + $0):a:0]" }.joined()
+        args += ["-filter_complex", "\(labels)concat=n=\(items.count):v=0:a=1[a]"]
+        if videoInput != nil { args += ["-map", "0:v:0", "-c:v", "copy"] }
+        args += ["-map", "[a]", "-c:a", audioCodec, "-b:a", audioBitrate, output.path]
+        return args
     }
 
     /// ffmpeg prints times locale-independently; format without scientific notation or
@@ -108,9 +144,10 @@ enum ExportEngine {
 
     // MARK: - Orchestration
 
-    /// Runs the full export: cut every clip, then connect or separate per `settings`.
-    /// `destination` is the file the user chose; in `.separate` mode each clip is written
-    /// alongside it as `name-1.ext`, `name-2.ext`, … `progress` reports 0…1.
+    /// Runs the full export: cut every clip's video, then connect or separate per
+    /// `settings`, rebuilding the audio track when the output includes audio. `destination`
+    /// is the file the user chose; in `.separate` mode each clip is written alongside it as
+    /// `name-1.ext`, `name-2.ext`, … `progress` reports 0…1.
     static func export(
         items: [ExportItem],
         settings: OutputSettings,
@@ -120,8 +157,7 @@ enum ExportEngine {
         guard !items.isEmpty else { throw ExportError.noClips }
         guard items.allSatisfy(\.plan.isValid) else { throw ExportError.invalidPlan }
         if settings.mode == .connect {
-            let codecs = Set(items.map { $0.codec ?? "?" })
-            guard codecs.count == 1 else { throw ExportError.mixedCodecs }
+            guard Set(items.map { $0.codec ?? "?" }).count == 1 else { throw ExportError.mixedCodecs }
         }
 
         let ffmpeg = try FFTools.ffmpegURL()
@@ -131,40 +167,91 @@ enum ExportEngine {
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: work) }
 
-        // Cut each clip to its single wanted piece. This is the bulk of the work, so it
-        // drives most of the progress bar (a concat at the end is comparatively cheap).
-        let cutShare = settings.mode == .connect ? 0.9 : 1.0
-        var pieces: [URL] = []
-        for (i, item) in items.enumerated() {
-            let piece: URL
-            if needsCut(item.plan) {
-                let pattern = work.appendingPathComponent("clip\(i)_%03d.\(ext)").path
-                try await runFFmpeg(ffmpeg, cutArguments(source: item.source, plan: item.plan,
-                                                          type: settings.type, segmentPattern: pattern),
-                                    failure: ExportError.cutFailed)
-                piece = work.appendingPathComponent(
-                    String(format: "clip\(i)_%03d.\(ext)", wantedSegmentIndex(plan: item.plan))
-                )
-            } else {
-                piece = work.appendingPathComponent("clip\(i).\(ext)")
-                try await runFFmpeg(ffmpeg, remuxArguments(source: item.source, type: settings.type, output: piece),
-                                    failure: ExportError.cutFailed)
+        let wantsVideo = settings.type != .audioOnly
+        let wantsAudio = settings.type != .videoOnly
+
+        // 1. Cut each clip's video to a single piece (copy). The bulk of the work.
+        var videoPieces: [URL] = []
+        if wantsVideo {
+            for (i, item) in items.enumerated() {
+                videoPieces.append(try await cutVideoPiece(ffmpeg, item: item, index: i, work: work, ext: ext))
+                progress(0.7 * Double(i + 1) / Double(items.count))
             }
-            guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
-            pieces.append(piece)
-            progress(cutShare * Double(i + 1) / Double(items.count))
         }
 
+        // 2. Assemble the output(s).
         switch settings.mode {
         case .connect:
-            let listFile = work.appendingPathComponent("concat.txt")
-            try concatListContents(pieces: pieces).write(to: listFile, atomically: true, encoding: .utf8)
-            try await runFFmpeg(ffmpeg, concatArguments(listFile: listFile, output: destination),
-                                failure: ExportError.concatFailed)
+            var videoInput: URL? = nil
+            if wantsVideo {
+                if videoPieces.count == 1 {
+                    videoInput = videoPieces[0]
+                } else {
+                    let joined = work.appendingPathComponent("joined_video.\(ext)")
+                    try await concatVideo(ffmpeg, pieces: videoPieces, to: joined, work: work)
+                    videoInput = joined
+                }
+            }
+            if wantsAudio {
+                try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, output: destination),
+                                    failure: ExportError.concatFailed)
+            } else {
+                try placeFile(videoInput!, at: destination)
+            }
+
         case .separate:
-            try writeSeparately(pieces: pieces, to: destination, ext: ext)
+            for (i, item) in items.enumerated() {
+                let out = separateURL(destination: destination, index: i, count: items.count, ext: ext)
+                let videoInput = wantsVideo ? videoPieces[i] : nil
+                if wantsAudio {
+                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], output: out),
+                                        failure: ExportError.cutFailed)
+                } else {
+                    try placeFile(videoInput!, at: out)
+                }
+                progress(0.7 + 0.3 * Double(i + 1) / Double(items.count))
+            }
         }
         progress(1.0)
+    }
+
+    /// Cuts one clip's video to a single piece in `work` and returns it.
+    private static func cutVideoPiece(_ ffmpeg: URL, item: ExportItem, index i: Int, work: URL, ext: String) async throws -> URL {
+        let piece: URL
+        if needsCut(item.plan) {
+            let pattern = work.appendingPathComponent("clip\(i)_%03d.\(ext)").path
+            try await runFFmpeg(ffmpeg, cutArguments(source: item.source, plan: item.plan, segmentPattern: pattern),
+                                failure: ExportError.cutFailed)
+            piece = work.appendingPathComponent(String(format: "clip\(i)_%03d.\(ext)", wantedSegmentIndex(plan: item.plan)))
+        } else {
+            piece = work.appendingPathComponent("clip\(i).\(ext)")
+            try await runFFmpeg(ffmpeg, remuxArguments(source: item.source, output: piece),
+                                failure: ExportError.cutFailed)
+        }
+        guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
+        return piece
+    }
+
+    private static func concatVideo(_ ffmpeg: URL, pieces: [URL], to output: URL, work: URL) async throws {
+        let listFile = work.appendingPathComponent("concat-\(UUID().uuidString).txt")
+        try concatListContents(pieces: pieces).write(to: listFile, atomically: true, encoding: .utf8)
+        try await runFFmpeg(ffmpeg, concatArguments(listFile: listFile, output: output), failure: ExportError.concatFailed)
+    }
+
+    /// Destination for one clip in `.separate` mode: the chosen name for a single clip,
+    /// else `name-1.ext`, `name-2.ext`, …
+    private static func separateURL(destination: URL, index i: Int, count: Int, ext: String) -> URL {
+        let dir = destination.deletingLastPathComponent()
+        let stem = destination.deletingPathExtension().lastPathComponent
+        let name = count == 1 ? "\(stem).\(ext)" : "\(stem)-\(i + 1).\(ext)"
+        return dir.appendingPathComponent(name)
+    }
+
+    /// Moves a produced file to its destination, replacing any existing file.
+    private static func placeFile(_ src: URL, at dest: URL) throws {
+        let fm = FileManager.default
+        try? fm.removeItem(at: dest)
+        try fm.moveItem(at: src, to: dest)
     }
 
     /// Runs ffmpeg and turns a non-zero exit into `failure(stderr)`.
@@ -172,20 +259,6 @@ enum ExportEngine {
         let result = try await ProcessRunner.run(ffmpeg, args)
         guard result.status == 0 else {
             throw failure(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
-        }
-    }
-
-    /// Moves each cut piece next to the chosen file as `name-1.ext`, `name-2.ext`, …
-    /// (a single clip keeps the chosen name).
-    private static func writeSeparately(pieces: [URL], to destination: URL, ext: String) throws {
-        let fm = FileManager.default
-        let dir = destination.deletingLastPathComponent()
-        let stem = destination.deletingPathExtension().lastPathComponent
-        for (i, piece) in pieces.enumerated() {
-            let name = pieces.count == 1 ? "\(stem).\(ext)" : "\(stem)-\(i + 1).\(ext)"
-            let out = dir.appendingPathComponent(name)
-            try? fm.removeItem(at: out)
-            try fm.moveItem(at: piece, to: out)
         }
     }
 }

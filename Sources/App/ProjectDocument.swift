@@ -236,10 +236,10 @@ final class ProjectDocument: ReferenceFileDocument {
 
     // MARK: - Export (Milestone 1: keyframe-aligned cuts)
 
-    /// Runs a Milestone 1 export to `destination`: each clip cut at its clean cut points
-    /// and copied — no re-encode (ADR-0008). Progress and outcome are published in
-    /// `exportStatus` for the Output view; the clip in/out points are snapped to clean
-    /// cut points, and any that moved are reported as warnings.
+    /// Runs a Milestone 1 export to `destination`: each clip's video cut at its clean cut
+    /// points and copied (no video re-encode, ADR-0008), with the audio rebuilt so it stays
+    /// aligned at the joins. Progress and outcome are published in `exportStatus` for the
+    /// Output view; in/out points snapped to clean cut points are reported as warnings.
     @MainActor
     func export(to destination: URL) async {
         exportStatus = .running(0)
@@ -258,7 +258,18 @@ final class ProjectDocument: ReferenceFileDocument {
                 }
                 if plan.inMoved { warnings.append("\(label): in point snapped to the nearest clean cut point.") }
                 if plan.outMoved { warnings.append("\(label): out point snapped to the nearest clean cut point.") }
-                items.append(ExportItem(source: url, plan: plan, codec: clip.video?.codec))
+                // The audio is re-encoded over the same kept range as the video, in source
+                // presentation time. A `nil` cut time means that end is the clip boundary
+                // (no cut there), so the audio runs to the file's start/end too.
+                let audioStart = plan.inSegmentTime == nil ? nil : index.pts[plan.inFrame]
+                let audioEnd = plan.outSegmentTime == nil ? nil : index.pts[plan.outFrame]
+                items.append(ExportItem(source: url, plan: plan, codec: clip.video?.codec,
+                                        audioStart: audioStart, audioEnd: audioEnd))
+            }
+            // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins
+            // and mislabels the audio; TS is the right container for this footage (ADR-0008).
+            if project.output.container == .mp4 && items.contains(where: { $0.codec == "mpeg2video" }) {
+                warnings.append("MPEG-2 video sits awkwardly in MP4 (possible glitch at joins) — choose the TS container for this footage.")
             }
             try await ExportEngine.export(items: items, settings: project.output, to: destination) { p in
                 Task { @MainActor in
@@ -269,6 +280,12 @@ final class ProjectDocument: ReferenceFileDocument {
         } catch {
             exportStatus = .failed(error.localizedDescription)
         }
+    }
+
+    /// The container that best fits a source codec for a stream-copy export: MPEG-2
+    /// broadcast video belongs in TS; H.264/HEVC default to MP4 (ADR-0008).
+    static func defaultContainer(forCodec codec: String) -> Container {
+        codec == "mpeg2video" ? .ts : .mp4
     }
 
     // MARK: - Import pipeline
@@ -288,6 +305,12 @@ final class ProjectDocument: ReferenceFileDocument {
                 p.clips[i].video = probe.video
                 p.clips[i].audio = probe.audio
                 p.clips[i].duration = probe.duration
+                // Default the container to suit the first clip's codec (broadcast MPEG-2
+                // belongs in TS, not MP4). Only on the first clip, so it never overrides a
+                // container the user later chose.
+                if p.clips.count == 1, let codec = probe.video?.codec {
+                    p.output.container = Self.defaultContainer(forCodec: codec)
+                }
                 commit(p)
             }
             importStates[id] = .indexing
