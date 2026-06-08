@@ -61,16 +61,31 @@ enum FrameIndexer {
         }
 
         let text = try String(contentsOf: dump, encoding: .utf8)
+        return parseIndex(csv: text, codec: codec)
+    }
+
+    /// Builds the index from ffprobe's `packet=pts_time,dts_time,flags` CSV. Pure, so the
+    /// timestamp handling is unit-testable.
+    ///
+    /// Every decoded frame gets exactly one entry — the index frame count must equal the
+    /// stream's, because the cut editor numbers frames by this index and the export cuts
+    /// by it, so a dropped frame would desync the two and make cuts land wrong (a long
+    /// MPEG-2 file had 436 packets with an `N/A` pts that, when dropped, shifted the
+    /// numbering and let stream-copied frames leak past the count). A missing pts is
+    /// filled from the dts (and vice-versa); only a packet with *neither* timestamp — which
+    /// can't be ordered or cut at — is skipped.
+    static func parseIndex(csv: String, codec: String?) -> FrameIndex {
         var entries: [(pts: Double, dts: Double, keyframe: Bool)] = []
-        text.enumerateLines { line, _ in
+        csv.enumerateLines { line, _ in
             // e.g. "1.480000,1.440000,K__," → fields: [pts, dts, flags, ""]
             let fields = line.split(separator: ",", omittingEmptySubsequences: false)
-            guard let first = fields.first, let pts = Double(first) else { return }
-            // dts_time can be "N/A" (e.g. the first packet); fall back to pts so the
-            // entry still orders sensibly.
-            let dts = fields.count > 1 ? (Double(fields[1]) ?? pts) : pts
+            let pts = fields.first.flatMap { Double($0) }
+            let dts = fields.count > 1 ? Double(fields[1]) : nil
+            // Fill a missing pts from the dts so the frame still orders and is counted;
+            // skip only when the packet has no timestamp at all.
+            guard let pts = pts ?? dts else { return }
             let keyframe = fields.count > 2 && fields[2].contains("K")
-            entries.append((pts, dts, keyframe))
+            entries.append((pts, dts ?? pts, keyframe))
         }
         entries.sort { $0.pts < $1.pts }
         let dts = entries.map(\.dts)
