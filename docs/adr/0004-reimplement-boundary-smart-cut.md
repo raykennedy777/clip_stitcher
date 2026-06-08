@@ -16,3 +16,6 @@ single-toolchain, reproducible-ffmpeg-command approach in ADR-0002.
 - We own the hardest code in the project, but every step stays inspectable as an ffmpeg command.
 - `smartcut`'s interlaced-MPEG-2 behavior is undocumented; interlacing must be tested early
   regardless (see ROADMAP risks).
+- How this is actually built — CLI-only, copying only between leading-picture-free keyframes,
+  with the minimal-re-encode libav approach deferred to a future milestone — is recorded in
+  ADR-0009.

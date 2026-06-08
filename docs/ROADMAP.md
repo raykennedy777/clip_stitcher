@@ -17,9 +17,19 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
 3. **Engine Milestone 1 — keyframe-aligned cuts.** Export via pure stream-copy + concat when
    in/out points land on keyframes. Proves the full pipeline end to end with zero re-encode.
 4. **Engine Milestone 2 — boundary re-encode.** Frame-exact cuts between keyframes via
-   partial-GOP re-encode (Swift + ffmpeg; smartcut as reference). See ADR-0004.
+   partial-GOP re-encode (Swift + ffmpeg; smartcut as reference). CLI-only, copying only between
+   leading-picture-free keyframes. See ADR-0004 and ADR-0009.
 5. **Engine Milestone 3 — conform.** Full re-encode of non-matching clips to the target spec.
 6. **Output preview.** Sidebar "Preview" plays back the whole assembled timeline.
+
+### Deferred
+
+- **Engine Milestone 2b — minimal-re-encode open-GOP smart render (libav).** Re-encode only the
+  orphaned leading pictures at open-GOP seams (smartcut-style), so MPEG-2/HEVC between-keyframe
+  cuts re-encode ~1 GOP per edge instead of the larger CLI-only span. Requires in-process libav
+  (reversing ADR-0002) plus NAL parsing + decoder priming. Justified only if the M2 CLI-only
+  re-encode cost proves painful in practice. See ADR-0009 for the decision and the baseline
+  measurements; M2's design keeps this path open.
 
 ## Output options (Output view)
 
@@ -29,8 +39,10 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
 
 ## Standing risks — test early
 
-- **Interlaced MPEG-2.** Broadcast TS is usually interlaced; smartcut's handling is
-  undocumented. Verify before trusting Milestone 2.
+- ~~**Interlaced MPEG-2.**~~ *Retired:* the MPEG-2 re-encode preserves field order
+  (`-flags +ildct+ilme -top 1`), verified in the shell (ADR-0009). The real open-GOP risk is the
+  leading-picture seam, which is codec-orthogonal — handled by copying only between
+  leading-picture-free keyframes.
 - **Audio alignment at cuts.** TMPGEnc exposes "audio gap correction"; expect to handle A/V
   offset at join boundaries.
 - **Notarization with bundled binaries.** Confirm the signing/notarization flow early so it
