@@ -40,7 +40,10 @@ enum FrameIndexer {
     ///
     /// The packet dump can be large on long clips, so it streams to a temp file
     /// rather than through a pipe.
-    static func buildIndex(url: URL) async throws -> FrameIndex {
+    ///
+    /// `codec` (the ffprobe `codec_name`, e.g. `h264`/`hevc`/`mpeg2video`) selects how
+    /// clean cut points are detected (ADR-0008); pass `nil` if unknown for the safe path.
+    static func buildIndex(url: URL, codec: String? = nil) async throws -> FrameIndex {
         let ffprobe = try FFTools.ffprobeURL()
         let dump = FileManager.default.temporaryDirectory
             .appendingPathComponent("vidconform-index-\(UUID().uuidString).csv")
@@ -70,10 +73,15 @@ enum FrameIndexer {
             entries.append((pts, dts, keyframe))
         }
         entries.sort { $0.pts < $1.pts }
+        let dts = entries.map(\.dts)
+        let keyframeFlags = entries.map(\.keyframe)
         return FrameIndex(
             pts: entries.map(\.pts),
-            dts: entries.map(\.dts),
-            keyframeFlags: entries.map(\.keyframe)
+            dts: dts,
+            keyframeFlags: keyframeFlags,
+            cleanCutFlags: CleanCutDetector.cleanCutFlags(
+                keyframeFlags: keyframeFlags, dts: dts, codec: codec
+            )
         )
     }
 }
