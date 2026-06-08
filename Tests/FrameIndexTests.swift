@@ -71,4 +71,15 @@ struct SegmentTimeStartOffsetTests {
         // -> midpoint 0.25; minus the 0.24 start_time -> 0.01.
         #expect(abs(index.segmentTime(forCutAt: 3) - 0.01) < 1e-9)
     }
+
+    /// The first-decoded frame has no predecessor: its cut must sit at or below its own
+    /// (start_time-relative) DTS so the muxer still selects it — which is legitimately
+    /// negative when the first DTS precedes the first PTS. (Degenerate: a copy boundary is
+    /// never the first-decoded frame, so this never drives a real cut — pinned to document
+    /// the branch.) Frame 0 here decodes first (dts 0.20, the minimum); relative DTS is
+    /// 0.20 - 0.24 = -0.04, so the cut must be ≤ -0.04.
+    @Test func segmentTimeForTheFirstDecodedFrameStaysAtOrBelowItsRelativeDTS() {
+        let relativeDTS = index.dts[0] - index.pts[0]  // -0.04
+        #expect(index.segmentTime(forCutAt: 0) <= relativeDTS + 1e-9)
+    }
 }

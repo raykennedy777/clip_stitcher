@@ -45,13 +45,20 @@ struct FrameIndex {
     /// midpoint sits safely under `n`'s DTS, dodging a float `>=` edge that would
     /// otherwise bump the cut to the next keyframe (ADR-0008). When B-frames reorder the
     /// stream this differs from a PTS midpoint, which can fall *after* the keyframe's DTS
-    /// and skip it. For the first-decoded frame there is no predecessor, so the cut sits
-    /// just before its DTS.
+    /// and skip it.
     ///
     /// The segment muxer measures `-segment_times` *relative to the stream's start_time*
     /// (the first presentation PTS), so that offset is subtracted: a source starting at,
     /// say, 0.24s would otherwise cut one keyframe late. Streams starting at zero are
     /// unaffected (the offset is 0).
+    ///
+    /// When `n` is the first-*decoded* frame there is no predecessor, so the cut is the
+    /// file start: any time at or below `n`'s (offset-relative) DTS selects it, and there
+    /// is no earlier keyframe to skip onto. `cut/2 - startOffset` is always ≤ that relative
+    /// DTS (`cut - startOffset`) for `cut ≥ 0`, so it selects `n`. The relative value is
+    /// legitimately negative on a stream whose first DTS precedes its first PTS — that just
+    /// means "cut at/before the start", which is correct here. (In practice this branch is
+    /// unreachable for a real cut: a copy boundary is never the first-decoded frame.)
     func segmentTime(forCutAt n: Int) -> Double {
         let startOffset = pts.first ?? 0
         let cut = dts[n]
