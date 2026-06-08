@@ -31,6 +31,13 @@ _Avoid_: I-frame cut, clean cut
 Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)
 
+**Audio rebuild**:
+Decoding every clip's audio over its kept range and re-encoding it as one continuous,
+sample-level track to the target clip's audio codec — done on every export, since audio is
+never stream-copied (it would drift from the frame-exact video cut). Distinct from smart
+render, which copies what it can.
+_Avoid_: audio passthrough, audio copy
+
 ### Domain concepts
 
 **Target clip**:
