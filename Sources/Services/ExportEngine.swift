@@ -20,6 +20,7 @@ enum ExportError: LocalizedError {
     case noClips
     case invalidPlan
     case mixedCodecs
+    case unsupportedContainer(codec: String, container: String)
     case cutFailed(String)
     case concatFailed(String)
     case missingSegment
@@ -29,6 +30,8 @@ enum ExportError: LocalizedError {
         case .noClips: return "There are no clips to export."
         case .invalidPlan: return "A clip's in/out points collapse to nothing after snapping to clean cut points."
         case .mixedCodecs: return "Connecting clips of different codecs into one file needs re-encoding (a later milestone). Export them separately, or use clips that share a codec."
+        case .unsupportedContainer(let codec, let container):
+            return "The \(container.uppercased()) container can't carry \(codec) video by stream-copy. Choose TS (recommended for this footage) or MP4."
         case .cutFailed(let d): return "Could not cut a clip.\n\(d)"
         case .concatFailed(let d): return "Could not join the clips.\n\(d)"
         case .missingSegment: return "The expected output segment was not produced."
@@ -53,6 +56,14 @@ enum ExportEngine {
     /// TS/MKV/MP4 containers and audibly transparent at this bitrate.
     private static let audioCodec = "aac"
     private static let audioBitrate = "192k"
+
+    /// Whether a codec can be stream-copied into a container. Matroska rejects MPEG-2's
+    /// unknown/non-monotonic timestamps at the cut joins (verified in the shell — it fails
+    /// with "Can't write packet with unknown timestamp"); TS and MP4 tolerate them, and
+    /// H.264/HEVC are fine in all three.
+    static func streamCopyCompatible(codec: String?, container: Container) -> Bool {
+        !(container == .mkv && codec == "mpeg2video")
+    }
 
     /// Whether the plan trims either end. When neither end is cut the clip is copied
     /// whole with a plain remux — the segment muxer would otherwise split it at *every*
@@ -158,6 +169,9 @@ enum ExportEngine {
         guard items.allSatisfy(\.plan.isValid) else { throw ExportError.invalidPlan }
         if settings.mode == .connect {
             guard Set(items.map { $0.codec ?? "?" }).count == 1 else { throw ExportError.mixedCodecs }
+        }
+        for item in items where !streamCopyCompatible(codec: item.codec, container: settings.container) {
+            throw ExportError.unsupportedContainer(codec: item.codec ?? "this", container: settings.container.fileExtension)
         }
 
         let ffmpeg = try FFTools.ffmpegURL()

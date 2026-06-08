@@ -68,6 +68,16 @@ struct ExportEngineTests {
         #expect(list.contains("file '/tmp/b.mp4'"))
     }
 
+    @Test func mpeg2IsIncompatibleWithMkvButFineElsewhere() {
+        // Matroska can't stream-copy MPEG-2 (unknown-timestamp at joins); TS/MP4 can.
+        #expect(ExportEngine.streamCopyCompatible(codec: "mpeg2video", container: .mkv) == false)
+        #expect(ExportEngine.streamCopyCompatible(codec: "mpeg2video", container: .ts) == true)
+        #expect(ExportEngine.streamCopyCompatible(codec: "mpeg2video", container: .mp4) == true)
+        // H.264/HEVC are fine in every container.
+        #expect(ExportEngine.streamCopyCompatible(codec: "h264", container: .mkv) == true)
+        #expect(ExportEngine.streamCopyCompatible(codec: "hevc", container: .mkv) == true)
+    }
+
     // MARK: - Audio re-encode
 
     @Test func audioInputArgsSeekAndLimitToTheClipRange() {
