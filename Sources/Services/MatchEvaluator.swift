@@ -21,10 +21,14 @@ enum MatchEvaluator {
             cv.colorTransfer == tv.colorTransfer &&
             cv.colorRange == tv.colorRange
 
+        // Audio codec is deliberately not compared: the track is always rebuilt and
+        // re-encoded to the target's codec (ADR-0010), so a source codec mismatch never
+        // forces a video re-encode. Sample rate and channels stay — the rebuild preserves
+        // them rather than resampling, so the sample-level concat needs them to match.
         let audioMatches: Bool
         switch (clip.audio, target.audio) {
         case let (a?, b?):
-            audioMatches = a.codec == b.codec && a.sampleRate == b.sampleRate && a.channels == b.channels
+            audioMatches = a.sampleRate == b.sampleRate && a.channels == b.channels
         case (nil, nil):
             audioMatches = true
         default:
