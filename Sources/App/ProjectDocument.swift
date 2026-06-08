@@ -10,6 +10,14 @@ enum ImportState: Equatable {
     case failed(String)
 }
 
+/// Export progress and outcome. Runtime-only — not persisted.
+enum ExportStatus: Equatable {
+    case idle
+    case running(Double)
+    case done(warnings: [String])
+    case failed(String)
+}
+
 /// The document backing one VidConform project. A reference type so async import
 /// work (ffprobe + frame indexing) can mutate published state safely.
 ///
@@ -22,6 +30,8 @@ final class ProjectDocument: ReferenceFileDocument {
 
     @Published var project: VidProject
     @Published var importStates: [Clip.ID: ImportState] = [:]
+    /// Runtime-only export progress/outcome, surfaced by the Output view.
+    @Published var exportStatus: ExportStatus = .idle
 
     /// Set by the UI from the environment so mutations register undo and mark the
     /// document dirty. May be nil very early in a window's lifetime.
@@ -222,6 +232,43 @@ final class ProjectDocument: ReferenceFileDocument {
         let built = try await FrameIndexer.buildIndex(url: url, codec: clip.video?.codec)
         frameIndexCache[clip.id] = built
         return built
+    }
+
+    // MARK: - Export (Milestone 1: keyframe-aligned cuts)
+
+    /// Runs a Milestone 1 export to `destination`: each clip cut at its clean cut points
+    /// and copied — no re-encode (ADR-0008). Progress and outcome are published in
+    /// `exportStatus` for the Output view; the clip in/out points are snapped to clean
+    /// cut points, and any that moved are reported as warnings.
+    @MainActor
+    func export(to destination: URL) async {
+        exportStatus = .running(0)
+        do {
+            var items: [ExportItem] = []
+            var warnings: [String] = []
+            for (i, clip) in project.clips.enumerated() {
+                guard let url = url(for: clip) else {
+                    throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
+                }
+                let index = try await frameIndex(for: clip)
+                let plan = ExportPlanner.plan(index: index, inFrame: clip.inPoint, outFrame: clip.outPoint)
+                let label = "Clip \(i + 1) (\(clip.displayName))"
+                if !plan.isValid {
+                    throw ExportError.invalidPlan
+                }
+                if plan.inMoved { warnings.append("\(label): in point snapped to the nearest clean cut point.") }
+                if plan.outMoved { warnings.append("\(label): out point snapped to the nearest clean cut point.") }
+                items.append(ExportItem(source: url, plan: plan, codec: clip.video?.codec))
+            }
+            try await ExportEngine.export(items: items, settings: project.output, to: destination) { p in
+                Task { @MainActor in
+                    if case .running = self.exportStatus { self.exportStatus = .running(p) }
+                }
+            }
+            exportStatus = .done(warnings: warnings)
+        } catch {
+            exportStatus = .failed(error.localizedDescription)
+        }
     }
 
     // MARK: - Import pipeline
