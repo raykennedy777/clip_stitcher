@@ -28,6 +28,7 @@ enum ExportError: LocalizedError {
     case cutFailed(String)
     case concatFailed(String)
     case missingSegment
+    case verificationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +40,7 @@ enum ExportError: LocalizedError {
         case .cutFailed(let d): return "Could not cut a clip.\n\(d)"
         case .concatFailed(let d): return "Could not join the clips.\n\(d)"
         case .missingSegment: return "The expected output segment was not produced."
+        case .verificationFailed(let d): return "The cut did not verify and was not saved.\n\(d)"
         }
     }
 }

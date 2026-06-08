@@ -153,12 +153,50 @@ enum BoundaryReencodeEngine {
             pieces.append(piece)
         }
 
-        if pieces.count == 1 { return pieces[0] }
-        let joined = work.appendingPathComponent("c\(clipIndex)_joined.\(ext)")
-        let listFile = work.appendingPathComponent("c\(clipIndex)_concat.txt")
-        try ExportEngine.concatListContents(pieces: pieces).write(to: listFile, atomically: true, encoding: .utf8)
-        try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
-        return joined
+        let result: URL
+        if pieces.count == 1 {
+            result = pieces[0]
+        } else {
+            let joined = work.appendingPathComponent("c\(clipIndex)_joined.\(ext)")
+            let listFile = work.appendingPathComponent("c\(clipIndex)_concat.txt")
+            try ExportEngine.concatListContents(pieces: pieces).write(to: listFile, atomically: true, encoding: .utf8)
+            try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
+            result = joined
+        }
+        try await verifyPiece(ffmpeg, result, expectedFrames: expectedFrameCount(plan))
+        return result
+    }
+
+    /// The video frame count a produced piece must have: the planned segments tile the kept
+    /// presentation range contiguously, so it is their combined length. `verifyPiece` checks
+    /// the real output against this (ADR-0008 verifies by frame count, never by reading the
+    /// reset output timestamps).
+    static func expectedFrameCount(_ plan: [PlannedSegment]) -> Int {
+        plan.reduce(0) { $0 + $1.range.count }
+    }
+
+    /// Verifies a produced video piece before it ships (ADR-0008). Two checks, either of
+    /// which throws rather than letting a silently-wrong cut through:
+    ///   1. Frame count — the output's video packet count must equal the planned total,
+    ///      catching any frame leaking past a cut (a desynced index once made a 2-clip
+    ///      export come out +10 frames).
+    ///   2. Decode check — a full `-xerror` decode pass must succeed, catching a corrupt
+    ///      re-encode→copy seam (e.g. orphaned leading pictures) that a frame count alone
+    ///      would miss.
+    private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedFrames: Int) async throws {
+        let actual = try await FrameIndexer.frameCount(url: piece)
+        guard actual == expectedFrames else {
+            throw ExportError.verificationFailed(
+                "Produced \(actual) video frames but the cut kept \(expectedFrames).")
+        }
+        let decode = try await ProcessRunner.run(
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
+        guard decode.status == 0 else {
+            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
+                $0.isEmpty ? nil : $0
+            } ?? "decode exited \(decode.status)"
+            throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
+        }
     }
 
     /// Runs ffmpeg and turns a non-zero exit into a `cutFailed` with its stderr.

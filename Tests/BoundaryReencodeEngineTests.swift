@@ -121,4 +121,21 @@ struct BoundaryReencodeEngineTests {
         #expect(toEnd.inSegmentTime != nil && toEnd.outSegmentTime == nil)
         #expect(ExportEngine.wantedSegmentIndex(plan: toEnd) == 1)
     }
+
+    // MARK: output verification (ADR-0008)
+
+    /// The expected frame count a produced piece is verified against is the planned
+    /// segments' combined length — they tile the kept range contiguously, so a head
+    /// re-encode + copy + tail re-encode that kept frames [3,12) totals 9.
+    @Test func expectedFrameCountIsTheCombinedSegmentLength() {
+        let plan = [
+            PlannedSegment(kind: .reEncode, range: 3..<5),
+            PlannedSegment(kind: .copy, range: 5..<10),
+            PlannedSegment(kind: .reEncode, range: 10..<12),
+        ]
+        #expect(BoundaryReencodeEngine.expectedFrameCount(plan) == 9)
+        // A whole-clip single-copy plan: its own length.
+        #expect(BoundaryReencodeEngine.expectedFrameCount(
+            [PlannedSegment(kind: .copy, range: 0..<100)]) == 100)
+    }
 }
