@@ -18,6 +18,9 @@ struct ExportItem {
     var encoder: [String] = []
     var audioStart: Double? = nil
     var audioEnd: Double? = nil
+    /// Set when this clip is conformed and its audio must be resampled/remixed to the target
+    /// before the sample-level concat (ADR-0011); `nil` for a matching clip (no audio filter).
+    var audioConform: ExportEngine.AudioConform? = nil
 }
 
 enum ExportError: LocalizedError {
@@ -63,6 +66,13 @@ enum ExportEngine {
     /// bitrate.
     static let fallbackAudioCodec = "aac"
     private static let audioBitrate = "192k"
+
+    /// The target audio rate/channels a conforming clip's audio is resampled/remixed to
+    /// before the sample-level concat (ADR-0011).
+    struct AudioConform: Equatable {
+        var sampleRate: Int
+        var channels: Int
+    }
 
     /// The audio codec the export will actually encode to, and whether it had to fall back.
     /// The rebuilt audio conforms to the target clip's codec (ADR-0010); `encoder` is the
@@ -215,8 +225,23 @@ enum ExportEngine {
         for item in items {
             args += audioInputArgs(source: item.source, start: item.audioStart, end: item.audioEnd)
         }
-        let labels = (0..<items.count).map { "[\(audioBase + $0):a:0]" }.joined()
-        args += ["-filter_complex", "\(labels)concat=n=\(items.count):v=0:a=1[a]"]
+        // A conforming leg is resampled/remixed to the target before the concat; a matching
+        // leg is referenced directly, so an all-matching export keeps its plain concat shape.
+        var prechains: [String] = []
+        var labels: [String] = []
+        for (i, item) in items.enumerated() {
+            let input = "[\(audioBase + i):a:0]"
+            if let ac = item.audioConform {
+                let label = "[ca\(i)]"
+                prechains.append("\(input)\(ConformEngine.audioFilter(sampleRate: ac.sampleRate, channels: ac.channels))\(label)")
+                labels.append(label)
+            } else {
+                labels.append(input)
+            }
+        }
+        let concat = "\(labels.joined())concat=n=\(items.count):v=0:a=1[a]"
+        let filterComplex = prechains.isEmpty ? concat : prechains.joined(separator: ";") + ";" + concat
+        args += ["-filter_complex", filterComplex]
         if videoInput != nil { args += ["-map", "0:v:0", "-c:v", "copy"] }
         args += ["-map", "[a]", "-c:a", audioCodec, "-b:a", audioBitrate, output.path]
         return args

@@ -115,6 +115,23 @@ struct ExportEngineTests {
         #expect(args.last == "/tmp/out.ts")
     }
 
+    @Test func audioMuxConformsAMismatchedLegBeforeConcat() {
+        // A conforming clip's audio is resampled/remixed to the target before the concat, so
+        // the sample-level concat stays valid; a matching leg is referenced directly. The
+        // all-matching command shape (above) is unchanged when no leg conforms.
+        let video = URL(fileURLWithPath: "/tmp/joined.ts")
+        let items = [
+            ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2),
+            ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
+                       audioConform: ExportEngine.AudioConform(sampleRate: 48000, channels: 2)),
+        ]
+        let args = ExportEngine.audioMuxArguments(videoInput: video, items: items,
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.ts"))
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(fc == "[2:a:0]aresample=48000,aformat=channel_layouts=stereo[ca1];"
+                    + "[1:a:0][ca1]concat=n=2:v=0:a=1[a]")
+    }
+
     @Test func audioMuxWithoutVideoStartsAudioInputsAtZero() {
         // audio-only export: no video input, so the first audio source is input 0.
         let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]

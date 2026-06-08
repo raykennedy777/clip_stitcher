@@ -62,4 +62,15 @@ struct ConformEngineTests {
         #expect(!args.contains("-profile:v"))
         #expect(args.contains("libx264") && args.contains("-level"))
     }
+
+    // MARK: audio conform (ADR-0011)
+
+    /// A conforming clip's audio is resampled and remixed to the target rate and channels
+    /// before it enters the sample-level concat, so the concat inputs stay aligned.
+    @Test func audioFilterResamplesAndRemixesToTarget() {
+        #expect(ConformEngine.audioFilter(sampleRate: 48000, channels: 2)
+            == "aresample=48000,aformat=channel_layouts=stereo")
+        #expect(ConformEngine.audioFilter(sampleRate: 44100, channels: 1)
+            == "aresample=44100,aformat=channel_layouts=mono")
+    }
 }

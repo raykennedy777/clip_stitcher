@@ -14,6 +14,26 @@ enum ConformEngine {
         return ["-vf", chain] + encoderArgs(target: target)
     }
 
+    /// The audio filter that conforms a clip's audio to the target's sample rate and channel
+    /// layout before the sample-level concat (ADR-0011). Applied per conforming leg in the
+    /// audio rebuild; matching clips need no filter. Idempotent when already on target.
+    static func audioFilter(sampleRate: Int, channels: Int) -> String {
+        "aresample=\(sampleRate),aformat=channel_layouts=\(channelLayout(channels))"
+    }
+
+    /// ffmpeg channel-layout name for a channel count (the broadcast cases). An uncommon
+    /// count falls back to stereo — rate/channels are match dimensions referenced from the
+    /// target, and the footage in this domain is mono/stereo.
+    static func channelLayout(_ channels: Int) -> String {
+        switch channels {
+        case 1: return "mono"
+        case 2: return "stereo"
+        case 6: return "5.1"
+        case 8: return "7.1"
+        default: return "stereo"
+        }
+    }
+
     // MARK: - Filter chain
 
     private static func filterChain(source: VideoProperties, target: VideoProperties) -> [String] {
