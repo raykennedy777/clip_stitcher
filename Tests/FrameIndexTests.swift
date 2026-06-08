@@ -77,3 +77,28 @@ struct SegmentTimeWithBFramesTests {
         #expect(abs(index.segmentTime(forCutAt: 3) - 0.05) < 1e-9)
     }
 }
+
+/// A real source rarely starts at timestamp zero: the container reports a `start_time`
+/// (the first presentation frame's PTS), and ffmpeg's segment muxer measures
+/// `-segment_times` *relative to it* — it subtracts start_time before comparing each
+/// keyframe's decode time. So the cut time must have that start offset removed, or the
+/// muxer lands one keyframe late on any non-zero-start_time source (verified: the MPEG-2
+/// test clip starts at 0.24s and otherwise cuts a full GOP late). Zero-start sources are
+/// unaffected, which is why the cases above — all starting at 0.0 — need no adjustment.
+struct SegmentTimeStartOffsetTests {
+    // The IPBB shape above, shifted so the stream starts at start_time 0.24:
+    //   pres frame: 0     1     2     3(K)  4     5
+    //   pts:        0.24  0.28  0.32  0.36  0.40  0.44
+    //   dts:        0.20  0.22  0.24  0.26  0.28  0.30
+    private let index = FrameIndex(
+        pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44],
+        dts: [0.20, 0.22, 0.24, 0.26, 0.28, 0.30],
+        keyframeFlags: [true, false, false, true, false, false]
+    )
+
+    @Test func segmentTimeSubtractsTheStreamStartTime() {
+        // Keyframe at presentation frame 3: dts 0.26, decode-predecessor dts 0.24
+        // -> midpoint 0.25; minus the 0.24 start_time -> 0.01.
+        #expect(abs(index.segmentTime(forCutAt: 3) - 0.01) < 1e-9)
+    }
+}

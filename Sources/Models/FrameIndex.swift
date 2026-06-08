@@ -68,13 +68,19 @@ struct FrameIndex {
     /// stream this differs from a PTS midpoint, which can fall *after* the keyframe's DTS
     /// and skip it. For the first-decoded frame there is no predecessor, so the cut sits
     /// just before its DTS.
+    ///
+    /// The segment muxer measures `-segment_times` *relative to the stream's start_time*
+    /// (the first presentation PTS), so that offset is subtracted: a source starting at,
+    /// say, 0.24s would otherwise cut one keyframe late. Streams starting at zero are
+    /// unaffected (the offset is 0).
     func segmentTime(forCutAt n: Int) -> Double {
+        let startOffset = pts.first ?? 0
         let cut = dts[n]
         var predecessor: Double? = nil
         for d in dts where d < cut {
             if predecessor == nil || d > predecessor! { predecessor = d }
         }
-        guard let prev = predecessor else { return cut / 2 }
-        return (prev + cut) / 2
+        guard let prev = predecessor else { return cut / 2 - startOffset }
+        return (prev + cut) / 2 - startOffset
     }
 }
