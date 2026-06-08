@@ -142,8 +142,8 @@ enum ExportEngine {
     }
 
     /// ffmpeg prints times locale-independently; format without scientific notation or
-    /// a trailing locale decimal separator.
-    private static func timeString(_ t: Double) -> String {
+    /// a trailing locale decimal separator. Shared with the M2 boundary-re-encode engine.
+    static func timeString(_ t: Double) -> String {
         var s = String(format: "%.6f", t)
         // trim trailing zeros / dot so 0.30 -> "0.3", matching the de-risk recipe.
         if s.contains(".") {
