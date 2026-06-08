@@ -5,6 +5,13 @@ import Foundation
 /// dimension. The argument builders are pure so the exact command shape can be unit-tested;
 /// the recipes were validated against the real H.264/HEVC/MPEG-2 footage in the shell.
 enum ConformEngine {
+    /// The probed video specs a conformed clip is transformed between: its own source spec and
+    /// the target clip's. Carried on an `ExportItem` to mark it for conform (ADR-0011).
+    struct VideoConform: Equatable {
+        var sourceVideo: VideoProperties
+        var targetVideo: VideoProperties
+    }
+
     /// ffmpeg video filter-chain + encoder args that transform `source` → `target`. The
     /// chain runs deinterlace (if any) → scale → pad (only on a display-aspect mismatch) →
     /// setsar → format → fps/interlace; the encoder then pins the target codec, profile,
@@ -32,6 +39,88 @@ enum ConformEngine {
         case 8: return "7.1"
         default: return "stereo"
         }
+    }
+
+    /// Full ffmpeg args to conform one clip's kept range into `output`: a fast seek to the
+    /// in-point time and a read duration (the same time window the audio uses), then the
+    /// source→target transform. Audio is dropped; the rebuilt track is muxed in later. An
+    /// open start/end omits the corresponding seek flag (read from file start / to file end).
+    static func conformArguments(
+        source: URL, start: Double?, end: Double?,
+        sourceVideo: VideoProperties, targetVideo: VideoProperties, output: URL
+    ) -> [String] {
+        var args = ["-v", "error"]
+        if let start { args += ["-ss", ExportEngine.timeString(start)] }
+        if let end { args += ["-t", ExportEngine.timeString(end - (start ?? 0))] }
+        args += ["-i", source.path]
+        args += conformVideoArgs(source: sourceVideo, target: targetVideo)
+        args += ["-an", output.path]
+        return args
+    }
+
+    // MARK: - Orchestration
+
+    /// Conforms one clip's kept range into a single video piece in `work` and returns it. The
+    /// piece is a from-scratch re-encode to the target spec (`conformArguments`), then it
+    /// **self-verifies before it ships** (ADR-0011): re-probed it must match the target's
+    /// video spec, and a full `-xerror` decode must pass — otherwise the export fails loudly
+    /// naming the offending dimension, never shipping a near-miss. Audio is rebuilt separately.
+    static func produceConformedPiece(
+        _ ffmpeg: URL, source: URL, conform: VideoConform,
+        start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int
+    ) async throws -> URL {
+        let piece = work.appendingPathComponent("c\(clipIndex)_conform.\(ext)")
+        let args = conformArguments(source: source, start: start, end: end,
+                                    sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
+                                    output: piece)
+        let result = try await ProcessRunner.run(ffmpeg, args)
+        guard result.status == 0 else {
+            throw ExportError.cutFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
+        }
+        guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
+        try await verifyConformed(ffmpeg, piece, target: conform.targetVideo)
+        return piece
+    }
+
+    /// Verifies a conformed piece against the acceptance bar (ADR-0011): its re-probed video
+    /// must match the target spec, and a full decode must succeed.
+    private static func verifyConformed(_ ffmpeg: URL, _ piece: URL, target: VideoProperties) async throws {
+        let probed = try await MediaProbe.probe(url: piece).video
+        guard let v = probed, MatchEvaluator.videoMatches(v, target) else {
+            throw ExportError.verificationFailed(
+                "The conformed clip did not reach the target spec (\(mismatchSummary(probed, target))).")
+        }
+        let decode = try await ProcessRunner.run(
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
+        guard decode.status == 0 else {
+            let detail = String(data: decode.stderr, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "decode exited \(decode.status)"
+            throw ExportError.verificationFailed("A decode check failed on the conformed clip.\n\(detail)")
+        }
+    }
+
+    /// Names the dimensions a conformed output missed, for a useful failure message.
+    private static func mismatchSummary(_ got: VideoProperties?, _ want: VideoProperties) -> String {
+        guard let g = got else { return "no video stream" }
+        var diffs: [String] = []
+        if g.codec != want.codec { diffs.append("codec \(g.codec)≠\(want.codec)") }
+        if g.profile != want.profile { diffs.append("profile \(g.profile ?? "?")≠\(want.profile ?? "?")") }
+        if g.level != want.level { diffs.append("level \(g.level ?? "?")≠\(want.level ?? "?")") }
+        if g.width != want.width || g.height != want.height {
+            diffs.append("size \(g.width)x\(g.height)≠\(want.width)x\(want.height)")
+        }
+        if g.frameRate != want.frameRate { diffs.append("fps \(g.frameRate)≠\(want.frameRate)") }
+        if g.pixelFormat != want.pixelFormat { diffs.append("pixfmt \(g.pixelFormat)≠\(want.pixelFormat)") }
+        if MatchEvaluator.normalizedFieldOrder(g.fieldOrder) != MatchEvaluator.normalizedFieldOrder(want.fieldOrder) {
+            diffs.append("field \(g.fieldOrder ?? "?")≠\(want.fieldOrder ?? "?")")
+        }
+        if g.sampleAspectRatio != want.sampleAspectRatio {
+            diffs.append("sar \(g.sampleAspectRatio ?? "?")≠\(want.sampleAspectRatio ?? "?")")
+        }
+        if g.colorPrimaries != want.colorPrimaries || g.colorTransfer != want.colorTransfer || g.colorRange != want.colorRange {
+            diffs.append("color")
+        }
+        return diffs.isEmpty ? "video stream differs" : diffs.joined(separator: ", ")
     }
 
     // MARK: - Filter chain

@@ -7,19 +7,7 @@ enum MatchEvaluator {
     static func matches(_ clip: Clip, target: Clip) -> Bool {
         guard let cv = clip.video, let tv = target.video else { return false }
 
-        let videoMatches =
-            cv.codec == tv.codec &&
-            cv.profile == tv.profile &&
-            cv.level == tv.level &&
-            cv.width == tv.width &&
-            cv.height == tv.height &&
-            cv.frameRate == tv.frameRate &&
-            cv.pixelFormat == tv.pixelFormat &&
-            normalizedFieldOrder(cv.fieldOrder) == normalizedFieldOrder(tv.fieldOrder) &&
-            cv.sampleAspectRatio == tv.sampleAspectRatio &&
-            cv.colorPrimaries == tv.colorPrimaries &&
-            cv.colorTransfer == tv.colorTransfer &&
-            cv.colorRange == tv.colorRange
+        let videoMatches = self.videoMatches(cv, tv)
 
         // Audio codec is deliberately not compared: the track is always rebuilt and
         // re-encoded to the target's codec (ADR-0010), so a source codec mismatch never
@@ -36,6 +24,24 @@ enum MatchEvaluator {
         }
 
         return videoMatches && audioMatches
+    }
+
+    /// Compares the video properties alone on the strict dimensions (ADR-0005). Exposed so a
+    /// conformed video piece — which carries no audio yet — can be verified against the
+    /// target's video spec before the audio is muxed in (ADR-0011).
+    static func videoMatches(_ cv: VideoProperties, _ tv: VideoProperties) -> Bool {
+        cv.codec == tv.codec &&
+        cv.profile == tv.profile &&
+        cv.level == tv.level &&
+        cv.width == tv.width &&
+        cv.height == tv.height &&
+        cv.frameRate == tv.frameRate &&
+        cv.pixelFormat == tv.pixelFormat &&
+        normalizedFieldOrder(cv.fieldOrder) == normalizedFieldOrder(tv.fieldOrder) &&
+        cv.sampleAspectRatio == tv.sampleAspectRatio &&
+        cv.colorPrimaries == tv.colorPrimaries &&
+        cv.colorTransfer == tv.colorTransfer &&
+        cv.colorRange == tv.colorRange
     }
 
     /// Canonicalises an ffprobe `field_order` for comparison and conform targeting: a missing,

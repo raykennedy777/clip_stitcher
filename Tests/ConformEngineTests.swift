@@ -63,6 +63,29 @@ struct ConformEngineTests {
         #expect(args.contains("libx264") && args.contains("-level"))
     }
 
+    // MARK: full conform command (kept range)
+
+    private let src = URL(fileURLWithPath: "/clips/in.mkv")
+    private let out = URL(fileURLWithPath: "/tmp/conf.ts")
+
+    /// Conform re-encodes only the kept range as a time window (ADR-0011): a fast seek to the
+    /// in-point time and a read duration, then the transform args, dropping audio (rebuilt
+    /// separately). An open end reads to the file end (no `-t`).
+    @Test func conformArgumentsSeekTheKeptRangeAndDropAudio() {
+        #expect(ConformEngine.conformArguments(
+            source: src, start: 5.0, end: 9.0, sourceVideo: hevc, targetVideo: mpeg2, output: out)
+            == ["-v", "error", "-ss", "5", "-t", "4", "-i", src.path]
+                + ConformEngine.conformVideoArgs(source: hevc, target: mpeg2)
+                + ["-an", out.path])
+    }
+
+    @Test func conformArgumentsOmitSeekAndDurationAtClipBounds() {
+        let args = ConformEngine.conformArguments(
+            source: src, start: nil, end: nil, sourceVideo: hevc, targetVideo: mpeg2, output: out)
+        #expect(!args.contains("-ss") && !args.contains("-t"))
+        #expect(args.prefix(4) == ["-v", "error", "-i", src.path])
+    }
+
     // MARK: audio conform (ADR-0011)
 
     /// A conforming clip's audio is resampled and remixed to the target rate and channels

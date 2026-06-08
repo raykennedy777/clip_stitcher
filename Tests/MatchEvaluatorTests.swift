@@ -65,6 +65,14 @@ struct MatchEvaluatorTests {
         #expect(MatchEvaluator.normalizedFieldOrder("unknown") == "progressive")
     }
 
+    @Test func videoMatchesComparesVideoDimensionsAlone() {
+        // The conform self-verify checks a produced video piece (which has no audio) against
+        // the target's video spec, so the video comparison is exposed on its own.
+        #expect(MatchEvaluator.videoMatches(video(), video()))
+        #expect(!MatchEvaluator.videoMatches(video(width: 1280), video(width: 1920)))
+        #expect(MatchEvaluator.videoMatches(video(field: nil), video(field: "progressive")))
+    }
+
     @Test func videoMismatchFailsRegardlessOfAudio() {
         let target = clip(video: video(width: 1920), audio: audio())
         let other = clip(video: video(width: 1280), audio: audio())
