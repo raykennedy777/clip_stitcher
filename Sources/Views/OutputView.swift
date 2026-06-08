@@ -41,8 +41,9 @@ struct OutputView: View {
                 }
                 exportOutcome
             } footer: {
-                Text("Cuts land only on clean cut points (keyframes safe for a copy). "
-                     + "Points that aren't are snapped to the nearest one.")
+                Text("Cuts land on the exact frame you chose. Everything between the "
+                     + "boundaries is stream-copied untouched; only the partial GOPs at "
+                     + "the in/out points are re-encoded.")
             }
         }
         .formStyle(.grouped)
