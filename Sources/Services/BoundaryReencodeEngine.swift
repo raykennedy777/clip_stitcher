@@ -9,16 +9,29 @@ import Foundation
 /// The argument builders are pure so the exact command shape can be unit-tested.
 enum BoundaryReencodeEngine {
     /// ffmpeg video-encode args matched to the source so the re-encoded GOPs concat
-    /// cleanly with the copied middle (ADR-0009): same codec family and pixel format,
-    /// and — for interlaced MPEG-2 — the field flags that preserve `field_order`. SAR is
-    /// carried through by ffmpeg automatically, so no `-aspect` is needed (verified).
-    static func reencodeVideoArgs(codec: String?, pixelFormat: String?, fieldOrder: String?) -> [String] {
+    /// cleanly with the copied middle (ADR-0009): same codec family, pixel format, and
+    /// — when it maps to a known encoder profile — the source's profile; plus, for
+    /// interlaced MPEG-2, the field flags that preserve `field_order`. SAR is carried
+    /// through by ffmpeg automatically, so no `-aspect` is needed (verified).
+    ///
+    /// In practice the pixel format already pins the profile for the common cases
+    /// (yuv420p10le ⇒ libx265 main10, yuv420p ⇒ libx264 high / mpeg2 main — all verified
+    /// against the real footage). `-profile:v` is added for robustness so an *unusual*
+    /// source (e.g. a Baseline H.264 clip that would otherwise re-encode to High) still
+    /// matches; an unrecognised profile string is omitted rather than guessed, leaving the
+    /// encoder's working inference in place.
+    static func reencodeVideoArgs(
+        codec: String?, profile: String? = nil, pixelFormat: String?, fieldOrder: String?
+    ) -> [String] {
         let pixFmt = pixelFormat ?? "yuv420p"
         switch codec {
         case "hevc":
-            return ["-c:v", "libx265", "-pix_fmt", pixFmt]
+            var args = ["-c:v", "libx265", "-pix_fmt", pixFmt]
+            if let p = encoderProfile(profile, codec: "hevc") { args += ["-profile:v", p] }
+            return args
         case "mpeg2video":
             var args = ["-c:v", "mpeg2video", "-pix_fmt", pixFmt]
+            if let p = encoderProfile(profile, codec: "mpeg2video") { args += ["-profile:v", p] }
             switch fieldOrder {
             case "tt", "tb": args += ["-flags", "+ildct+ilme", "-top", "1"]
             case "bb", "bt": args += ["-flags", "+ildct+ilme", "-top", "0"]
@@ -26,7 +39,38 @@ enum BoundaryReencodeEngine {
             }
             return args
         default:   // h264 and anything else -> libx264
-            return ["-c:v", "libx264", "-pix_fmt", pixFmt]
+            var args = ["-c:v", "libx264", "-pix_fmt", pixFmt]
+            if let p = encoderProfile(profile, codec: "h264") { args += ["-profile:v", p] }
+            return args
+        }
+    }
+
+    /// Maps an ffprobe `profile` string to the `-profile:v` token its re-encode encoder
+    /// expects, for the profiles seen in this domain (broadcast/sports H.264, HEVC, and
+    /// MPEG-2). Returns `nil` for an unrecognised profile — the caller then omits
+    /// `-profile:v` and lets the encoder infer one from the pixel format, which matches
+    /// the source for every common case (verified). Never guesses: a wrong token would
+    /// abort the encode.
+    static func encoderProfile(_ profile: String?, codec: String) -> String? {
+        guard let profile else { return nil }
+        switch codec {
+        case "h264":
+            return [
+                "Constrained Baseline": "baseline", "Baseline": "baseline", "Main": "main",
+                "High": "high", "High 10": "high10", "High 4:2:2": "high422",
+                "High 4:4:4 Predictive": "high444",
+            ][profile]
+        case "hevc":
+            return [
+                "Main": "main", "Main 10": "main10", "Main 12": "main12",
+                "Main Still Picture": "mainstillpicture",
+            ][profile]
+        case "mpeg2video":
+            return [
+                "Simple": "simple", "Main": "main", "High": "high", "4:2:2": "422",
+            ][profile]
+        default:
+            return nil
         }
     }
 

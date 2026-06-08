@@ -37,6 +37,35 @@ struct BoundaryReencodeEngineTests {
             == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p"])
     }
 
+    // MARK: source-profile matching (ADR-0009)
+
+    /// A recognised source profile is pinned with `-profile:v` so an unusual source still
+    /// matches — e.g. a Baseline H.264 clip that the encoder would otherwise lift to High.
+    @Test func aKnownSourceProfileIsMatchedExplicitly() {
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "h264", profile: "Baseline", pixelFormat: "yuv420p", fieldOrder: "progressive")
+            == ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "baseline"])
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "hevc", profile: "Main 10", pixelFormat: "yuv420p10le", fieldOrder: "unknown")
+            == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-profile:v", "main10"])
+        // The profile arg precedes the interlace flags for MPEG-2.
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "mpeg2video", profile: "Main", pixelFormat: "yuv420p", fieldOrder: "tt")
+            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-profile:v", "main",
+                "-flags", "+ildct+ilme", "-top", "1"])
+    }
+
+    /// An unrecognised profile is omitted rather than guessed (a wrong token aborts the
+    /// encode); the encoder then infers a profile from the pixel format, which matches the
+    /// source for every common case.
+    @Test func anUnknownProfileIsOmittedNotGuessed() {
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "h264", profile: "Some Exotic Profile", pixelFormat: "yuv420p", fieldOrder: "progressive")
+            == ["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        #expect(BoundaryReencodeEngine.encoderProfile(nil, codec: "h264") == nil)
+        #expect(BoundaryReencodeEngine.encoderProfile("Main 10", codec: "mpeg2video") == nil)
+    }
+
     // MARK: head/tail re-encode
 
     /// Re-encodes a partial-GOP range by input-seeking to the keyframe at/before the

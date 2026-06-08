@@ -262,6 +262,7 @@ final class ProjectDocument: ReferenceFileDocument {
                 // copied middle (ADR-0009).
                 let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
                     codec: clip.video?.codec,
+                    profile: clip.video?.profile,
                     pixelFormat: clip.video?.pixelFormat,
                     fieldOrder: clip.video?.fieldOrder)
                 // The audio is re-encoded over the same kept range as the video, in source
