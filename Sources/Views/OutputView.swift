@@ -25,8 +25,12 @@ struct OutputView: View {
                 Picker("Type", selection: output.type) {
                     ForEach(OutputType.allCases) { Text($0.title).tag($0) }
                 }
-                Picker("Container", selection: output.container) {
-                    ForEach(Container.allCases) { Text($0.title).tag($0) }
+                // The video container doesn't apply to an audio-only export — it's written as
+                // an audio-elementary file whose type follows the audio codec (#1).
+                if document.project.output.type != .audioOnly {
+                    Picker("Container", selection: output.container) {
+                        ForEach(Container.allCases) { Text($0.title).tag($0) }
+                    }
                 }
             }
 
@@ -78,7 +82,16 @@ struct OutputView: View {
     }
 
     private func chooseDestinationAndExport() {
-        let ext = document.project.output.container.fileExtension
+        // An audio-only export is an audio-elementary file named for the (target-derived)
+        // audio codec, not the video container (#1 / ADR-0010).
+        let out = document.project.output
+        let ext: String
+        if out.type == .audioOnly {
+            let choice = ExportEngine.resolveAudioOnlyCodec(targetCodec: document.project.targetClip?.audio?.codec)
+            ext = ExportEngine.audioFileExtension(forEncoder: choice.encoder)
+        } else {
+            ext = out.container.fileExtension
+        }
         let panel = NSSavePanel()
         panel.title = "Export"
         panel.prompt = "Export"

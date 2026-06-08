@@ -88,6 +88,37 @@ enum ExportEngine {
         return AudioEncodeChoice(codec: fallbackAudioCodec, encoder: fallbackAudioCodec, fellBack: true)
     }
 
+    /// Resolves the audio codec for an **audio-only** export (`OutputType.audioOnly`). Unlike
+    /// the video+audio case there is no video container to fit — the audio is written to its
+    /// own elementary file (see `audioFileExtension`) — so the only constraint is having an
+    /// encoder for the target codec, else AAC. `fellBack` is true only when a real target
+    /// codec was unmappable.
+    static func resolveAudioOnlyCodec(targetCodec: String?) -> AudioEncodeChoice {
+        if let target = targetCodec, let encoder = audioEncoder(for: target) {
+            return AudioEncodeChoice(codec: target, encoder: encoder, fellBack: false)
+        }
+        return AudioEncodeChoice(codec: fallbackAudioCodec, encoder: fallbackAudioCodec,
+                                 fellBack: targetCodec != nil)
+    }
+
+    /// The file extension for an audio-only export, by the ffmpeg encoder being used: each
+    /// codec gets its natural elementary-stream container (verified in the shell). The chosen
+    /// video Container (TS/MKV/MP4) does not apply to an audio-only output.
+    static func audioFileExtension(forEncoder encoder: String) -> String {
+        switch encoder {
+        case "mp2": return "mp2"
+        case "ac3": return "ac3"
+        case "libmp3lame": return "mp3"
+        default: return "m4a"   // aac (and any future fallback)
+        }
+    }
+
+    /// The output file extension for a whole export: the audio-elementary extension for an
+    /// audio-only output, otherwise the chosen video container's extension.
+    static func outputExtension(type: OutputType, container: Container, audioEncoder: String) -> String {
+        type == .audioOnly ? audioFileExtension(forEncoder: audioEncoder) : container.fileExtension
+    }
+
     /// The ffmpeg encoder for an ffprobe audio `codec_name`, or `nil` if we don't carry one
     /// (then the export falls back to AAC). Covers the broadcast codecs seen in this domain.
     static func audioEncoder(for codec: String) -> String? {
@@ -229,7 +260,9 @@ enum ExportEngine {
         }
 
         let ffmpeg = try FFTools.ffmpegURL()
-        let ext = settings.container.fileExtension
+        // Video pieces always use the container extension; an audio-only output has no video
+        // pieces and is written as an audio-elementary file (ADR-0010 / #1).
+        let ext = outputExtension(type: settings.type, container: settings.container, audioEncoder: audioCodec)
         let work = FileManager.default.temporaryDirectory
             .appendingPathComponent("vidconform-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)

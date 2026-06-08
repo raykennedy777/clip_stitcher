@@ -279,13 +279,17 @@ final class ProjectDocument: ReferenceFileDocument {
             if project.output.container == .mp4 && items.contains(where: { $0.codec == "mpeg2video" }) {
                 warnings.append("MPEG-2 video sits awkwardly in MP4 (possible glitch at joins) — choose the TS container for this footage.")
             }
-            // The rebuilt audio conforms to the target clip's codec (ADR-0010), falling back
-            // to AAC when that codec can't sit in the chosen container.
+            // The rebuilt audio conforms to the target clip's codec (ADR-0010). For an
+            // audio-only output the codec goes in its own elementary file, so there is no
+            // video container to fit; otherwise it must fit the chosen container (AAC fallback).
             let targetAudioCodec = project.targetClip?.audio?.codec
-            let audio = ExportEngine.resolveAudioCodec(
-                targetCodec: targetAudioCodec, container: project.output.container)
+            let audio = project.output.type == .audioOnly
+                ? ExportEngine.resolveAudioOnlyCodec(targetCodec: targetAudioCodec)
+                : ExportEngine.resolveAudioCodec(targetCodec: targetAudioCodec, container: project.output.container)
             if audio.fellBack, let wanted = targetAudioCodec {
-                warnings.append("\(wanted.uppercased()) audio can’t go in the \(project.output.container.fileExtension.uppercased()) container — exporting AAC audio instead.")
+                let dest = project.output.type == .audioOnly
+                    ? "an audio file" : "the \(project.output.container.fileExtension.uppercased()) container"
+                warnings.append("\(wanted.uppercased()) audio can’t go in \(dest) — exporting AAC audio instead.")
             }
             try await ExportEngine.export(items: items, settings: project.output,
                                           audioCodec: audio.encoder, to: destination) { p in

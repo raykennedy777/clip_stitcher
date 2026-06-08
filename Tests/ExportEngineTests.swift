@@ -165,4 +165,33 @@ struct ExportEngineTests {
         #expect(ExportEngine.resolveAudioCodec(targetCodec: nil, container: .ts)
                 == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
     }
+
+    // MARK: audio-only output (#1)
+
+    @Test func audioOnlyKeepsTheTargetCodecRegardlessOfContainer() {
+        // No video container to fit — mp2 stays mp2 even though it wouldn't fit MP4 video.
+        #expect(ExportEngine.resolveAudioOnlyCodec(targetCodec: "mp2")
+                == ExportEngine.AudioEncodeChoice(codec: "mp2", encoder: "mp2", fellBack: false))
+        // An unmappable codec still falls back to AAC and flags it.
+        let dts = ExportEngine.resolveAudioOnlyCodec(targetCodec: "dts")
+        #expect(dts.encoder == "aac" && dts.fellBack)
+        // No target audio -> AAC, no warning.
+        #expect(ExportEngine.resolveAudioOnlyCodec(targetCodec: nil)
+                == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
+    }
+
+    @Test func audioOnlyExtensionFollowsTheEncoder() {
+        #expect(ExportEngine.audioFileExtension(forEncoder: "aac") == "m4a")
+        #expect(ExportEngine.audioFileExtension(forEncoder: "mp2") == "mp2")
+        #expect(ExportEngine.audioFileExtension(forEncoder: "ac3") == "ac3")
+        #expect(ExportEngine.audioFileExtension(forEncoder: "libmp3lame") == "mp3")
+    }
+
+    @Test func outputExtensionUsesAudioExtForAudioOnlyElseContainer() {
+        // audio-only ignores the video container and follows the codec.
+        #expect(ExportEngine.outputExtension(type: .audioOnly, container: .mp4, audioEncoder: "mp2") == "mp2")
+        // video outputs keep the container extension.
+        #expect(ExportEngine.outputExtension(type: .videoAndAudio, container: .ts, audioEncoder: "mp2") == "ts")
+        #expect(ExportEngine.outputExtension(type: .videoOnly, container: .mkv, audioEncoder: "aac") == "mkv")
+    }
 }
