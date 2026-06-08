@@ -50,12 +50,29 @@ targets:
               public.filename-extension:
                 - vidconform
 
+  VidConformTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: VidConform
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.conmotogroup.vidconform.tests
+        GENERATE_INFOPLIST_FILE: YES
+
 schemes:
   VidConform:
     build:
       targets:
         VidConform: all
+        VidConformTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - VidConformTests
     archive:
       config: Release
