@@ -62,7 +62,7 @@ final class CutEditorModel: ObservableObject {
             if let document {
                 built = try await document.frameIndex(for: clip)
             } else {
-                built = try await FrameIndexer.buildIndex(url: url, codec: clip.video?.codec)
+                built = try await FrameIndexer.buildIndex(url: url)
             }
             index = built
             frameCount = built.count

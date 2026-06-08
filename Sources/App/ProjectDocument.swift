@@ -229,7 +229,7 @@ final class ProjectDocument: ReferenceFileDocument {
         guard let url = url(for: clip) else {
             throw FFError.indexFailed("Source file not found.")
         }
-        let built = try await FrameIndexer.buildIndex(url: url, codec: clip.video?.codec)
+        let built = try await FrameIndexer.buildIndex(url: url)
         frameIndexCache[clip.id] = built
         return built
     }

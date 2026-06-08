@@ -17,35 +17,14 @@ struct FrameIndex {
     let dts: [Double]
     /// Whether each frame is a keyframe (seek anchor).
     let keyframeFlags: [Bool]
-    /// Whether each frame is a *clean cut point* — a closed-GOP keyframe safe for a
-    /// pure stream-copy cut, with no leading pictures depending across it (ADR-0008).
-    /// A subset of the keyframes. Populated by the index builder; empty until then.
-    let cleanCutFlags: [Bool]
 
-    init(pts: [Double], dts: [Double]? = nil, keyframeFlags: [Bool], cleanCutFlags: [Bool] = []) {
+    init(pts: [Double], dts: [Double]? = nil, keyframeFlags: [Bool]) {
         self.pts = pts
         self.dts = dts ?? pts
         self.keyframeFlags = keyframeFlags
-        self.cleanCutFlags = cleanCutFlags
     }
 
     var count: Int { pts.count }
-
-    /// The clean cut point (ADR-0008) nearest to frame `n`, by frame-number distance —
-    /// where a requested in/out point snaps to, since Milestone 1 only cuts at clean
-    /// cut points. On a tie, the earlier cut point wins (predictable).
-    func nearestCleanCutPoint(to n: Int) -> Int {
-        var best = 0
-        var bestDistance = Int.max
-        for i in cleanCutFlags.indices where cleanCutFlags[i] {
-            let distance = abs(i - n)
-            if distance < bestDistance {
-                bestDistance = distance
-                best = i
-            }
-        }
-        return best
-    }
 
     /// The nearest keyframe at or before frame `n` — the safe seek anchor for
     /// decoding forward to `n`.

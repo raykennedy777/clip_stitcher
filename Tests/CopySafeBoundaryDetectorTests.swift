@@ -28,26 +28,3 @@ struct CopySafeBoundaryDetectorTests {
         #expect(flags == [true, false, false, false, false])
     }
 }
-
-/// The M1 clean-cut notion and the M2 copy-safe notion are deliberately distinct
-/// (ADR-0009): on the *same* open-GOP MPEG-2 data, M1 marks every I-frame a clean cut
-/// point (its copy→copy concat keeps the leading B's referenced GOP), but M2 must
-/// exclude the open keyframe (its re-encode→copy seam orphans those leading pictures).
-struct CleanCutVsCopySafeDistinctionTests {
-    private let keyframeFlags = [true, false, true,  false, false]
-    private let dts           = [0.00, 0.04, 0.02,  0.06,  0.08]
-
-    @Test func mpeg2CleanCutTreatsEveryIFrameAsClean() {
-        let clean = CleanCutDetector.cleanCutFlags(
-            keyframeFlags: keyframeFlags, dts: dts, codec: "mpeg2video")
-        #expect(clean == [true, false, true, false, false])
-    }
-
-    @Test func copySafeExcludesTheOpenKeyframeOnTheSameData() {
-        let copySafe = CopySafeBoundaryDetector.copySafeFlags(
-            keyframeFlags: keyframeFlags, dts: dts)
-        #expect(copySafe == [true, false, false, false, false])
-        #expect(copySafe != CleanCutDetector.cleanCutFlags(
-            keyframeFlags: keyframeFlags, dts: dts, codec: "mpeg2video"))
-    }
-}

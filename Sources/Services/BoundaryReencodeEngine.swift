@@ -51,7 +51,7 @@ enum BoundaryReencodeEngine {
         return args
     }
 
-    /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto an M1
+    /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
     /// `SegmentPlan` so its validated segment-muxer cut/remux can stream-copy the span
     /// bit-exact. A bound that is a clip boundary (frame 0 / the last frame) gets no cut
     /// at that end — copy from the file start / to the file end — and a span touching
@@ -63,7 +63,6 @@ enum BoundaryReencodeEngine {
         return SegmentPlan(
             inFrame: copyRange.lowerBound,
             outFrame: copyRange.upperBound,
-            inMoved: false, outMoved: false,
             inSegmentTime: needsInCut ? index.segmentTime(forCutAt: copyRange.lowerBound) : nil,
             outSegmentTime: needsOutCut ? index.segmentTime(forCutAt: copyRange.upperBound) : nil
         )

@@ -5,11 +5,10 @@ import Foundation
 /// without dragging in **orphaned leading pictures** at the re-encode→copy seam.
 ///
 /// This is the *general* leading-picture-free test, applied uniformly to **every**
-/// codec. It differs deliberately from M1's `CleanCutDetector`, which may treat all
-/// MPEG-2 I-frames as clean: M1's copy→copy concat keeps the prior segment whose frames
-/// the leading B's reference, but M2 *re-encodes* the prior GOP, orphaning those leading
-/// pictures — so the MPEG-2 shortcut is unsafe here. The two notions are kept distinct
-/// so M1 does not regress.
+/// codec — including MPEG-2, whose open-GOP I-frames are *not* automatically copy-safe
+/// here: M2 *re-encodes* the prior GOP, so any leading pictures that reference across the
+/// boundary would be orphaned at the re-encode→copy seam. A keyframe qualifies only when
+/// nothing presented before it decodes later than it does.
 ///
 /// The test reads only the per-frame DTS the frame index already carries (ADR-0006), so
 /// it needs no extra ffmpeg pass and the index need not be rebuilt — which also keeps the

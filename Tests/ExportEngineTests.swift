@@ -10,19 +10,19 @@ struct ExportEngineTests {
     private let src = URL(fileURLWithPath: "/tmp/clip.mp4")
 
     @Test func wantedSegmentIsZeroWithoutAHeadCut() {
-        let plan = SegmentPlan(inFrame: 0, outFrame: 8, inMoved: false, outMoved: false,
+        let plan = SegmentPlan(inFrame: 0, outFrame: 8,
                                inSegmentTime: nil, outSegmentTime: 0.30)
         #expect(ExportEngine.wantedSegmentIndex(plan: plan) == 0)
     }
 
     @Test func wantedSegmentIsOneAfterAHeadCut() {
-        let plan = SegmentPlan(inFrame: 2, outFrame: 8, inMoved: false, outMoved: false,
+        let plan = SegmentPlan(inFrame: 2, outFrame: 8,
                                inSegmentTime: 0.06, outSegmentTime: 0.30)
         #expect(ExportEngine.wantedSegmentIndex(plan: plan) == 1)
     }
 
     @Test func cutArgumentsJoinBothCutTimesAndCopyVideoOnly() {
-        let plan = SegmentPlan(inFrame: 2, outFrame: 8, inMoved: false, outMoved: false,
+        let plan = SegmentPlan(inFrame: 2, outFrame: 8,
                                inSegmentTime: 0.06, outSegmentTime: 0.30)
         let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/seg_%03d.mp4")
         #expect(args.contains("-c") && args.contains("copy"))
@@ -35,10 +35,10 @@ struct ExportEngineTests {
     }
 
     @Test func aClipTrimmingNeitherEndNeedsNoCut() {
-        let whole = SegmentPlan(inFrame: 0, outFrame: 9, inMoved: false, outMoved: false,
+        let whole = SegmentPlan(inFrame: 0, outFrame: 9,
                                 inSegmentTime: nil, outSegmentTime: nil)
         #expect(ExportEngine.needsCut(whole) == false)
-        let trimmed = SegmentPlan(inFrame: 2, outFrame: 9, inMoved: false, outMoved: false,
+        let trimmed = SegmentPlan(inFrame: 2, outFrame: 9,
                                   inSegmentTime: 0.06, outSegmentTime: nil)
         #expect(ExportEngine.needsCut(trimmed) == true)
     }

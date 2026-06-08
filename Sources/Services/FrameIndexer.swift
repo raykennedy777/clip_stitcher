@@ -40,10 +40,7 @@ enum FrameIndexer {
     ///
     /// The packet dump can be large on long clips, so it streams to a temp file
     /// rather than through a pipe.
-    ///
-    /// `codec` (the ffprobe `codec_name`, e.g. `h264`/`hevc`/`mpeg2video`) selects how
-    /// clean cut points are detected (ADR-0008); pass `nil` if unknown for the safe path.
-    static func buildIndex(url: URL, codec: String? = nil) async throws -> FrameIndex {
+    static func buildIndex(url: URL) async throws -> FrameIndex {
         let ffprobe = try FFTools.ffprobeURL()
         let dump = FileManager.default.temporaryDirectory
             .appendingPathComponent("vidconform-index-\(UUID().uuidString).csv")
@@ -61,7 +58,7 @@ enum FrameIndexer {
         }
 
         let text = try String(contentsOf: dump, encoding: .utf8)
-        return parseIndex(csv: text, codec: codec)
+        return parseIndex(csv: text)
     }
 
     /// Builds the index from ffprobe's `packet=pts_time,dts_time,flags` CSV. Pure, so the
@@ -74,7 +71,7 @@ enum FrameIndexer {
     /// numbering and let stream-copied frames leak past the count). A missing pts is
     /// filled from the dts (and vice-versa); only a packet with *neither* timestamp — which
     /// can't be ordered or cut at — is skipped.
-    static func parseIndex(csv: String, codec: String?) -> FrameIndex {
+    static func parseIndex(csv: String) -> FrameIndex {
         var entries: [(pts: Double, dts: Double, keyframe: Bool)] = []
         csv.enumerateLines { line, _ in
             // e.g. "1.480000,1.440000,K__," → fields: [pts, dts, flags, ""]
@@ -88,15 +85,10 @@ enum FrameIndexer {
             entries.append((pts, dts ?? pts, keyframe))
         }
         entries.sort { $0.pts < $1.pts }
-        let dts = entries.map(\.dts)
-        let keyframeFlags = entries.map(\.keyframe)
         return FrameIndex(
             pts: entries.map(\.pts),
-            dts: dts,
-            keyframeFlags: keyframeFlags,
-            cleanCutFlags: CleanCutDetector.cleanCutFlags(
-                keyframeFlags: keyframeFlags, dts: dts, codec: codec
-            )
+            dts: entries.map(\.dts),
+            keyframeFlags: entries.map(\.keyframe)
         )
     }
 }
