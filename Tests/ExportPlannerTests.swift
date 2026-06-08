@@ -28,8 +28,36 @@ struct ExportPlannerTests {
     @Test func carriesSegmentMuxerCutTimesForTheSnappedFrames() {
         let plan = ExportPlanner.plan(index: index, inFrame: 3, outFrame: 8)
         // in snaps to frame 2 -> midpoint(0.04, 0.08) = 0.06
-        #expect(abs(plan.inSegmentTime - 0.06) < 1e-9)
+        #expect(abs((plan.inSegmentTime ?? -1) - 0.06) < 1e-9)
         // out is frame 8 -> midpoint(0.28, 0.32) = 0.30
-        #expect(abs(plan.outSegmentTime - 0.30) < 1e-9)
+        #expect(abs((plan.outSegmentTime ?? -1) - 0.30) < 1e-9)
+    }
+
+    @Test func nilInPointPlansFromTheClipStartWithNoHeadCut() {
+        // nil in = "from the start of the clip": frame 0, never snapped, no cut.
+        let plan = ExportPlanner.plan(index: index, inFrame: nil, outFrame: 8)
+        #expect(plan.inFrame == 0)
+        #expect(plan.inMoved == false)
+        #expect(plan.inSegmentTime == nil)
+    }
+
+    @Test func nilOutPointPlansToTheClipEndWithNoTailCut() {
+        // nil out = "to the end of the clip": the last frame, never snapped, no cut.
+        let plan = ExportPlanner.plan(index: index, inFrame: 3, outFrame: nil)
+        #expect(plan.outFrame == index.count - 1)  // 9
+        #expect(plan.outMoved == false)
+        #expect(plan.outSegmentTime == nil)
+    }
+
+    @Test func flagsAnEmptyRangeWhenSnappingCollapsesTheSelection() {
+        // in=7 snaps forward to clean cut 8; out=8 stays 8 -> in == out, nothing to export.
+        let collapsed = ExportPlanner.plan(index: index, inFrame: 7, outFrame: 8)
+        #expect(collapsed.inFrame == 8)
+        #expect(collapsed.outFrame == 8)
+        #expect(collapsed.isValid == false)
+
+        // a selection spanning two distinct clean cut points is valid.
+        let proper = ExportPlanner.plan(index: index, inFrame: 3, outFrame: 6)
+        #expect(proper.isValid == true)
     }
 }
