@@ -6,6 +6,7 @@ struct SourceView: View {
     @EnvironmentObject private var cutEditor: CutEditorPresenter
     @State private var selection: Clip.ID?
     @State private var importing = false
+    @State private var relinking = false
     @State private var isDropTargeted = false
 
     var body: some View {
@@ -15,6 +16,7 @@ struct SourceView: View {
             actionPanel
         }
         .navigationTitle("Source")
+        .onAppear { document.resolveSourcesIfNeeded() }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted, perform: handleDrop)
         .overlay {
             if isDropTargeted {
@@ -31,6 +33,15 @@ struct SourceView: View {
         ) { result in
             if case .success(let urls) = result {
                 document.addFiles(urls)
+            }
+        }
+        .fileImporter(
+            isPresented: $relinking,
+            allowedContentTypes: Self.contentTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first, let id = selection {
+                document.relink(id: id, to: url)
             }
         }
     }
@@ -56,11 +67,15 @@ struct SourceView: View {
                         state: document.importStates[clip.id] ?? .ready
                     )
                     .tag(clip.id)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
+                    // Native NSTableView double-click → open the cut-editor, without
+                    // disturbing the List's single-click selection + highlight.
+                    .background(ListDoubleClickAction { row in
+                        let clips = document.project.clips
+                        guard clips.indices.contains(row) else { return }
+                        let clip = clips[row]
                         selection = clip.id
                         openCutEditor(for: clip)
-                    }
+                    })
                 }
                 .onInsert(of: [.fileURL]) { index, providers in
                     loadVideoURLs(from: providers) { urls in
@@ -75,6 +90,13 @@ struct SourceView: View {
                     return .handled
                 }
                 return .ignored
+            }
+            // ⌘↑ / ⌘↓ reorder the selected clip. Plain arrows are left to the List
+            // for selection navigation (we ignore them here).
+            .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                guard press.modifiers.contains(.command) else { return .ignored }
+                move(by: press.key == .upArrow ? -1 : 1)
+                return .handled
             }
         }
     }
@@ -110,6 +132,7 @@ struct SourceView: View {
             action("Set as Target Clip", systemImage: "target", enabled: canSetTarget) {
                 if let id = selection { document.setTarget(id: id) }
             }
+            action("Relink…", systemImage: "link", enabled: canRelink) { relinking = true }
 
             Spacer()
         }
@@ -137,6 +160,11 @@ struct SourceView: View {
     private var canSetTarget: Bool {
         guard let id = selection else { return false }
         return id != document.project.targetClipID
+    }
+
+    private var canRelink: Bool {
+        guard let id = selection else { return false }
+        return document.importStates[id] == .sourceMissing
     }
 
     private func move(by delta: Int) {

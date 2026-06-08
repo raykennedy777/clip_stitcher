@@ -58,7 +58,12 @@ final class CutEditorModel: ObservableObject {
 
     func load() async {
         do {
-            let built = try await FrameIndexer.buildIndex(url: url)
+            let built: FrameIndex
+            if let document {
+                built = try await document.frameIndex(for: clip)
+            } else {
+                built = try await FrameIndexer.buildIndex(url: url)
+            }
             index = built
             frameCount = built.count
             let (w, h) = Self.previewSize(for: clip.video)

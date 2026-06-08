@@ -104,6 +104,9 @@ struct ClipRowView: View {
                 Text("\(frames) frames · \(formattedDuration(duration))")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        case .sourceMissing:
+            Label("Source missing — select the clip and use Relink…", systemImage: "questionmark.folder")
+                .font(.caption).foregroundStyle(.red).lineLimit(2)
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.caption).foregroundStyle(.red).lineLimit(2)

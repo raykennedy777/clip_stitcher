@@ -6,6 +6,7 @@ enum ImportState: Equatable {
     case probing
     case indexing
     case ready
+    case sourceMissing
     case failed(String)
 }
 
@@ -29,6 +30,17 @@ final class ProjectDocument: ReferenceFileDocument {
     /// Resolved source URLs, keyed by clip id. Populated on import and lazily when
     /// resolving a saved clip's bookmark.
     private var urlCache: [Clip.ID: URL] = [:]
+
+    /// Per-clip frame index, built on first cut-editor open and reused for the rest
+    /// of the session (and by the export engine) — ADR-0006's "cached" intent.
+    private var frameIndexCache: [Clip.ID: FrameIndex] = [:]
+
+    /// Bounds how many clips probe/scan their source at once, so bulk-importing many
+    /// large files doesn't launch a process storm.
+    private let importThrottle = AsyncSemaphore(limit: 3)
+
+    /// Guards the one-time source-resolution pass run after a project is opened.
+    private var didResolveSources = false
 
     init() {
         self.project = VidProject()
@@ -94,6 +106,8 @@ final class ProjectDocument: ReferenceFileDocument {
         }
         commit(p)
         importStates[id] = nil
+        urlCache[id] = nil
+        frameIndexCache[id] = nil
     }
 
     func clearAll() {
@@ -102,6 +116,26 @@ final class ProjectDocument: ReferenceFileDocument {
         p.targetClipID = nil
         commit(p)
         importStates.removeAll()
+        urlCache.removeAll()
+        frameIndexCache.removeAll()
+    }
+
+    /// Rebinds a clip to a new source file (after its original went missing), clears
+    /// stale metadata + cached index, and re-imports.
+    func relink(id: Clip.ID, to newURL: URL) {
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        var p = project
+        p.clips[i].bookmark = (try? newURL.bookmarkData()) ?? Data()
+        p.clips[i].displayName = newURL.lastPathComponent
+        p.clips[i].video = nil
+        p.clips[i].audio = nil
+        p.clips[i].duration = nil
+        p.clips[i].frameCount = nil
+        urlCache[id] = newURL
+        frameIndexCache[id] = nil
+        importStates[id] = .probing
+        commit(p)
+        Task { await importClip(id: id, url: newURL) }
     }
 
     func setTarget(id: Clip.ID) {
@@ -136,6 +170,15 @@ final class ProjectDocument: ReferenceFileDocument {
     /// Resolves a clip's source file URL from its bookmark (cached). Returns nil if
     /// the source can no longer be found.
     func url(for clip: Clip) -> URL? {
+        resolveSource(for: clip, refreshIfStale: false)
+    }
+
+    /// Resolves a clip's source URL from cache or its bookmark. When `refreshIfStale`
+    /// is set and the OS reports the bookmark stale (the file moved but was still
+    /// found), the stored bookmark is regenerated and persisted so it survives the
+    /// next save.
+    @discardableResult
+    private func resolveSource(for clip: Clip, refreshIfStale: Bool) -> URL? {
         if let cached = urlCache[clip.id] { return cached }
         var isStale = false
         guard let resolved = try? URL(
@@ -145,15 +188,54 @@ final class ProjectDocument: ReferenceFileDocument {
             bookmarkDataIsStale: &isStale
         ) else { return nil }
         urlCache[clip.id] = resolved
+        if isStale, refreshIfStale,
+           let fresh = try? resolved.bookmarkData(),
+           let i = project.clips.firstIndex(where: { $0.id == clip.id }) {
+            var p = project
+            p.clips[i].bookmark = fresh
+            // The bookmark followed a rename/move — reflect the file's current name.
+            p.clips[i].displayName = resolved.lastPathComponent
+            commit(p)
+        }
         return resolved
+    }
+
+    /// One-time pass after a project is opened: mark clips whose source can no longer
+    /// be resolved as `.sourceMissing` (so the row shows a relink affordance) and
+    /// refresh any moved-but-found bookmarks.
+    func resolveSourcesIfNeeded() {
+        guard !didResolveSources else { return }
+        didResolveSources = true
+        for clip in project.clips where importStates[clip.id] == nil {
+            importStates[clip.id] = resolveSource(for: clip, refreshIfStale: true) == nil
+                ? .sourceMissing
+                : .ready
+        }
+    }
+
+    /// The clip's frame index, built on first request and cached for the session.
+    func frameIndex(for clip: Clip) async throws -> FrameIndex {
+        if let cached = frameIndexCache[clip.id] { return cached }
+        guard let url = url(for: clip) else {
+            throw FFError.indexFailed("Source file not found.")
+        }
+        let built = try await FrameIndexer.buildIndex(url: url)
+        frameIndexCache[clip.id] = built
+        return built
     }
 
     // MARK: - Import pipeline
 
     @MainActor
     private func importClip(id: Clip.ID, url: URL) async {
+        await importThrottle.acquire()
+        defer { Task { await importThrottle.release() } }
         do {
             let probe = try await MediaProbe.probe(url: url)
+            guard probe.video != nil else {
+                importStates[id] = .failed("No video track")
+                return
+            }
             if let i = project.clips.firstIndex(where: { $0.id == id }) {
                 var p = project
                 p.clips[i].video = probe.video
