@@ -21,12 +21,15 @@ struct ExportItem {
     /// Set when this clip is conformed and its audio must be resampled/remixed to the target
     /// before the sample-level concat (ADR-0011); `nil` for a matching clip (no audio filter).
     var audioConform: ExportEngine.AudioConform? = nil
+    /// Set when this clip does not match the target and its video must be fully re-encoded to
+    /// the target spec (ADR-0011). When present the clip is conformed instead of smart-rendered,
+    /// and `segments` is unused; `nil` for a matching clip (the M2 smart-render path).
+    var conform: ConformEngine.VideoConform? = nil
 }
 
 enum ExportError: LocalizedError {
     case noClips
     case invalidPlan
-    case mixedCodecs
     case unsupportedContainer(codec: String, container: String)
     case cutFailed(String)
     case concatFailed(String)
@@ -37,7 +40,6 @@ enum ExportError: LocalizedError {
         switch self {
         case .noClips: return "There are no clips to export."
         case .invalidPlan: return "A clip's in/out points collapse to nothing after snapping to clean cut points."
-        case .mixedCodecs: return "Connecting clips of different codecs into one file needs re-encoding (a later milestone). Export them separately, or use clips that share a codec."
         case .unsupportedContainer(let codec, let container):
             return "The \(container.uppercased()) container can't carry \(codec) video by stream-copy. Choose TS (recommended for this footage) or MP4."
         case .cutFailed(let d): return "Could not cut a clip.\n\(d)"
@@ -275,11 +277,13 @@ enum ExportEngine {
         guard !items.isEmpty else { throw ExportError.noClips }
         let wantsVideo = settings.type != .audioOnly
         if wantsVideo {
-            guard items.allSatisfy({ !$0.segments.isEmpty }) else { throw ExportError.invalidPlan }
+            // A clip is valid if it has an M2 smart-render plan or is being conformed (ADR-0011).
+            guard items.allSatisfy({ !$0.segments.isEmpty || $0.conform != nil }) else {
+                throw ExportError.invalidPlan
+            }
         }
-        if settings.mode == .connect {
-            guard Set(items.map { $0.codec ?? "?" }).count == 1 else { throw ExportError.mixedCodecs }
-        }
+        // No mixed-codec refusal: a non-matching clip is conformed to the target's codec
+        // (ADR-0011), so every piece reaching the concat is already the target codec.
         for item in items where !streamCopyCompatible(codec: item.codec, container: settings.container) {
             throw ExportError.unsupportedContainer(codec: item.codec ?? "this", container: settings.container.fileExtension)
         }
@@ -298,12 +302,20 @@ enum ExportEngine {
         // 1. Produce each clip's video piece per its M2 plan — re-encode the head/tail
         //    edges, stream-copy the keyframe-bounded middle, concat (ADR-0009). The bulk
         //    of the work, and the only part that re-encodes.
+        //    A non-matching clip is instead conformed: a full re-encode of its kept range to
+        //    the target spec, self-verified before it ships (ADR-0011).
         var videoPieces: [URL] = []
         if wantsVideo {
             for (i, item) in items.enumerated() {
-                videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
-                    ffmpeg, source: item.source, plan: item.segments, index: item.index,
-                    encoder: item.encoder, work: work, ext: ext, clipIndex: i))
+                if let conform = item.conform {
+                    videoPieces.append(try await ConformEngine.produceConformedPiece(
+                        ffmpeg, source: item.source, conform: conform,
+                        start: item.audioStart, end: item.audioEnd, work: work, ext: ext, clipIndex: i))
+                } else {
+                    videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
+                        ffmpeg, source: item.source, plan: item.segments, index: item.index,
+                        encoder: item.encoder, work: work, ext: ext, clipIndex: i))
+                }
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }
         }
