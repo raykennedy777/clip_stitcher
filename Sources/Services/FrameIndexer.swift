@@ -33,8 +33,10 @@ enum FrameIndexer {
     }
 
     /// Builds the full per-frame index in presentation order (ADR-0006): every
-    /// frame's PTS plus a keyframe flag, sorted by PTS (packets arrive in decode
-    /// order, which differs from presentation order when B-frames are present).
+    /// frame's PTS and DTS plus a keyframe flag, sorted by PTS (packets arrive in
+    /// decode order, which differs from presentation order when B-frames are present).
+    /// DTS is carried because the segment-muxer cut is computed from decode time, not
+    /// presentation time (ADR-0008).
     ///
     /// The packet dump can be large on long clips, so it streams to a temp file
     /// rather than through a pipe.
@@ -47,7 +49,7 @@ enum FrameIndexer {
         let output = try await ProcessRunner.run(ffprobe, [
             "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "packet=pts_time,flags",
+            "-show_entries", "packet=pts_time,dts_time,flags",
             "-of", "csv=p=0",
             url.path,
         ], stdoutTo: dump)
@@ -56,15 +58,22 @@ enum FrameIndexer {
         }
 
         let text = try String(contentsOf: dump, encoding: .utf8)
-        var entries: [(pts: Double, keyframe: Bool)] = []
+        var entries: [(pts: Double, dts: Double, keyframe: Bool)] = []
         text.enumerateLines { line, _ in
-            // e.g. "1.480000,K__," → fields: [pts, flags, ""]
+            // e.g. "1.480000,1.440000,K__," → fields: [pts, dts, flags, ""]
             let fields = line.split(separator: ",", omittingEmptySubsequences: false)
             guard let first = fields.first, let pts = Double(first) else { return }
-            let keyframe = fields.count > 1 && fields[1].contains("K")
-            entries.append((pts, keyframe))
+            // dts_time can be "N/A" (e.g. the first packet); fall back to pts so the
+            // entry still orders sensibly.
+            let dts = fields.count > 1 ? (Double(fields[1]) ?? pts) : pts
+            let keyframe = fields.count > 2 && fields[2].contains("K")
+            entries.append((pts, dts, keyframe))
         }
         entries.sort { $0.pts < $1.pts }
-        return FrameIndex(pts: entries.map(\.pts), keyframeFlags: entries.map(\.keyframe))
+        return FrameIndex(
+            pts: entries.map(\.pts),
+            dts: entries.map(\.dts),
+            keyframeFlags: entries.map(\.keyframe)
+        )
     }
 }

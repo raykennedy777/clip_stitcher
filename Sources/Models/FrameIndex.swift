@@ -9,6 +9,12 @@ import Foundation
 struct FrameIndex {
     /// Presentation timestamp (seconds) of each frame, ascending.
     let pts: [Double]
+    /// Decode timestamp (seconds) of each frame, parallel to `pts`. The segment muxer
+    /// cuts on *decode* time, which differs from presentation time when B-frames are
+    /// present, so the cut time (`segmentTime(forCutAt:)`) is derived from this, not
+    /// from `pts` (ADR-0008). Defaults to `pts` for B-frame-free data, where the two
+    /// orders coincide.
+    let dts: [Double]
     /// Whether each frame is a keyframe (seek anchor).
     let keyframeFlags: [Bool]
     /// Whether each frame is a *clean cut point* — a closed-GOP keyframe safe for a
@@ -16,8 +22,9 @@ struct FrameIndex {
     /// A subset of the keyframes. Populated by the index builder; empty until then.
     let cleanCutFlags: [Bool]
 
-    init(pts: [Double], keyframeFlags: [Bool], cleanCutFlags: [Bool] = []) {
+    init(pts: [Double], dts: [Double]? = nil, keyframeFlags: [Bool], cleanCutFlags: [Bool] = []) {
         self.pts = pts
+        self.dts = dts ?? pts
         self.keyframeFlags = keyframeFlags
         self.cleanCutFlags = cleanCutFlags
     }
@@ -53,12 +60,21 @@ struct FrameIndex {
     }
 
     /// The `-segment_times` value that makes the ffmpeg segment muxer cut exactly at
-    /// frame `n`: the midpoint between frame `n`'s PTS and the preceding frame's PTS.
-    /// Sitting just below `n`'s PTS sidesteps a float `>=` edge that would otherwise
-    /// bump the cut to the next keyframe (ADR-0008). For frame 0 there is no preceding
-    /// frame, so the cut sits just before the first PTS.
+    /// frame `n`. The muxer cuts at the first keyframe whose **decode** time is `>=` the
+    /// requested time, so the value is the midpoint between frame `n`'s DTS and the DTS
+    /// of the packet decoded immediately before it (the largest DTS below `n`'s). The
+    /// midpoint sits safely under `n`'s DTS, dodging a float `>=` edge that would
+    /// otherwise bump the cut to the next keyframe (ADR-0008). When B-frames reorder the
+    /// stream this differs from a PTS midpoint, which can fall *after* the keyframe's DTS
+    /// and skip it. For the first-decoded frame there is no predecessor, so the cut sits
+    /// just before its DTS.
     func segmentTime(forCutAt n: Int) -> Double {
-        guard n > 0 else { return pts[0] / 2 }
-        return (pts[n - 1] + pts[n]) / 2
+        let cut = dts[n]
+        var predecessor: Double? = nil
+        for d in dts where d < cut {
+            if predecessor == nil || d > predecessor! { predecessor = d }
+        }
+        guard let prev = predecessor else { return cut / 2 }
+        return (prev + cut) / 2
     }
 }

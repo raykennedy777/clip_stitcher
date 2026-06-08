@@ -39,13 +39,41 @@ struct CleanCutSnapTests {
         #expect(index.nearestCleanCutPoint(to: 6) == 8)  // 2 frames away vs 4 away
     }
 
-    /// The segment-muxer cut time must sit *just below* the cut frame's PTS — the
-    /// midpoint between it and the preceding frame — so ffmpeg's `>=` comparison
-    /// lands on the intended frame rather than the next keyframe (ADR-0008).
+    /// The segment-muxer cut time must sit *just below* the cut frame's decode time —
+    /// the midpoint between it and the decode-order predecessor — so ffmpeg's `>=`
+    /// comparison lands on the intended keyframe rather than the next one (ADR-0008).
+    /// With no B-frames decode order equals presentation order (dts == pts), so the
+    /// value is the PTS midpoint.
     @Test func segmentTimeIsTheMidpointBeforeTheCutFrame() {
         // pts spacing 0.04: frame 2 = 0.08, frame 1 = 0.04 -> midpoint 0.06
         #expect(abs(index.segmentTime(forCutAt: 2) - 0.06) < 1e-9)
         // frame 8 = 0.32, frame 7 = 0.28 -> midpoint 0.30
         #expect(abs(index.segmentTime(forCutAt: 8) - 0.30) < 1e-9)
+    }
+}
+
+/// With B-frames, packets are reordered: a keyframe's decode time (DTS) is earlier
+/// than its presentation time (PTS), and the segment muxer cuts on DTS. The cut time
+/// must therefore be a DTS midpoint, not a PTS one — a PTS-based time can fall *after*
+/// the keyframe's DTS and make ffmpeg skip past it to the next keyframe (verified in
+/// the shell against B-frame MP4; ADR-0008).
+struct SegmentTimeWithBFramesTests {
+    // A 6-frame IPBB-style stream. Presentation order (sorted by PTS); the keyframe
+    // at presentation frame 3 presents at 0.12 but decodes at 0.06 (B-frames 4,5
+    // present before, in presentation order, frames 1,2 — its leading siblings).
+    //   pres frame: 0    1     2     3(K)  4     5
+    //   pts:        0.00 0.04  0.08  0.12  0.16  0.20
+    //   dts:        0.00 0.02  0.04  0.06  0.08  0.10
+    private let index = FrameIndex(
+        pts: [0.00, 0.04, 0.08, 0.12, 0.16, 0.20],
+        dts: [0.00, 0.02, 0.04, 0.06, 0.08, 0.10],
+        keyframeFlags: [true, false, false, true, false, false]
+    )
+
+    @Test func segmentTimeUsesDecodeTimeNotPresentationTime() {
+        // Keyframe at presentation frame 3: dts 0.06, decode-predecessor dts 0.04
+        // -> midpoint 0.05. (A PTS midpoint would be (0.08+0.12)/2 = 0.10, which is
+        // past the keyframe's dts and would skip it.)
+        #expect(abs(index.segmentTime(forCutAt: 3) - 0.05) < 1e-9)
     }
 }

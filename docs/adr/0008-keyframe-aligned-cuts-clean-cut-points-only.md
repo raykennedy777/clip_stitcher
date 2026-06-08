@@ -35,9 +35,28 @@ on its own.
   earlier "snap to nearest keyframe" intent).
 - Segments are cut with:
   `ffmpeg -i <src> -map 0:v:0 -c copy -f segment -segment_times <t…> -reset_timestamps 1 out_%03d.<ext>`
-  where each `segment_time` is the **midpoint between the target cut-point's PTS and its preceding
-  frame's PTS**. The midpoint avoids a float `>=` boundary case in the segment muxer that
-  otherwise bumps the cut to the *next* keyframe.
+  where each `segment_time` is the **midpoint between the target cut-point's DTS (decode time) and
+  the DTS of the packet decoded immediately before it**. The segment muxer splits at the first
+  keyframe whose **decode** time is `>=` the requested time, so the value must be derived from DTS,
+  not PTS. The midpoint sits safely below the cut-point's DTS, avoiding a float `>=` boundary case
+  that otherwise bumps the cut to the *next* keyframe.
+  - **Correction (de-risked in the shell after the original PTS-based recipe):** on B-frame streams
+    a keyframe's PTS is later than its DTS, so a PTS-based midpoint can land *after* the keyframe's
+    DTS and make the muxer skip it. This was caught on the H.264/MP4 clip — the primary format —
+    where a PTS-midpoint cut jumped a full keyframe (a 50-frame segment came out 89). The DTS-based
+    midpoint cuts frame-exact across all three formats. The frame index therefore carries DTS
+    alongside PTS, and `FrameIndex.segmentTime(forCutAt:)` computes the DTS midpoint. (With no
+    B-frames the two coincide.)
+- **Clean-cut-point detection is codec-specific** (no decode needed; read the bitstream headers via
+  the `trace_headers` bitstream filter, correlating keyframe NAL/picture units 1:1 with keyframe
+  packets in decode order):
+  - **MPEG-2** — every keyframe (I-frame) is a clean cut point. Even `closed_gop=0` GOPs cut
+    frame-exact (the leading B-frames reference the *previous* GOP, which a kept segment retains).
+    This is why the naïve PTS-reorder heuristic over-flags MPEG-2 and must not be used.
+  - **H.264** — IDR keyframes (NAL type 5) are clean.
+  - **HEVC** — IDR (NAL 19/20) is clean; **CRA (21) / BLA (16–18) are not** — their RASL leading
+    pictures reference the keyframe itself, so a copy cut at a CRA boundary drops/adds 1–2 frames
+    (verified: a CRA-to-CRA extraction came out ±1–2 frames).
 - Correctness is verified by **frame count against frame-index positions** plus a **decode check**
   (`-xerror`), never by reading the (reset) output timestamps.
 
