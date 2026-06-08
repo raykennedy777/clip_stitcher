@@ -22,17 +22,8 @@ enum CleanCutDetector {
     ///   them is excluded. A `nil`/unknown codec uses the same conservative test.
     static func cleanCutFlags(keyframeFlags: [Bool], dts: [Double], codec: String?) -> [Bool] {
         if codec == "mpeg2video" { return keyframeFlags }
-
-        var flags = Array(repeating: false, count: keyframeFlags.count)
-        // Running max of every earlier-presented frame's DTS. A keyframe is clean when
-        // nothing presented before it decodes later than it does.
-        var maxEarlierDTS = -Double.greatestFiniteMagnitude
-        for i in keyframeFlags.indices {
-            if keyframeFlags[i] && maxEarlierDTS < dts[i] {
-                flags[i] = true
-            }
-            if dts[i] > maxEarlierDTS { maxEarlierDTS = dts[i] }
-        }
-        return flags
+        // Every other codec uses the general leading-picture-free test — the same test
+        // M2 uses for copy-safe boundaries (ADR-0009), shared so the two cannot diverge.
+        return CopySafeBoundaryDetector.copySafeFlags(keyframeFlags: keyframeFlags, dts: dts)
     }
 }
