@@ -7,9 +7,10 @@ import Foundation
 /// codec, so the source codec can't block video smart-render — ADR-0010), but sample rate
 /// and channels still are (the rebuild preserves them rather than resampling).
 struct MatchEvaluatorTests {
-    private func video(codec: String = "h264", width: Int = 1920) -> VideoProperties {
+    private func video(codec: String = "h264", width: Int = 1920,
+                       field: String? = "progressive") -> VideoProperties {
         VideoProperties(codec: codec, profile: "High", level: "40", width: width, height: 1080,
-                        frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: "progressive",
+                        frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: field,
                         sampleAspectRatio: "1:1", colorPrimaries: "bt709", colorTransfer: "bt709",
                         colorRange: "tv")
     }
@@ -43,6 +44,25 @@ struct MatchEvaluatorTests {
     @Test func identicalClipsMatch() {
         let target = clip(video: video(), audio: audio())
         #expect(MatchEvaluator.matches(clip(video: video(), audio: audio()), target: target))
+    }
+
+    @Test func missingFieldOrderMatchesProgressive() {
+        // The HEVC target probes field_order=None; a clean progressive encode reports
+        // "progressive". They are the same scan type, so they must match — otherwise the
+        // HEVC clip is unmatchable even by a copy of itself (ADR-0011 normalization).
+        let target = clip(video: video(field: nil), audio: audio())
+        let progressive = clip(video: video(field: "progressive"), audio: audio())
+        #expect(MatchEvaluator.matches(progressive, target: target))
+    }
+
+    @Test func interlacedStillMismatchesProgressive() {
+        // Normalization only collapses missing/unknown ≡ progressive; a genuine scan-type
+        // difference (tt vs progressive) must still force a conform.
+        let target = clip(video: video(field: "progressive"), audio: audio())
+        let interlaced = clip(video: video(field: "tt"), audio: audio())
+        #expect(!MatchEvaluator.matches(interlaced, target: target))
+        #expect(MatchEvaluator.normalizedFieldOrder("tt") == "tt")
+        #expect(MatchEvaluator.normalizedFieldOrder("unknown") == "progressive")
     }
 
     @Test func videoMismatchFailsRegardlessOfAudio() {

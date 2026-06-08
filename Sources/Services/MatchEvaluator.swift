@@ -15,7 +15,7 @@ enum MatchEvaluator {
             cv.height == tv.height &&
             cv.frameRate == tv.frameRate &&
             cv.pixelFormat == tv.pixelFormat &&
-            cv.fieldOrder == tv.fieldOrder &&
+            normalizedFieldOrder(cv.fieldOrder) == normalizedFieldOrder(tv.fieldOrder) &&
             cv.sampleAspectRatio == tv.sampleAspectRatio &&
             cv.colorPrimaries == tv.colorPrimaries &&
             cv.colorTransfer == tv.colorTransfer &&
@@ -36,5 +36,17 @@ enum MatchEvaluator {
         }
 
         return videoMatches && audioMatches
+    }
+
+    /// Canonicalises an ffprobe `field_order` for comparison and conform targeting: a missing,
+    /// empty, or "unknown" value means progressive (a clean progressive HEVC stream often
+    /// reports no field order at all, so the target clip would otherwise be unmatchable even
+    /// by a copy of itself — ADR-0011). Interlaced values (`tt`/`bb`/`tb`/`bt`) are returned
+    /// unchanged, so a real scan-type difference still fails the match.
+    static func normalizedFieldOrder(_ value: String?) -> String {
+        switch value {
+        case nil, "", "unknown", "progressive": return "progressive"
+        default: return value!
+        }
     }
 }
