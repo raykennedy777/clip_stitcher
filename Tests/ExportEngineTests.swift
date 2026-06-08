@@ -101,12 +101,8 @@ struct ExportEngineTests {
     @Test func audioMuxConcatenatesItemAudioOverCopiedVideo() {
         let video = URL(fileURLWithPath: "/tmp/joined.ts")
         let items = [
-            ExportItem(source: src, plan: .init(inFrame: 0, outFrame: 1, inMoved: false, outMoved: false,
-                                                inSegmentTime: 1.0, outSegmentTime: 2.0), codec: "mpeg2video",
-                       audioStart: 1.0, audioEnd: 2.0),
-            ExportItem(source: src, plan: .init(inFrame: 0, outFrame: 1, inMoved: false, outMoved: false,
-                                                inSegmentTime: 5.0, outSegmentTime: 7.0), codec: "mpeg2video",
-                       audioStart: 5.0, audioEnd: 7.0),
+            ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0),
+            ExportItem(source: src, codec: "mpeg2video", audioStart: 5.0, audioEnd: 7.0),
         ]
         let args = ExportEngine.audioMuxArguments(videoInput: video, items: items,
                                                   output: URL(fileURLWithPath: "/tmp/out.ts"))
@@ -121,9 +117,7 @@ struct ExportEngineTests {
 
     @Test func audioMuxWithoutVideoStartsAudioInputsAtZero() {
         // audio-only export: no video input, so the first audio source is input 0.
-        let items = [ExportItem(source: src, plan: .init(inFrame: 0, outFrame: 1, inMoved: false, outMoved: false,
-                                                         inSegmentTime: 1.0, outSegmentTime: 2.0), codec: "mpeg2video",
-                                audioStart: 1.0, audioEnd: 2.0)]
+        let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
                                                   output: URL(fileURLWithPath: "/tmp/a.m4a"))
         #expect(!args.contains("0:v:0"))

@@ -234,12 +234,13 @@ final class ProjectDocument: ReferenceFileDocument {
         return built
     }
 
-    // MARK: - Export (Milestone 1: keyframe-aligned cuts)
+    // MARK: - Export (Milestone 2: frame-exact boundary re-encode)
 
-    /// Runs a Milestone 1 export to `destination`: each clip's video cut at its clean cut
-    /// points and copied (no video re-encode, ADR-0008), with the audio rebuilt so it stays
-    /// aligned at the joins. Progress and outcome are published in `exportStatus` for the
-    /// Output view; in/out points snapped to clean cut points are reported as warnings.
+    /// Runs a Milestone 2 export to `destination`: each clip is cut at the **exact** in/out
+    /// frame the user chose (ADR-0009) — the keyframe-bounded middle is stream-copied and
+    /// only the partial-GOP head/tail edges are re-encoded — with the audio rebuilt so it
+    /// stays aligned at the joins. Progress and outcome are published in `exportStatus` for
+    /// the Output view. No snapping, so there are no "cut snapped" warnings.
     @MainActor
     func export(to destination: URL) async {
         exportStatus = .running(0)
@@ -251,19 +252,25 @@ final class ProjectDocument: ReferenceFileDocument {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await frameIndex(for: clip)
-                let plan = ExportPlanner.plan(index: index, inFrame: clip.inPoint, outFrame: clip.outPoint)
-                let label = "Clip \(i + 1) (\(clip.displayName))"
-                if !plan.isValid {
-                    throw ExportError.invalidPlan
-                }
-                if plan.inMoved { warnings.append("\(label): in point snapped to the nearest clean cut point.") }
-                if plan.outMoved { warnings.append("\(label): out point snapped to the nearest clean cut point.") }
+                let copySafe = CopySafeBoundaryDetector.copySafeFlags(
+                    keyframeFlags: index.keyframeFlags, dts: index.dts)
+                let segments = BoundaryReencodePlanner.plan(
+                    copySafeFlags: copySafe, frameCount: index.count,
+                    inFrame: clip.inPoint, outFrame: clip.outPoint)
+                guard !segments.isEmpty else { throw ExportError.invalidPlan }
+                // Re-encode args matched to the source so the edges concat cleanly with the
+                // copied middle (ADR-0009).
+                let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
+                    codec: clip.video?.codec,
+                    pixelFormat: clip.video?.pixelFormat,
+                    fieldOrder: clip.video?.fieldOrder)
                 // The audio is re-encoded over the same kept range as the video, in source
-                // presentation time. A `nil` cut time means that end is the clip boundary
-                // (no cut there), so the audio runs to the file's start/end too.
-                let audioStart = plan.inSegmentTime == nil ? nil : index.pts[plan.inFrame]
-                let audioEnd = plan.outSegmentTime == nil ? nil : index.pts[plan.outFrame]
-                items.append(ExportItem(source: url, plan: plan, codec: clip.video?.codec,
+                // presentation time. A `nil` point means that end is the clip boundary (no
+                // cut there), so the audio runs to the file's start/end too.
+                let audioStart = clip.inPoint.map { index.pts[$0] }
+                let audioEnd = clip.outPoint.map { index.pts[$0] }
+                items.append(ExportItem(source: url, codec: clip.video?.codec,
+                                        segments: segments, index: index, encoder: encoder,
                                         audioStart: audioStart, audioEnd: audioEnd))
             }
             // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins

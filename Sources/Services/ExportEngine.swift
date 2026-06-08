@@ -1,17 +1,21 @@
 import Foundation
 
-/// One clip's contribution to an export: where it lives and the keyframe-aligned plan
-/// of what to keep (ADR-0008). `codec` is the ffprobe `codec_name`, used to refuse a
-/// stream-copy concat across different codecs (that is conform — Milestone 3 — not M1).
+/// One clip's contribution to an export: where it lives and the Milestone 2 plan of what
+/// to keep (ADR-0009) — an ordered list of copy / re-encode `segments` over `index`,
+/// produced with `encoder` (the source-matched re-encode args). `codec` is the ffprobe
+/// `codec_name`, used to refuse a stream-copy concat across different codecs (that is
+/// conform — a later milestone).
 ///
 /// `audioStart`/`audioEnd` are the clip's kept range in **source presentation time**
 /// (seconds) — the audio is re-encoded over exactly this window so it stays aligned with
-/// the copied video and the joins are gap-free (ADR-0008). `nil` means that end is the
-/// clip boundary (no cut there), matching the video plan's `inSegmentTime`/`outSegmentTime`.
+/// the video and the joins are gap-free (ADR-0008). `nil` means that end is the clip
+/// boundary (no cut there).
 struct ExportItem {
     var source: URL
-    var plan: SegmentPlan
-    var codec: String?
+    var codec: String? = nil
+    var segments: [PlannedSegment] = []
+    var index: FrameIndex = FrameIndex(pts: [], keyframeFlags: [])
+    var encoder: [String] = []
     var audioStart: Double? = nil
     var audioEnd: Double? = nil
 }
@@ -166,7 +170,10 @@ enum ExportEngine {
         progress: @escaping (Double) -> Void = { _ in }
     ) async throws {
         guard !items.isEmpty else { throw ExportError.noClips }
-        guard items.allSatisfy(\.plan.isValid) else { throw ExportError.invalidPlan }
+        let wantsVideo = settings.type != .audioOnly
+        if wantsVideo {
+            guard items.allSatisfy({ !$0.segments.isEmpty }) else { throw ExportError.invalidPlan }
+        }
         if settings.mode == .connect {
             guard Set(items.map { $0.codec ?? "?" }).count == 1 else { throw ExportError.mixedCodecs }
         }
@@ -181,14 +188,17 @@ enum ExportEngine {
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: work) }
 
-        let wantsVideo = settings.type != .audioOnly
         let wantsAudio = settings.type != .videoOnly
 
-        // 1. Cut each clip's video to a single piece (copy). The bulk of the work.
+        // 1. Produce each clip's video piece per its M2 plan — re-encode the head/tail
+        //    edges, stream-copy the keyframe-bounded middle, concat (ADR-0009). The bulk
+        //    of the work, and the only part that re-encodes.
         var videoPieces: [URL] = []
         if wantsVideo {
             for (i, item) in items.enumerated() {
-                videoPieces.append(try await cutVideoPiece(ffmpeg, item: item, index: i, work: work, ext: ext))
+                videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
+                    ffmpeg, source: item.source, plan: item.segments, index: item.index,
+                    encoder: item.encoder, work: work, ext: ext, clipIndex: i))
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }
         }
@@ -227,23 +237,6 @@ enum ExportEngine {
             }
         }
         progress(1.0)
-    }
-
-    /// Cuts one clip's video to a single piece in `work` and returns it.
-    private static func cutVideoPiece(_ ffmpeg: URL, item: ExportItem, index i: Int, work: URL, ext: String) async throws -> URL {
-        let piece: URL
-        if needsCut(item.plan) {
-            let pattern = work.appendingPathComponent("clip\(i)_%03d.\(ext)").path
-            try await runFFmpeg(ffmpeg, cutArguments(source: item.source, plan: item.plan, segmentPattern: pattern),
-                                failure: ExportError.cutFailed)
-            piece = work.appendingPathComponent(String(format: "clip\(i)_%03d.\(ext)", wantedSegmentIndex(plan: item.plan)))
-        } else {
-            piece = work.appendingPathComponent("clip\(i).\(ext)")
-            try await runFFmpeg(ffmpeg, remuxArguments(source: item.source, output: piece),
-                                failure: ExportError.cutFailed)
-        }
-        guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
-        return piece
     }
 
     private static func concatVideo(_ ffmpeg: URL, pieces: [URL], to output: URL, work: URL) async throws {
