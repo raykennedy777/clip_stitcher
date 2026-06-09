@@ -17,7 +17,7 @@ enum FrameExtractor {
     ///  3. output-seek to a midpoint just before the target — slow but always correct.
     static func imageData(
         url: URL, index: FrameIndex, frame n: Int,
-        width: Int, height: Int
+        width: Int, height: Int, filter: String? = nil
     ) async throws -> Data? {
         guard index.count > 0, n >= 0, n < index.count else { return nil }
         let ffmpeg = try FFTools.ffmpegURL()
@@ -29,8 +29,9 @@ enum FrameExtractor {
         let offset = n - anchor
         let anchorPTS = String(format: "%.6f", index.pts[anchor])
 
-        // Match the persistent decoder: scale to the display dimensions (SAR applied).
-        let scale = "scale=\(width):\(height)"
+        // Match the persistent decoder: scale to the display dimensions (SAR applied),
+        // or the caller's chain (the preview's spatial conform, ADR-0012).
+        let scale = filter ?? "scale=\(width):\(height)"
 
         // 1. Fast path.
         _ = try? await ProcessRunner.run(ffmpeg, [

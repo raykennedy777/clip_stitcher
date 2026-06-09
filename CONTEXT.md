@@ -97,3 +97,8 @@ _Avoid_: render preview
 Whether clips are joined into a single file ("Connect into one") or exported as separate
 files ("Export separately").
 _Avoid_: join mode, merge mode
+
+**Join**:
+The boundary between two consecutive clips in the assembled output — where one clip's kept
+range ends and the next begins. Marked on the output preview's scrubber.
+_Avoid_: seam, splice, junction

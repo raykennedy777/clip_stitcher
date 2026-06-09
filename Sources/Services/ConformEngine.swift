@@ -319,7 +319,9 @@ enum ConformEngine {
 
     // MARK: - Field order / aspect / rate helpers
 
-    private static func isInterlaced(_ field: String?) -> Bool {
+    /// Internal (not private): the preview's spatial conform chain shares this scan
+    /// check so the two can't drift (ADR-0012).
+    static func isInterlaced(_ field: String?) -> Bool {
         ["tt", "bb", "tb", "bt"].contains(MatchEvaluator.normalizedFieldOrder(field))
     }
 
@@ -332,7 +334,9 @@ enum ConformEngine {
         abs(displayAspect(source) - displayAspect(target)) < 0.01
     }
 
-    private static func displayAspect(_ v: VideoProperties) -> Double {
+    /// Internal (not private): the preview's spatial conform chain shares this DAR
+    /// computation so the two can't drift (ADR-0012).
+    static func displayAspect(_ v: VideoProperties) -> Double {
         (Double(v.width) / Double(v.height)) * sarValue(v.sampleAspectRatio)
     }
 

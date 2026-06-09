@@ -26,4 +26,8 @@ and PTS/DTS + audio alignment.
 
 ## Status
 
-Early scaffolding.
+The engine is done and verified on MPEG-2, H.264, and HEVC: keyframe-aligned cuts,
+frame-exact boundary re-encode, conform of non-matching clips to the target spec, and the
+sample-accurate audio rebuild (ROADMAP slices 1–5, ADR-0008…0011). Current work: the output
+preview (ROADMAP slice 6, ADR-0012). See `docs/ROADMAP.md` for what's next and `docs/adr/`
+for the reasoning.

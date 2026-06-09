@@ -39,7 +39,7 @@ struct RootView: View {
             switch section ?? .source {
             case .source: SourceView(document: document)
             case .output: OutputView(document: document)
-            case .preview: PreviewView()
+            case .preview: PreviewView(document: document)
             }
         }
         .environmentObject(cutEditor)

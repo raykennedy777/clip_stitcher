@@ -23,6 +23,10 @@ final class FrameStreamDecoder {
     private let width: Int
     private let height: Int
     private let useHardware: Bool
+    /// Replaces the default `scale=W:H` when set (the preview's spatial conform chain,
+    /// ADR-0012). Must be 1-frame-in-1-frame-out — the seek arithmetic counts frames —
+    /// and must emit exactly `width`×`height` (the pipe reads fixed-size frames).
+    private let filter: String?
     private let ffmpeg: URL
     private let queue = DispatchQueue(label: "com.conmotogroup.vidconform.decoder")
 
@@ -36,13 +40,15 @@ final class FrameStreamDecoder {
 
     private var frameBytes: Int { width * height * 3 }
 
-    init?(url: URL, index: FrameIndex, width: Int, height: Int, useHardware: Bool, windowSize: Int = 48) {
+    init?(url: URL, index: FrameIndex, width: Int, height: Int, useHardware: Bool,
+          filter: String? = nil, windowSize: Int = 48) {
         guard let ffmpeg = try? FFTools.ffmpegURL(), width > 0, height > 0, index.count > 0 else { return nil }
         self.url = url
         self.index = index
         self.width = width
         self.height = height
         self.useHardware = useHardware
+        self.filter = filter
         self.ffmpeg = ffmpeg
         self.windowSize = max(1, windowSize)
     }
@@ -129,7 +135,7 @@ final class FrameStreamDecoder {
         arguments += [
             "-ss", String(format: "%.6f", index.pts[anchor]),
             "-i", url.path, "-an",
-            "-vf", "scale=\(width):\(height),format=rgb24",
+            "-vf", "\(filter ?? "scale=\(width):\(height)"),format=rgb24",
             "-f", "rawvideo", "-",
         ]
         process.arguments = arguments
