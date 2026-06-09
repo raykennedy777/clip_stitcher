@@ -80,30 +80,71 @@ struct CutEditorView: View {
                 .monospacedDigit()
                 .font(.body.weight(.medium))
             Spacer()
-            Text(selectionText)
-                .foregroundStyle(.secondary)
+            selectionReadout
         }
         .font(.callout)
     }
 
-    private var selectionText: String {
-        let start = model.inPoint.map(String.init) ?? "—"
-        let end = model.outPoint.map(String.init) ?? "—"
-        return "Selection \(start) – \(end)"
+    private var selectionReadout: some View {
+        HStack(spacing: 4) {
+            Text("Selection")
+                .foregroundStyle(.secondary)
+            selectionPoint(model.inPoint, help: "Jump to the in point")
+            Text("–")
+                .foregroundStyle(.secondary)
+            selectionPoint(model.outPoint, help: "Jump to the out point")
+        }
+    }
+
+    /// A set selection point reads as a link that jumps the playhead to its frame.
+    @ViewBuilder
+    private func selectionPoint(_ frame: Int?, help: String) -> some View {
+        if let frame {
+            Button(String(frame)) { model.seek(to: frame) }
+                .buttonStyle(.link)
+                .monospacedDigit()
+                .help(help)
+        } else {
+            Text("—")
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var transport: some View {
         HStack(spacing: 8) {
             button("backward.end.fill", help: "First frame") { model.goToStart() }
-            button("backward.frame.fill", help: "Back one frame (←)") { model.step(by: -1) }
+            button("backward.fill", help: "Previous keyframe (⇧←)") { model.stepToPreviousKeyframe() }
+            // One registered shortcut per arrow key, dispatching on the live Shift
+            // state: SwiftUI matches arrow-key equivalents ignoring Shift, so two
+            // buttons declaring ← and ⇧← both fire the first-registered one.
+            button("backward.frame.fill", help: "Back one frame (←)") { arrowJump(-1) }
                 .keyboardShortcut(.leftArrow, modifiers: [])
 
             button(model.isPlaying ? "pause.fill" : "play.fill", help: "Play / Pause (Space)") { model.togglePlay() }
                 .keyboardShortcut(.space, modifiers: [])
 
-            button("forward.frame.fill", help: "Forward one frame (→)") { model.step(by: 1) }
+            button("forward.frame.fill", help: "Forward one frame (→)") { arrowJump(1) }
                 .keyboardShortcut(.rightArrow, modifiers: [])
+            button("forward.fill", help: "Next keyframe (⇧→)") { model.stepToNextKeyframe() }
             button("forward.end.fill", help: "Last frame") { model.goToEnd() }
+
+            Divider().frame(height: 20).padding(.horizontal, 6)
+
+            button("arrowtriangle.up.fill", help: "Previous scene change (↑)") {
+                model.scanToSceneChange(forward: false)
+            }
+            .keyboardShortcut(.upArrow, modifiers: [])
+            .disabled(model.isSceneScanning)
+            button("arrowtriangle.down.fill", help: "Next scene change (↓)") {
+                model.scanToSceneChange(forward: true)
+            }
+            .keyboardShortcut(.downArrow, modifiers: [])
+            .disabled(model.isSceneScanning)
+            // Fixed-size slot so the spinner's appearance doesn't shift the row.
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 20)
+                .opacity(model.isSceneScanning ? 1 : 0)
 
             Divider().frame(height: 20).padding(.horizontal, 6)
 
@@ -116,6 +157,15 @@ struct CutEditorView: View {
         }
         .controlSize(.large)
         .disabled(model.isIndexing || model.frameCount == 0)
+    }
+
+    /// ←/→ step a frame; with Shift held they jump a keyframe instead.
+    private func arrowJump(_ delta: Int) {
+        if NSEvent.modifierFlags.contains(.shift) {
+            delta < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe()
+        } else {
+            model.step(by: delta)
+        }
     }
 
     private func button(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {

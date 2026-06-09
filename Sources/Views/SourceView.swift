@@ -79,6 +79,17 @@ struct SourceView: View {
                         selection = clip.id
                         openCutEditor(for: clip)
                     })
+                    // Acts on the row under the pointer (macOS convention), which
+                    // needn't be the selected row.
+                    .contextMenu {
+                        Button("Open in Cut-Editor") {
+                            selection = clip.id
+                            openCutEditor(for: clip)
+                        }
+                        Button("Duplicate") { duplicate(clip.id) }
+                        Divider()
+                        Button("Delete", role: .destructive) { delete(clip.id) }
+                    }
                 }
                 .onInsert(of: [.fileURL]) { index, providers in
                     loadVideoURLs(from: providers) { urls in
@@ -124,6 +135,9 @@ struct SourceView: View {
 
             action("Move Up", systemImage: "arrow.up", enabled: canMove(by: -1)) { move(by: -1) }
             action("Move Down", systemImage: "arrow.down", enabled: canMove(by: 1)) { move(by: 1) }
+            action("Duplicate", systemImage: "plus.square.on.square", enabled: selection != nil) {
+                if let id = selection { duplicate(id) }
+            }
             action("Delete", systemImage: "trash", enabled: selection != nil) { deleteSelected() }
             action("Clear", systemImage: "xmark.bin", enabled: !document.project.clips.isEmpty) {
                 document.clearAll()
@@ -179,8 +193,19 @@ struct SourceView: View {
 
     private func deleteSelected() {
         guard let id = selection else { return }
+        delete(id)
+    }
+
+    private func delete(_ id: Clip.ID) {
         document.deleteClip(id: id)
-        selection = nil
+        if selection == id { selection = nil }
+    }
+
+    /// Duplicates the clip and selects the copy, Finder-style.
+    private func duplicate(_ id: Clip.ID) {
+        if let newID = document.duplicateClip(id: id) {
+            selection = newID
+        }
     }
 
     private func openCutEditor(for clip: Clip) {

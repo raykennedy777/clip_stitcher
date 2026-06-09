@@ -20,6 +20,20 @@ struct FrameIndexTests {
         #expect(index.keyframeIndex(atOrBefore: 2) == 0)
         #expect(index.keyframeIndex(atOrBefore: 5) == 3)
     }
+
+    @Test func keyframeAfterFindsTheNextLaterKeyframe() {
+        #expect(index.keyframeIndex(after: 0) == 3)
+        #expect(index.keyframeIndex(after: 2) == 3)
+    }
+
+    @Test func keyframeAfterSkipsTheFrameItselfEvenWhenItIsAKeyframe() {
+        #expect(index.keyframeIndex(after: 3) == nil)
+    }
+
+    @Test func keyframeAfterReturnsNilPastTheLastKeyframe() {
+        #expect(index.keyframeIndex(after: 4) == nil)
+        #expect(index.keyframeIndex(after: 5) == nil)
+    }
 }
 
 /// With B-frames, packets are reordered: a keyframe's decode time (DTS) is earlier

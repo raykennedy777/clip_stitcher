@@ -16,6 +16,7 @@ final class CutEditorModel: ObservableObject {
     @Published var outPoint: Int?
     @Published var isIndexing = true
     @Published var isPlaying = false
+    @Published var isSceneScanning = false
     @Published var errorMessage: String?
 
     /// Set by the presenter to close this editor's window.
@@ -24,6 +25,7 @@ final class CutEditorModel: ObservableObject {
     private var index: FrameIndex?
     private var decoder: FrameStreamDecoder?
     private var playTask: Task<Void, Never>?
+    private var sceneScanTask: Task<Void, Never>?
 
     /// Display-corrected preview dimensions (SAR applied), resolved once at load and
     /// reused by the decoder and the fallback extractor so both render alike.
@@ -74,7 +76,9 @@ final class CutEditorModel: ObservableObject {
                 useHardware: true, windowSize: cacheCap
             )
             isIndexing = false
-            seek(to: inPoint ?? 0)
+            // Resume where this clip's editor was last closed; a never-opened clip
+            // starts at its in point (frame 0 when none is set).
+            seek(to: document?.lastViewedFrame(for: clip.id) ?? inPoint ?? 0)
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             isIndexing = false
@@ -149,6 +153,58 @@ final class CutEditorModel: ObservableObject {
     func step(by delta: Int) { seek(to: currentFrame + delta) }
     func goToStart() { seek(to: 0) }
     func goToEnd() { seek(to: lastFrame) }
+
+    /// Jump to the nearest keyframe before the current frame. Landing on a keyframe
+    /// is the decoder's cheapest seek, so these jumps feel instant.
+    func stepToPreviousKeyframe() {
+        guard let index, currentFrame > 0 else { return }
+        seek(to: index.keyframeIndex(atOrBefore: currentFrame - 1))
+    }
+
+    /// Jump to the nearest keyframe after the current frame (stays put past the
+    /// last keyframe).
+    func stepToNextKeyframe() {
+        guard let index, let next = index.keyframeIndex(after: currentFrame) else { return }
+        seek(to: next)
+    }
+
+    /// Jump to the next/previous scene change: scan up to 5 seconds from the
+    /// playhead for a frame whose difference from its predecessor crosses the
+    /// scene threshold, and land there — or at the 5-second cap when the window
+    /// holds no cut, so the key always moves the playhead. Like seek(), this
+    /// doesn't stop playback.
+    func scanToSceneChange(forward: Bool) {
+        guard !isSceneScanning, let index, frameCount > 0 else { return }
+        let current = currentFrame
+        let windowFrames = Int((SceneScan.windowSeconds * fps).rounded())
+        let limit = forward
+            ? min(current + windowFrames, lastFrame)
+            : max(current - windowFrames, 0)
+        guard limit != current else { return }
+
+        let pts = index.pts
+        let startTime = pts.first ?? 0
+        // The scan decodes from a guard before the window start (the current frame
+        // going forward, the floor going backward) so every window frame has a
+        // predecessor to diff against.
+        let windowStart = pts[min(current, limit)]
+        let seekStart = max(0, windowStart - startTime - SceneScan.guardSeconds)
+        let duration = (windowStart - startTime - seekStart) + SceneScan.windowSeconds + 0.3
+        let deinterlace = ConformEngine.isInterlaced(clip.video?.fieldOrder)
+
+        isSceneScanning = true
+        sceneScanTask = Task { @MainActor [weak self, url] in
+            let frames = await SceneScan.sceneFrames(
+                url: url, seekStart: seekStart, duration: duration,
+                deinterlace: deinterlace, pts: pts)
+            guard let self, !Task.isCancelled else { return }
+            self.isSceneScanning = false
+            let landing = forward
+                ? SceneScan.forwardLanding(sceneFrames: frames, current: current, cap: limit)
+                : SceneScan.backwardLanding(sceneFrames: frames, current: current, floor: limit)
+            self.seek(to: landing)
+        }
+    }
 
     private func cacheInsert(_ frame: Int, _ image: NSImage) {
         if cache[frame] == nil { cacheOrder.append(frame) }
@@ -229,10 +285,18 @@ final class CutEditorModel: ObservableObject {
     /// Stop playback and tear down the decoder process. Called on OK/Cancel and on
     /// window close so no ffmpeg process is left running.
     func teardown() {
+        // Remember the closing position so reopening resumes here. Skipped when the
+        // clip never loaded — a failed open shouldn't reset a good saved position.
+        if index != nil {
+            document?.setLastViewedFrame(currentFrame, for: clip.id)
+        }
         stopPlayback()
         decodeTask?.cancel()
         decodeTask = nil
         pendingFrame = nil
+        sceneScanTask?.cancel() // ProcessRunner kills the scan's ffmpeg on cancel
+        sceneScanTask = nil
+        isSceneScanning = false
         decoder?.stop()
         decoder = nil
     }

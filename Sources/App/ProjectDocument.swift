@@ -45,6 +45,10 @@ final class ProjectDocument: ReferenceFileDocument {
     /// of the session (and by the export engine) — ADR-0006's "cached" intent.
     private var frameIndexCache: [Clip.ID: FrameIndex] = [:]
 
+    /// Where each clip's cut-editor was last closed, so reopening resumes there.
+    /// Runtime-only view state — never an undoable document edit.
+    private var lastViewedFrames: [Clip.ID: Int] = [:]
+
     /// Bounds how many clips probe/scan their source at once, so bulk-importing many
     /// large files doesn't launch a process storm.
     private let importThrottle = AsyncSemaphore(limit: 3)
@@ -108,6 +112,38 @@ final class ProjectDocument: ReferenceFileDocument {
         }
     }
 
+    /// Inserts a copy of a clip directly after the original: a new row with its own
+    /// identity but the same source file, probed properties, and in/out selection.
+    /// Returns the new clip's id so the UI can select it.
+    @discardableResult
+    func duplicateClip(id: Clip.ID) -> Clip.ID? {
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return nil }
+        var copy = project.clips[i]
+        copy.id = UUID()
+        var p = project
+        p.clips.insert(copy, at: i + 1)
+        commit(p)
+        // The copy points at the same file, so it shares the original's resolved URL
+        // and frame index instead of re-resolving and re-indexing.
+        urlCache[copy.id] = urlCache[id]
+        frameIndexCache[copy.id] = frameIndexCache[id]
+        lastViewedFrames[copy.id] = lastViewedFrames[id]
+        switch importStates[id] {
+        case .probing, .indexing, nil:
+            // The original's in-flight import only fills the original's row — give
+            // the copy its own pass.
+            importStates[copy.id] = .probing
+            if let url = url(for: copy) {
+                Task { await importClip(id: copy.id, url: url) }
+            } else {
+                importStates[copy.id] = .sourceMissing
+            }
+        case let state?:
+            importStates[copy.id] = state
+        }
+        return copy.id
+    }
+
     func deleteClip(id: Clip.ID) {
         var p = project
         p.clips.removeAll { $0.id == id }
@@ -118,6 +154,7 @@ final class ProjectDocument: ReferenceFileDocument {
         importStates[id] = nil
         urlCache[id] = nil
         frameIndexCache[id] = nil
+        lastViewedFrames[id] = nil
     }
 
     func clearAll() {
@@ -128,6 +165,7 @@ final class ProjectDocument: ReferenceFileDocument {
         importStates.removeAll()
         urlCache.removeAll()
         frameIndexCache.removeAll()
+        lastViewedFrames.removeAll()
     }
 
     /// Rebinds a clip to a new source file (after its original went missing), clears
@@ -143,6 +181,7 @@ final class ProjectDocument: ReferenceFileDocument {
         p.clips[i].frameCount = nil
         urlCache[id] = newURL
         frameIndexCache[id] = nil
+        lastViewedFrames[id] = nil
         importStates[id] = .probing
         commit(p)
         Task { await importClip(id: id, url: newURL) }
@@ -175,6 +214,15 @@ final class ProjectDocument: ReferenceFileDocument {
         p.clips[i].inPoint = inPoint
         p.clips[i].outPoint = outPoint
         commit(p)
+    }
+
+    /// The frame the clip's cut-editor was last closed on this session, if any.
+    func lastViewedFrame(for id: Clip.ID) -> Int? {
+        lastViewedFrames[id]
+    }
+
+    func setLastViewedFrame(_ frame: Int, for id: Clip.ID) {
+        lastViewedFrames[id] = frame
     }
 
     /// Resolves a clip's source file URL from its bookmark (cached). Returns nil if

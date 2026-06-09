@@ -38,6 +38,17 @@ struct FrameIndex {
         return anchor
     }
 
+    /// The first keyframe strictly after frame `n`, or nil when no later keyframe
+    /// exists — the cut-editor's "next keyframe" jump target.
+    func keyframeIndex(after n: Int) -> Int? {
+        let start = max(0, n + 1)
+        guard start < keyframeFlags.count else { return nil }
+        for i in start..<keyframeFlags.count where keyframeFlags[i] {
+            return i
+        }
+        return nil
+    }
+
     /// The `-segment_times` value that makes the ffmpeg segment muxer cut exactly at
     /// frame `n`. The muxer cuts at the first keyframe whose **decode** time is `>=` the
     /// requested time, so the value is the midpoint between frame `n`'s DTS and the DTS

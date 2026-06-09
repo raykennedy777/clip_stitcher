@@ -26,10 +26,11 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
    timeline as the export will produce it: source-stitched, spatially conform-accurate
    (letterbox/deinterlace via the decode pipeline), playhead in output frames at the target
    clip's rate. No audio in v1. See ADR-0012.
-7. **Source view polish.** Duplicate clip — a new clip row referencing the same source file
+7. **Source view polish.** ✅ Duplicate clip — a new clip row referencing the same source file
    with the same in/out points. Right-click context menu on a clip row: Open in Cut-Editor,
    Duplicate, Delete.
-8. **Cut-editor fast navigation.** Speed is the point of all of these:
+8. **Cut-editor fast navigation.** ✅ Speed is the point of all of these (see ADR-0013 for
+   the scene-scan recipe):
    - **Shift+←/→ — previous/next keyframe.** The frame index already knows every keyframe,
      and a keyframe decode is the decoder's cheapest seek, so this must feel instant.
    - **↓ — next scene change**: scan forward comparing successive frames against a
