@@ -200,9 +200,56 @@ enum ExportEngine {
 
     /// The concat demuxer's list file: one `file '<path>'` line per piece. Single quotes
     /// in a path are escaped (`'\''`) so a filename can't break out of the directive.
-    static func concatListContents(pieces: [URL]) -> String {
-        pieces.map { "file '\($0.path.replacingOccurrences(of: "'", with: "'\\''"))'" }
-            .joined(separator: "\n") + "\n"
+    ///
+    /// `durations` (one optional entry per piece, aligned by index) adds a `duration
+    /// <seconds>` directive after a piece's `file` line. That pins how far the demuxer
+    /// advances the timeline before the *next* piece, overriding the container-reported
+    /// duration. It matters because a stream-copied head piece that kept the source's
+    /// non-zero `start_time` reports a duration inflated by that leading offset (the MKV/MP4
+    /// duration field measures from zero, so it includes the gap before the first frame);
+    /// the demuxer would then place the following piece one slot late and open a gap at the
+    /// seam (the start_time off-by-one, ADR-0008). The true span — `pts[upperBound] -
+    /// pts[lowerBound]` of the piece's kept frames — closes it. Container-agnostic: on a TS
+    /// piece, whose offset the mpegts muxer already normalises uniformly, the directive
+    /// equals the real span and changes nothing (verified on H.264/MPEG-2/HEVC in the shell).
+    /// An omitted/`nil` entry emits no directive — the default (`[]`) reproduces the bare list.
+    static func concatListContents(pieces: [URL], durations: [Double?] = []) -> String {
+        var lines: [String] = []
+        for (i, piece) in pieces.enumerated() {
+            lines.append("file '\(piece.path.replacingOccurrences(of: "'", with: "'\\''"))'")
+            if i < durations.count, let d = durations[i], d > 0 {
+                lines.append("duration \(timeString(d))")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Inspects a produced piece's presentation timestamps (sorted ascending) for the two
+    /// timestamp defects this engine has shipped: a **duplicate** PTS (two frames sharing a
+    /// timestamp — the B-pyramid/MKV stream-copy collapse, ADR-0011) and a **seam gap** (a
+    /// frame slot skipped — the start_time concat offset, ADR-0008). Within one produced
+    /// piece the frame rate is constant, so a clean piece is near-uniformly spaced: an
+    /// interval at or below half the median is a duplicate, at or above 1.5× is a gap. The
+    /// generous band tolerates float jitter while still catching a whole missing/collapsed
+    /// frame. Returns a human-readable reason, or `nil` when clean (or too short to judge).
+    /// Pure, so it is unit-tested against captured-defect timestamps; the export engines run
+    /// it as a final self-check before a piece ships, so neither defect can slip out silently.
+    static func timestampDefect(pts: [Double]) -> String? {
+        guard pts.count >= 3 else { return nil }
+        let deltas = zip(pts.dropFirst(), pts).map { $0 - $1 }
+        let median = deltas.sorted()[deltas.count / 2]
+        guard median > 0 else { return "frames share a timestamp (zero median interval)" }
+        for (i, d) in deltas.enumerated() {
+            if d <= median * 0.5 {
+                return String(format: "frames at %.3fs and %.3fs are only %.4fs apart (~%.4fs expected — a duplicate)",
+                              pts[i], pts[i + 1], d, median)
+            }
+            if d >= median * 1.5 {
+                return String(format: "a %.4fs gap between %.3fs and %.3fs (~%.4fs expected — a frame slot was skipped)",
+                              d, pts[i], pts[i + 1], median)
+            }
+        }
+        return nil
     }
 
     /// Input args selecting one clip's audio source range: a fast seek to `start` and a

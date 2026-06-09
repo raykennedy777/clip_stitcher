@@ -159,7 +159,8 @@ enum BoundaryReencodeEngine {
         } else {
             let joined = work.appendingPathComponent("c\(clipIndex)_joined.\(ext)")
             let listFile = work.appendingPathComponent("c\(clipIndex)_concat.txt")
-            try ExportEngine.concatListContents(pieces: pieces).write(to: listFile, atomically: true, encoding: .utf8)
+            try ExportEngine.concatListContents(pieces: pieces, durations: segmentSpans(plan, index: index))
+                .write(to: listFile, atomically: true, encoding: .utf8)
             try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
             result = joined
         }
@@ -175,7 +176,24 @@ enum BoundaryReencodeEngine {
         plan.reduce(0) { $0 + $1.range.count }
     }
 
-    /// Verifies a produced video piece before it ships (ADR-0008). Two checks, either of
+    /// The timeline span (seconds) each planned segment should occupy when its pieces are
+    /// concatenated — the `duration` directive fed to `ExportEngine.concatListContents` to
+    /// close the start_time seam gap. A segment `[lo, hi)` spans from its first kept frame to
+    /// the *next* segment's first frame, i.e. `pts[hi] - pts[lo]`: an exact presentation-time
+    /// offset (no frame-rate estimate, so the demuxer can't truncate the piece). The segments
+    /// tile contiguously, so for every segment but the last `hi` is the next segment's start —
+    /// a real, in-bounds frame index. The final segment may run to the clip end (`hi ==
+    /// count`, where `pts[hi]` would be out of bounds); its span never offsets anything, so it
+    /// is left `nil` (no directive). Returns one entry per segment, aligned to the pieces.
+    static func segmentSpans(_ plan: [PlannedSegment], index: FrameIndex) -> [Double?] {
+        plan.map { seg in
+            let lo = seg.range.lowerBound, hi = seg.range.upperBound
+            guard lo < index.pts.count, hi < index.pts.count else { return nil }
+            return index.pts[hi] - index.pts[lo]
+        }
+    }
+
+    /// Verifies a produced video piece before it ships (ADR-0008). Three checks, any of
     /// which throws rather than letting a silently-wrong cut through:
     ///   1. Frame count — the output's video packet count must equal the planned total,
     ///      catching any frame leaking past a cut (a desynced index once made a 2-clip
@@ -183,6 +201,10 @@ enum BoundaryReencodeEngine {
     ///   2. Decode check — a full `-xerror` decode pass must succeed, catching a corrupt
     ///      re-encode→copy seam (e.g. orphaned leading pictures) that a frame count alone
     ///      would miss.
+    ///   3. Timestamp check — the output's presentation timestamps must be free of the seam
+    ///      gap (start_time concat offset) and duplicates (B-pyramid/MKV collapse) that the
+    ///      frame count and decode would both pass over. The piece is one source's footage at
+    ///      one frame rate, so its spacing is uniform when clean (`ExportEngine.timestampDefect`).
     private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedFrames: Int) async throws {
         let actual = try await FrameIndexer.frameCount(url: piece)
         guard actual == expectedFrames else {
@@ -196,6 +218,10 @@ enum BoundaryReencodeEngine {
                 $0.isEmpty ? nil : $0
             } ?? "decode exited \(decode.status)"
             throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
+        }
+        let pts = try await FrameIndexer.buildIndex(url: piece).pts
+        if let reason = ExportEngine.timestampDefect(pts: pts) {
+            throw ExportError.verificationFailed("The cut produced irregular timestamps: \(reason)")
         }
     }
 

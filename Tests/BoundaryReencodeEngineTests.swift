@@ -138,4 +138,24 @@ struct BoundaryReencodeEngineTests {
         #expect(BoundaryReencodeEngine.expectedFrameCount(
             [PlannedSegment(kind: .copy, range: 0..<100)]) == 100)
     }
+
+    /// The concat `duration` directive for each segment is the exact presentation-time span
+    /// to the next segment's first frame (`pts[hi] - pts[lo]`), closing the start_time seam
+    /// gap without a frame-rate estimate. The final segment runs to the clip end, where
+    /// `pts[hi]` is out of bounds, so it carries no directive (`nil`) — its span never offsets
+    /// a following piece (the start_time off-by-one, ADR-0008).
+    @Test func segmentSpansAreExactPresentationOffsetsLastIsNil() {
+        // A source at start_time 0.24, 25fps. Copy [0,4) then re-encode [4,8) to the end.
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let plan = [
+            PlannedSegment(kind: .copy, range: 0..<4),
+            PlannedSegment(kind: .reEncode, range: 4..<8),
+        ]
+        let spans = BoundaryReencodeEngine.segmentSpans(plan, index: index)
+        #expect(spans.count == 2)
+        #expect(abs((spans[0] ?? -1) - 0.16) < 1e-9)   // pts[4] - pts[0] = 0.40 - 0.24, = 4 frames
+        #expect(spans[1] == nil)                        // runs to the clip end → no directive
+    }
 }

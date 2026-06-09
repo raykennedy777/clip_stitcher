@@ -58,7 +58,11 @@ on its own.
     pictures reference the keyframe itself, so a copy cut at a CRA boundary drops/adds 1–2 frames
     (verified: a CRA-to-CRA extraction came out ±1–2 frames).
 - Correctness is verified by **frame count against frame-index positions** plus a **decode check**
-  (`-xerror`), never by reading the (reset) output timestamps.
+  (`-xerror`), never by reading the (reset) output timestamps. A third check inspects the output's
+  presentation timestamps for **uniform spacing** (`ExportEngine.timestampDefect`): within one
+  produced piece the frame rate is constant, so a duplicate PTS or a one-slot gap is unambiguous.
+  This is *not* "reading the reset timestamps to confirm a cut landed right" (still forbidden) — it
+  asserts the piece's own internal regularity, catching the two concat-mux defects below.
 
 ## Consequences
 
@@ -67,3 +71,17 @@ on its own.
 - Input `-ss`/`-to` stream-copy seeking was rejected for the cut primitive: it landed
   inconsistently (HEVC undershot a full GOP; TS overshot ~1.9 s from its non-zero `start_time`).
   The segment muxer cuts reliably at keyframes regardless of format.
+- **The non-zero `start_time` also opened a seam gap when the pieces were concatenated** (de-risked
+  in the shell on all three formats). A head-**copy** piece is segment 0 of the cut, which
+  `-reset_timestamps` does *not* rebase, so it keeps the source's `start_time` (Jerez 0.040,
+  MPEG-2 .mpg 0.24). On MKV/MP4 the container duration field measures from zero and so *includes*
+  that leading offset; the concat demuxer advances the timeline by that inflated duration and places
+  the following (re-encode) piece one frame-slot late → a gap at the copy→re-encode seam. TS is
+  immune — the mpegts muxer's default `initial_offset` (~1.44 s) shifts every piece uniformly, so
+  the naive concat is already gap-free there. **Fix:** the concat list carries a `duration`
+  directive per piece = `pts[upperBound] − pts[lowerBound]` of its kept frames (an exact
+  presentation-time span — no frame-rate estimate, so the demuxer cannot truncate), which overrides
+  the container duration and closes the gap. Container-agnostic: on a `start_time` ≈ 0 source the
+  directive equals the real span and is a no-op (verified). See `ExportEngine.concatListContents` /
+  `BoundaryReencodeEngine.segmentSpans`. *(The cross-clip concat carries the same risk for a
+  single-segment whole-clip-keep piece; tracked separately as a follow-up — it is not yet fixed.)*

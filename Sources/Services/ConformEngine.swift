@@ -137,6 +137,13 @@ enum ConformEngine {
                 ?? "decode exited \(decode.status)"
             throw ExportError.verificationFailed("A decode check failed on the conformed clip.\n\(detail)")
         }
+        // A conformed clip is a single re-encode at the target frame rate, so its timestamps
+        // should be uniformly spaced; this catches the duplicate PTS that the B-pyramid/MKV
+        // stream-copy collapse once produced (ADR-0011) before the clip ships.
+        let pts = try await FrameIndexer.buildIndex(url: piece).pts
+        if let reason = ExportEngine.timestampDefect(pts: pts) {
+            throw ExportError.verificationFailed("The conformed clip has irregular timestamps: \(reason)")
+        }
     }
 
     /// Names the dimensions a conformed output missed, for a useful failure message.

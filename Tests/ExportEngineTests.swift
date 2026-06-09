@@ -211,4 +211,58 @@ struct ExportEngineTests {
         #expect(ExportEngine.outputExtension(type: .videoAndAudio, container: .ts, audioEncoder: "mp2") == "ts")
         #expect(ExportEngine.outputExtension(type: .videoOnly, container: .mkv, audioEncoder: "aac") == "mkv")
     }
+
+    // MARK: concat duration directives (the start_time seam gap, ADR-0008)
+
+    @Test func concatListOmitsDurationsByDefault() {
+        // The bare two-arg call must reproduce the plain list (no `duration` lines), so the
+        // cross-clip concat and every existing caller are unaffected.
+        let pieces = [URL(fileURLWithPath: "/tmp/a.mkv"), URL(fileURLWithPath: "/tmp/b.mkv")]
+        let list = ExportEngine.concatListContents(pieces: pieces)
+        #expect(!list.contains("duration"))
+        #expect(list == "file '/tmp/a.mkv'\nfile '/tmp/b.mkv'\n")
+    }
+
+    @Test func concatListEmitsDurationDirectivesAlignedToPieces() {
+        // A head-copy span of 3.56s pins the demuxer's advance so the re-encode piece can't
+        // land late; a `nil` (the final, run-to-end piece) emits no directive.
+        let pieces = [URL(fileURLWithPath: "/tmp/cp.mkv"), URL(fileURLWithPath: "/tmp/re.mkv")]
+        let list = ExportEngine.concatListContents(pieces: pieces, durations: [3.56, nil])
+        #expect(list == "file '/tmp/cp.mkv'\nduration 3.56\nfile '/tmp/re.mkv'\n")
+    }
+
+    @Test func concatListSkipsNonPositiveDurations() {
+        let pieces = [URL(fileURLWithPath: "/tmp/a.mkv"), URL(fileURLWithPath: "/tmp/b.mkv")]
+        let list = ExportEngine.concatListContents(pieces: pieces, durations: [0, nil])
+        #expect(!list.contains("duration"))
+    }
+
+    // MARK: timestamp self-check (catches both shipped defects)
+
+    @Test func timestampDefectPassesUniformSpacing() {
+        let pts = (0..<100).map { 0.04 * Double($0) }   // clean 25fps run
+        #expect(ExportEngine.timestampDefect(pts: pts) == nil)
+    }
+
+    @Test func timestampDefectCatchesASeamGap() {
+        // 25fps that skips one slot at frame 89 (the start_time off-by-one): …3.52, 3.60…
+        var pts = (0..<89).map { 0.04 * Double($0) }
+        pts += (89..<100).map { 0.04 * Double($0) + 0.04 }
+        let reason = ExportEngine.timestampDefect(pts: pts)
+        #expect(reason != nil)
+        #expect(reason?.contains("gap") == true)
+    }
+
+    @Test func timestampDefectCatchesADuplicate() {
+        // Two frames collapsed onto one PTS (the B-pyramid/MKV mux defect).
+        var pts = (0..<50).map { 0.04 * Double($0) }
+        pts[25] = pts[24]
+        let reason = ExportEngine.timestampDefect(pts: pts)
+        #expect(reason != nil)
+        #expect(reason?.contains("duplicate") == true)
+    }
+
+    @Test func timestampDefectIgnoresTooFewFrames() {
+        #expect(ExportEngine.timestampDefect(pts: [0.0, 0.04]) == nil)
+    }
 }
