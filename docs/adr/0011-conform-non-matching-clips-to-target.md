@@ -55,3 +55,12 @@ target_fps` (±1 for boundary rounding), since fps conversion legitimately chang
 - Lives in a new `ConformEngine` mirroring `BoundaryReencodeEngine`, with an optional conform
   descriptor on `ExportItem`; the proven M2 path is untouched. The two engines share surface
   (encoder/profile selection, `timeString`) flagged `TODO(consolidate)` for a later refactor.
+- Conform encodes **disable B-pyramid** (`b-pyramid=0` for libx264/libx265; MPEG-2 has none).
+  libx264's default B-pyramid lets B-frames reference other B-frames, yielding a decode order
+  whose DTS is non-monotonic. The conformed piece probes clean, but after the concat that
+  reordered DTS reaches the final stream-copy mux, and **Matroska enforces monotonic DTS by
+  nudging the backwards values forward — collapsing pairs of frames onto a single PTS** (the
+  duplicate/gapped-timestamps bug). TS tolerates it, so the `.ts` shell de-risk hid it: this
+  surfaced only when probing the real **MKV** output. Disabling B-pyramid keeps the decode-order
+  timestamps monotonic from birth (one level of B-frames is retained for compression), so the
+  conformed clip survives the MKV `-c:v copy` unchanged. Verified end-to-end on H.264 and HEVC.

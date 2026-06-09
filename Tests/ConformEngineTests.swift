@@ -41,7 +41,7 @@ struct ConformEngineTests {
         #expect(ConformEngine.conformVideoArgs(source: mpeg2, target: h264) == [
             "-vf", "bwdif=mode=0,scale=704:396,pad=704:528:0:66,setsar=1/1,format=yuv420p,fps=25,"
                 + "setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown",
-            "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
+            "-c:v", "libx264", "-profile:v", "high", "-level", "4.0", "-x264-params", "b-pyramid=0",
         ])
     }
 
@@ -65,7 +65,8 @@ struct ConformEngineTests {
     @Test func conformsH264ToHevcWithPillarboxAnd10Bit() {
         #expect(ConformEngine.conformVideoArgs(source: h264, target: hevc) == [
             "-vf", "scale=1440:1080,pad=1920:1080:240:0,setsar=1/1,format=yuv420p10le,fps=50",
-            "-c:v", "libx265", "-profile:v", "main10", "-x265-params", "log-level=error:level-idc=4.1",
+            "-c:v", "libx265", "-profile:v", "main10",
+            "-x265-params", "log-level=error:level-idc=4.1:b-pyramid=0",
             "-color_range", "tv",
         ])
     }

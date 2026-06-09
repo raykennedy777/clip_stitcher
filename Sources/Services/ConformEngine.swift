@@ -260,6 +260,8 @@ enum ConformEngine {
             args = ["-c:v", "libx265", "-profile:v", profile(target),
                     "-x265-params", x265Params(target)]
         case "mpeg2video":
+            // MPEG-2 has no B-pyramid (its B-frames never reference other B-frames), so its
+            // decode-order timestamps are already monotonic — no monotonic-DTS workaround needed.
             args = ["-c:v", "mpeg2video", "-profile:v", profile(target)]
             if isInterlaced(target.fieldOrder) {
                 args += ["-flags", "+ildct+ilme", "-top", topFieldFirst(target.fieldOrder) ? "1" : "0"]
@@ -267,6 +269,14 @@ enum ConformEngine {
         default:   // h264
             args = ["-c:v", "libx264", "-profile:v", profile(target)]
             if let lvl = h264Level(target.level) { args += ["-level", lvl] }
+            // Disable B-pyramid (verified in the shell): libx264's default B-pyramid lets B-frames
+            // reference other B-frames, producing a decode order whose DTS is non-monotonic. After
+            // the concat that reordered DTS reaches the final stream-copy mux, and Matroska enforces
+            // monotonic DTS by nudging the backwards values forward — which collapses pairs of frames
+            // onto a single PTS (the duplicate/gapped timestamps bug). Without B-pyramid the DTS is
+            // monotonic from birth, so the conformed clip survives the MKV `-c:v copy` unchanged.
+            // One level of B-frames is kept (compression), just not the pyramid.
+            args += ["-x264-params", "b-pyramid=0"]
         }
         // Drop an unmapped profile rather than guess (a wrong token aborts the encode).
         if args.count >= 4, args[2] == "-profile:v", args[3].isEmpty {
@@ -287,6 +297,10 @@ enum ConformEngine {
         if let n = target.level.flatMap(Int.init) {
             p += ":level-idc=\(n / 30).\((n % 30) / 3)"
         }
+        // Disable B-pyramid for the same monotonic-DTS reason as the libx264 path (see encoderArgs):
+        // keep the conformed HEVC clip's decode-order timestamps monotonic so the final MKV
+        // stream-copy mux can't collapse frames onto duplicate PTS.
+        p += ":b-pyramid=0"
         return p
     }
 
