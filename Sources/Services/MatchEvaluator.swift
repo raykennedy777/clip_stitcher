@@ -44,6 +44,35 @@ enum MatchEvaluator {
         cv.colorRange == tv.colorRange
     }
 
+    /// Whether a conformed output satisfies its target for the self-verify gate (ADR-0011). The
+    /// stricter dimensions are exact, exactly as `videoMatches`, but a color dimension the target
+    /// leaves UNSPECIFIED (nil) imposes no requirement: conform strips the output's color tags
+    /// best-effort, yet some are intrinsic to the encoder/container (libx264 + Matroska always
+    /// signal limited `tv` range), and an unspecified target plays back under that same default —
+    /// so the residual tag is not a real difference. A color dimension the target DOES specify must
+    /// still match, so a *differently* color-tagged target is still caught loudly (true color-aware
+    /// conversion remains a TODO). The strict `videoMatches` still drives smart-render routing.
+    static func conformedVideoMatches(_ output: VideoProperties, _ target: VideoProperties) -> Bool {
+        output.codec == target.codec &&
+        output.profile == target.profile &&
+        output.level == target.level &&
+        output.width == target.width &&
+        output.height == target.height &&
+        output.frameRate == target.frameRate &&
+        output.pixelFormat == target.pixelFormat &&
+        normalizedFieldOrder(output.fieldOrder) == normalizedFieldOrder(target.fieldOrder) &&
+        output.sampleAspectRatio == target.sampleAspectRatio &&
+        colorSatisfies(output.colorPrimaries, target: target.colorPrimaries) &&
+        colorSatisfies(output.colorTransfer, target: target.colorTransfer) &&
+        colorSatisfies(output.colorRange, target: target.colorRange)
+    }
+
+    /// A target color field that is unspecified (nil) imposes no requirement on the conformed
+    /// output; a specified one must match exactly.
+    static func colorSatisfies(_ output: String?, target: String?) -> Bool {
+        target == nil || output == target
+    }
+
     /// Canonicalises an ffprobe `field_order` for comparison and conform targeting: a missing,
     /// empty, or "unknown" value means progressive (a clean progressive HEVC stream often
     /// reports no field order at all, so the target clip would otherwise be unmatchable even

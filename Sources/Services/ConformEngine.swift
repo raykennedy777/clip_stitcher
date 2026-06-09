@@ -119,7 +119,7 @@ enum ConformEngine {
         _ ffmpeg: URL, _ piece: URL, target: VideoProperties, expectedFrames: Int?
     ) async throws {
         let probed = try await MediaProbe.probe(url: piece).video
-        guard let v = probed, MatchEvaluator.videoMatches(v, target) else {
+        guard let v = probed, MatchEvaluator.conformedVideoMatches(v, target) else {
             throw ExportError.verificationFailed(
                 "The conformed clip did not reach the target spec (\(mismatchSummary(probed, target))).")
         }
@@ -157,7 +157,11 @@ enum ConformEngine {
         if g.sampleAspectRatio != want.sampleAspectRatio {
             diffs.append("sar \(g.sampleAspectRatio ?? "?")≠\(want.sampleAspectRatio ?? "?")")
         }
-        if g.colorPrimaries != want.colorPrimaries || g.colorTransfer != want.colorTransfer || g.colorRange != want.colorRange {
+        // Only a color dimension the target actually specifies counts as a miss — an unspecified
+        // target imposes no color requirement (mirrors MatchEvaluator.conformedVideoMatches).
+        if !MatchEvaluator.colorSatisfies(g.colorPrimaries, target: want.colorPrimaries)
+            || !MatchEvaluator.colorSatisfies(g.colorTransfer, target: want.colorTransfer)
+            || !MatchEvaluator.colorSatisfies(g.colorRange, target: want.colorRange) {
             diffs.append("color")
         }
         return diffs.isEmpty ? "video stream differs" : diffs.joined(separator: ", ")
@@ -178,10 +182,6 @@ enum ConformEngine {
         filters += scaleAndPad(source: source, target: target)
         filters.append("setsar=\(sarFraction(target.sampleAspectRatio))")
         filters.append("format=\(target.pixelFormat)")
-        // TODO(color): no colorspace/primaries/transfer conversion is emitted — only the encoder's
-        // -color_range is pinned. The real footage all probes primaries/transfer = None, so a target
-        // that sets them is caught by verifyConformed's loud fail (mismatchSummary "color") rather than
-        // converted. True color-aware conversion (zscale) is deferred per ADR-0011.
 
         // Frame-rate / scan tail. Interlacing a progressive source needs the field-rate
         // (2× the target frame rate) feeding the interlace filter, which halves it back.
@@ -191,7 +191,27 @@ enum ConformEngine {
         } else {
             filters.append("fps=\(fpsToken(target.frameRate, double: false))")
         }
+
+        // Color tail. When the target carries no color metadata (an untagged SD source like the
+        // SATRip H.264), a fully-tagged source (e.g. bt709 HD) would otherwise propagate its VUI
+        // into the output, so the conformed clip would be rendered as bt709 next to the untagged
+        // target and the join would visibly colour-shift. `setparams` resets the frames to
+        // unspecified so the conformed clip plays back under the same default as the target, keeping
+        // the seam seamless (ADR-0011). It can't drop everything — libx264 + Matroska still signal
+        // limited `tv` range — but that residual tag matches the target's default and is accepted by
+        // verifyConformed (conformedVideoMatches ignores colour the target leaves unspecified). No
+        // *conversion* toward a differently-tagged target is attempted; true zscale conversion is a TODO.
+        if targetIsUntagged(target) {
+            filters.append("setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown")
+        }
         return filters
+    }
+
+    /// Whether the target declares no color metadata at all — primaries, transfer, and range all
+    /// absent (an untagged source probes every field as "unknown"). Such a target is matched by
+    /// stripping the conformed output's tags, not by converting toward a color space.
+    private static func targetIsUntagged(_ t: VideoProperties) -> Bool {
+        t.colorPrimaries == nil && t.colorTransfer == nil && t.colorRange == nil
     }
 
     /// The scale (and, on a DAR mismatch, pad) filters. When source and target display the

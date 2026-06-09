@@ -73,6 +73,33 @@ struct MatchEvaluatorTests {
         #expect(MatchEvaluator.videoMatches(video(field: nil), video(field: "progressive")))
     }
 
+    @Test func conformedMatchIgnoresColorTheUntaggedTargetDoesNotSpecify() {
+        // The MKV→untagged-SD case: libx264 + Matroska always stamp limited `tv` range, so a
+        // conformed piece keeps `range=tv` even after the strip. An untagged target specifies no
+        // colour, so that residual tag must NOT fail the conform self-verify.
+        let untagged = VideoProperties(
+            codec: "h264", profile: "High", level: "40", width: 704, height: 528,
+            frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: "progressive",
+            sampleAspectRatio: "1:1", colorPrimaries: nil, colorTransfer: nil, colorRange: nil)
+        var output = untagged; output.colorRange = "tv"
+        #expect(MatchEvaluator.conformedVideoMatches(output, untagged))
+        // A non-colour mismatch still fails.
+        var wrongSize = output; wrongSize.width = 1280
+        #expect(!MatchEvaluator.conformedVideoMatches(wrongSize, untagged))
+    }
+
+    @Test func conformedMatchStillEnforcesColorTheTargetSpecifies() {
+        // The loud-fail backstop: when the target DOES carry colour, a differently-tagged output
+        // must still fail (true conversion is deferred), so we never ship a colour-wrong clip.
+        let tagged = video()   // bt709 / bt709 / tv
+        var wrongColor = tagged; wrongColor.colorPrimaries = "bt470bg"
+        #expect(!MatchEvaluator.conformedVideoMatches(wrongColor, tagged))
+        #expect(MatchEvaluator.conformedVideoMatches(tagged, tagged))
+        #expect(MatchEvaluator.colorSatisfies(nil, target: nil))
+        #expect(MatchEvaluator.colorSatisfies("tv", target: nil))
+        #expect(!MatchEvaluator.colorSatisfies(nil, target: "tv"))
+    }
+
     @Test func videoMismatchFailsRegardlessOfAudio() {
         let target = clip(video: video(width: 1920), audio: audio())
         let other = clip(video: video(width: 1280), audio: audio())

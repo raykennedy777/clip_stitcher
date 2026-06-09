@@ -35,12 +35,28 @@ struct ConformEngineTests {
     /// MPEG-2 → H.264: interlaced → progressive deinterlaces with bwdif, and a 16:9 source
     /// into a 4:3 frame letterboxes (bars top/bottom: scale 704×396, pad to 704×528 at y=66).
     /// The anamorphic source (SAR 64:45) is fitted in display space, not storage pixels.
-    /// H.264 level 40 → "-level 4.0"; the target has no color range so none is set.
+    /// H.264 level 40 → "-level 4.0". The target is fully untagged (an SD SATRip), so the chain
+    /// ends with `setparams=...=unknown` to strip any source color tags and match it.
     @Test func conformsInterlacedMpeg2ToH264WithLetterbox() {
         #expect(ConformEngine.conformVideoArgs(source: mpeg2, target: h264) == [
-            "-vf", "bwdif=mode=0,scale=704:396,pad=704:528:0:66,setsar=1/1,format=yuv420p,fps=25",
+            "-vf", "bwdif=mode=0,scale=704:396,pad=704:528:0:66,setsar=1/1,format=yuv420p,fps=25,"
+                + "setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown",
             "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
         ])
+    }
+
+    /// A fully color-tagged source (bt709 HD) conforming to an untagged target must have its color
+    /// metadata stripped, or the propagated VUI fails self-verify against the untagged target — the
+    /// MKV→SD-H.264 case that surfaced in real use. A target that *does* carry color (the MPEG-2
+    /// target's `tv` range) is left alone: stripping is only for the all-untagged target.
+    @Test func untaggedTargetStripsColorButTaggedTargetDoesNot() {
+        var tagged = h264
+        tagged.colorPrimaries = "bt709"; tagged.colorTransfer = "bt709"; tagged.colorRange = "tv"
+        #expect(ConformEngine.conformVideoArgs(source: tagged, target: h264)
+            .contains { $0.contains("setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown") })
+        // mpeg2 target carries a color range, so no strip is appended.
+        #expect(!ConformEngine.conformVideoArgs(source: hevc, target: mpeg2)
+            .contains { $0.contains("setparams") })
     }
 
     /// H.264 → HEVC: a 4:3 source into a 16:9 frame pillarboxes (bars left/right: scale
