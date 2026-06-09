@@ -106,9 +106,9 @@ struct PreviewView: View {
             Text("Frame \(model.currentFrame) / \(model.lastFrame)")
                 .monospacedDigit()
             Spacer()
-            Text(model.timecode(forFrame: model.currentFrame))
+            (Text(model.timecode(forFrame: model.currentFrame)).font(.body.weight(.medium))
+                + Text("  /  \(model.timecode(forFrame: model.frameCount))").foregroundStyle(.secondary))
                 .monospacedDigit()
-                .font(.body.weight(.medium))
             Spacer()
             Text(model.currentClipName ?? "")
                 .foregroundStyle(.secondary)
@@ -122,6 +122,10 @@ struct PreviewView: View {
             button("backward.end.fill", help: "First frame") { model.goToStart() }
             button("backward.frame.fill", help: "Back one frame (←)") { model.step(by: -1) }
                 .keyboardShortcut(.leftArrow, modifiers: [])
+
+            button(model.isPlaying ? "pause.fill" : "play.fill", help: "Play / Pause (Space)") { model.togglePlay() }
+                .keyboardShortcut(.space, modifiers: [])
+
             button("forward.frame.fill", help: "Forward one frame (→)") { model.step(by: 1) }
                 .keyboardShortcut(.rightArrow, modifiers: [])
             button("forward.end.fill", help: "Last frame") { model.goToEnd() }

@@ -31,6 +31,7 @@ final class PreviewModel: ObservableObject {
     /// Total output frames across the assembled timeline.
     @Published var frameCount = 0
     @Published var isLoading = true
+    @Published var isPlaying = false
     /// Friendly empty-state text (no clips yet / nothing previewable) — not an error.
     @Published var statusMessage: String?
     @Published var errorMessage: String?
@@ -51,6 +52,7 @@ final class PreviewModel: ObservableObject {
     private var pendingFrame: Int?
     private var pendingIsJump = false
     private var decodeTask: Task<Void, Never>?
+    private var playTask: Task<Void, Never>?
 
     /// FIFO cache of recently shown frames, keyed by **global output frame**.
     private var cache: [Int: NSImage] = [:]
@@ -134,6 +136,7 @@ final class PreviewModel: ObservableObject {
 
     func seek(to frame: Int) {
         guard frameCount > 0 else { return }
+        if isPlaying { stopPlayback() }   // scrubbing/stepping pauses playback
         let previous = currentFrame
         let clamped = min(max(0, frame), lastFrame)
         currentFrame = clamped
@@ -166,65 +169,99 @@ final class PreviewModel: ObservableObject {
         decodeTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.decodeTask = nil }
-            while let target = self.pendingFrame, let timeline = self.timeline {
+            while let target = self.pendingFrame {
                 if let cached = self.cache[target] {
                     if self.currentFrame == target { self.image = cached }
                     if self.pendingFrame == target { self.pendingFrame = nil }
                     continue
                 }
-                guard let (segmentIndex, local) = timeline.locate(target) else {
-                    self.pendingFrame = nil
-                    break
-                }
-                let segment = timeline.segments[segmentIndex]
-                guard var runtime = self.runtimes[segment.clipID] else {
-                    self.pendingFrame = nil
-                    break
-                }
-                let source = timeline.sourceFrame(in: segment, local: local, pts: runtime.index.pts)
-                let jump = self.pendingIsJump
-
-                if runtime.decoder == nil {
-                    runtime.decoder = FrameStreamDecoder(
-                        url: runtime.url, index: runtime.index,
-                        width: runtime.previewW, height: runtime.previewH,
-                        useHardware: true, filter: runtime.filter, windowSize: self.cacheCap
-                    )
-                    self.runtimes[segment.clipID] = runtime
-                }
-                guard let decoder = runtime.decoder else {
-                    self.pendingFrame = nil
-                    break
-                }
-
-                // Mask a jump's keyframe-seek warm-up with the GOP keyframe.
-                if jump, let preview = await decoder.keyframePreview(forFrameAt: source) {
-                    self.cacheDecoded(frame: preview.frame, image: preview.image,
-                                      segment: segment, requested: (target, source))
-                    if self.currentFrame == target { self.image = preview.image }
-                    if self.pendingFrame != target { continue } // user moved on
-                }
-
-                let result = await decoder.image(at: source)
-                for entry in result.window {
-                    self.cacheDecoded(frame: entry.frame, image: entry.image,
-                                      segment: segment, requested: (target, source))
-                }
-                var produced = result.image
-                if produced == nil,
-                   let data = try? await FrameExtractor.imageData(
-                       url: runtime.url, index: runtime.index, frame: source,
-                       width: runtime.previewW, height: runtime.previewH,
-                       filter: runtime.filter) {
-                    produced = NSImage(data: data)
-                }
-                if let produced {
-                    self.cacheInsert(target, produced)
-                    if self.currentFrame == target { self.image = produced }
-                }
+                let produced = await self.produce(target, maskJumpWithKeyframe: self.pendingIsJump)
+                if let produced, self.currentFrame == target { self.image = produced }
                 if self.pendingFrame == target { self.pendingFrame = nil }
             }
         }
+    }
+
+    /// Decodes (and caches) global output frame `target`, creating the clip's decoder
+    /// on first use. With `maskJumpWithKeyframe` (the worker's jump path) the GOP
+    /// keyframe is shown immediately to mask the seek-and-decode warm-up, and the
+    /// decode is abandoned (nil) if the user has already moved on.
+    private func produce(_ target: Int, maskJumpWithKeyframe jump: Bool = false) async -> NSImage? {
+        guard let timeline, let (segmentIndex, local) = timeline.locate(target) else { return nil }
+        let segment = timeline.segments[segmentIndex]
+        guard var runtime = runtimes[segment.clipID] else { return nil }
+        let source = timeline.sourceFrame(in: segment, local: local, pts: runtime.index.pts)
+
+        if runtime.decoder == nil {
+            runtime.decoder = FrameStreamDecoder(
+                url: runtime.url, index: runtime.index,
+                width: runtime.previewW, height: runtime.previewH,
+                useHardware: true, filter: runtime.filter, windowSize: cacheCap
+            )
+            runtimes[segment.clipID] = runtime
+        }
+        guard let decoder = runtime.decoder else { return nil }
+
+        if jump, let preview = await decoder.keyframePreview(forFrameAt: source) {
+            cacheDecoded(frame: preview.frame, image: preview.image,
+                         segment: segment, requested: (target, source))
+            if currentFrame == target { image = preview.image }
+            if pendingFrame != target { return nil } // user moved on
+        }
+
+        let result = await decoder.image(at: source)
+        for entry in result.window {
+            cacheDecoded(frame: entry.frame, image: entry.image,
+                         segment: segment, requested: (target, source))
+        }
+        var produced = result.image
+        if produced == nil,
+           let data = try? await FrameExtractor.imageData(
+               url: runtime.url, index: runtime.index, frame: source,
+               width: runtime.previewW, height: runtime.previewH,
+               filter: runtime.filter) {
+            produced = NSImage(data: data)
+        }
+        if let produced { cacheInsert(target, produced) }
+        return produced
+    }
+
+    // MARK: - Playback (best-effort, no audio in v1 — ADR-0003/0012)
+
+    func togglePlay() { isPlaying ? stopPlayback() : play() }
+
+    func play() {
+        guard !isPlaying, frameCount > 0 else { return }
+        // Playback owns the decoders while running; stand the seek worker down.
+        decodeTask?.cancel()
+        decodeTask = nil
+        pendingFrame = nil
+        isPlaying = true
+        let frameDuration = UInt64(1_000_000_000 / max(1.0, fps))
+        playTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while self.isPlaying && !Task.isCancelled {
+                if self.currentFrame >= self.lastFrame { self.isPlaying = false; break }
+                let next = self.currentFrame + 1
+                self.currentFrame = next
+                self.updateClipName(for: next)
+                let frame: NSImage?
+                if let cached = self.cache[next] {
+                    frame = cached
+                } else {
+                    frame = await self.produce(next)
+                }
+                if !self.isPlaying || Task.isCancelled { break }
+                if let frame { self.image = frame }
+                try? await Task.sleep(nanoseconds: frameDuration)
+            }
+        }
+    }
+
+    func stopPlayback() {
+        isPlaying = false
+        playTask?.cancel()
+        playTask = nil
     }
 
     /// Caches a frame the decoder produced. The cache is keyed by output frame, but the
@@ -257,6 +294,7 @@ final class PreviewModel: ObservableObject {
     /// section, not a window, so this runs on navigate-away (ADR-0012) — nothing may
     /// keep streaming once the section is hidden.
     func teardown() {
+        stopPlayback()
         decodeTask?.cancel()
         decodeTask = nil
         pendingFrame = nil

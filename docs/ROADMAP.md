@@ -22,7 +22,37 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
 5. **Engine Milestone 3 — conform.** ✅ Full re-encode of non-matching clips to the target spec
    (display-aspect-aware scale/letterbox, scan-type conversion, color/bit-depth, audio
    resample/remix), self-verified against the target before shipping. See ADR-0011.
-6. **Output preview.** Sidebar "Preview" plays back the whole assembled timeline.
+6. **Output preview.** ✅ Sidebar "Preview" scrubs and best-effort-plays the whole assembled
+   timeline as the export will produce it: source-stitched, spatially conform-accurate
+   (letterbox/deinterlace via the decode pipeline), playhead in output frames at the target
+   clip's rate. No audio in v1. See ADR-0012.
+7. **Source view polish.** Duplicate clip — a new clip row referencing the same source file
+   with the same in/out points. Right-click context menu on a clip row: Open in Cut-Editor,
+   Duplicate, Delete.
+8. **Cut-editor fast navigation.** Speed is the point of all of these:
+   - **Shift+←/→ — previous/next keyframe.** The frame index already knows every keyframe,
+     and a keyframe decode is the decoder's cheapest seek, so this must feel instant.
+   - **↓ — next scene change**: scan forward comparing successive frames against a
+     difference threshold; stop at the first scene change, or give up (and land) at a
+     maximum of 5 seconds. **↑ — previous scene change**, same rule over the previous
+     5 seconds. De-risk the scan rate in the shell first (ffmpeg scene-change detection) —
+     a too-slow scan kills the feature.
+9. **Multi-track audio.** Sources can carry several audio tracks; today the engine uses one.
+   - **Output track count = the input with the most** (inputs with 1, 3 and 4 tracks → the
+     output has 4), with **silence filling** a track wherever a source has no corresponding
+     one.
+   - **Per-clip track selection in the cut-editor**: a dropdown naming each track from
+     container metadata, always including language metadata when present, falling back to
+     "Track 1", "Track 2"… when the container has no names.
+   - **Audio stream settings** (reachable from both Source and the cut-editor): add/remove a
+     clip's audio tracks and pick each track's source — another stream of the clip's own
+     file, or an external audio file. (TMPGEnc's equivalent for reference: per-track file
+     name + stream picker with Browse / Use Same Source as Video / Delete Audio Source, plus
+     an Add Audio slot.)
+   - **Open question:** what to do when an external audio source's length differs from the
+     clip's video.
+   Touches the audio rebuild (ADR-0010) and MatchEvaluator's audio dimensions — needs its
+   own ADR and a shell de-risk of the silence-fill/multi-track mux on all three formats.
 
 ### Deferred
 
