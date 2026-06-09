@@ -6,8 +6,16 @@ struct SourceView: View {
     @EnvironmentObject private var cutEditor: CutEditorPresenter
     @State private var selection: Clip.ID?
     @State private var importing = false
-    @State private var relinking = false
+    @State private var importPurpose: ImportPurpose = .add
     @State private var isDropTargeted = false
+
+    /// What a presented file picker is for. A single `.fileImporter` serves both jobs —
+    /// stacking two of the same presentation modifier on one view silently breaks all but
+    /// the last, which once left "Add File" doing nothing.
+    private enum ImportPurpose {
+        case add
+        case relink(Clip.ID)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -31,17 +39,12 @@ struct SourceView: View {
             allowedContentTypes: Self.contentTypes,
             allowsMultipleSelection: true
         ) { result in
-            if case .success(let urls) = result {
+            guard case .success(let urls) = result, !urls.isEmpty else { return }
+            switch importPurpose {
+            case .add:
                 document.addFiles(urls)
-            }
-        }
-        .fileImporter(
-            isPresented: $relinking,
-            allowedContentTypes: Self.contentTypes,
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let url = urls.first, let id = selection {
-                document.relink(id: id, to: url)
+            case .relink(let id):
+                if let url = urls.first { document.relink(id: id, to: url) }
             }
         }
     }
@@ -115,7 +118,7 @@ struct SourceView: View {
 
     private var actionPanel: some View {
         VStack(spacing: 8) {
-            action("Add File", systemImage: "plus") { importing = true }
+            action("Add File", systemImage: "plus") { importPurpose = .add; importing = true }
 
             Divider().padding(.vertical, 6)
 
@@ -132,7 +135,9 @@ struct SourceView: View {
             action("Set as Target Clip", systemImage: "target", enabled: canSetTarget) {
                 if let id = selection { document.setTarget(id: id) }
             }
-            action("Relink…", systemImage: "link", enabled: canRelink) { relinking = true }
+            action("Relink…", systemImage: "link", enabled: canRelink) {
+                if let id = selection { importPurpose = .relink(id); importing = true }
+            }
 
             Spacer()
         }
