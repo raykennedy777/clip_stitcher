@@ -32,6 +32,7 @@ enum ExportError: LocalizedError {
     case invalidPlan
     case unsupportedContainer(codec: String, container: String)
     case cutFailed(String)
+    case conformFailed(String)
     case concatFailed(String)
     case missingSegment
     case verificationFailed(String)
@@ -43,6 +44,7 @@ enum ExportError: LocalizedError {
         case .unsupportedContainer(let codec, let container):
             return "The \(container.uppercased()) container can't carry \(codec) video by stream-copy. Choose TS (recommended for this footage) or MP4."
         case .cutFailed(let d): return "Could not cut a clip.\n\(d)"
+        case .conformFailed(let d): return "Could not conform a clip to the target.\n\(d)"
         case .concatFailed(let d): return "Could not join the clips.\n\(d)"
         case .missingSegment: return "The expected output segment was not produced."
         case .verificationFailed(let d): return "The cut did not verify and was not saved.\n\(d)"

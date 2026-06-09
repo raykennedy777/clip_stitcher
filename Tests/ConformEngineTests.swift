@@ -86,6 +86,25 @@ struct ConformEngineTests {
         #expect(args.prefix(4) == ["-v", "error", "-i", src.path])
     }
 
+    // MARK: relaxed frame-count (ADR-0011)
+
+    /// M2's exact frame-count assertion is relaxed for conformed pieces to `duration × target_fps`
+    /// (±1, checked in verifyConformed), since fps conversion legitimately changes the count: a 10 s
+    /// window is 250 frames at 25 fps and 500 at 50 fps. A fractional rate rounds (10 × 29.97 ≈ 300).
+    @Test func expectedFrameCountIsWindowDurationTimesTargetRate() {
+        #expect(ConformEngine.expectedFrameCount(windowDuration: 10, targetFrameRate: "25/1") == 250)
+        #expect(ConformEngine.expectedFrameCount(windowDuration: 10, targetFrameRate: "50/1") == 500)
+        #expect(ConformEngine.expectedFrameCount(windowDuration: 10, targetFrameRate: "30000/1001") == 300)
+    }
+
+    /// A non-positive window or an unparseable rate yields no expectation, so verifyConformed skips
+    /// the count check rather than failing a clip blind.
+    @Test func expectedFrameCountIsNilWhenUncomputable() {
+        #expect(ConformEngine.expectedFrameCount(windowDuration: 0, targetFrameRate: "25/1") == nil)
+        #expect(ConformEngine.expectedFrameCount(windowDuration: 10, targetFrameRate: "") == nil)
+        #expect(ConformEngine.expectedFrameCount(windowDuration: 10, targetFrameRate: "25/0") == nil)
+    }
+
     // MARK: audio conform (ADR-0011)
 
     /// A conforming clip's audio is resampled and remixed to the target rate and channels

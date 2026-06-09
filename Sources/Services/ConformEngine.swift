@@ -75,20 +75,60 @@ enum ConformEngine {
                                     output: piece)
         let result = try await ProcessRunner.run(ffmpeg, args)
         guard result.status == 0 else {
-            throw ExportError.cutFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
+            throw ExportError.conformFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
         }
         guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
-        try await verifyConformed(ffmpeg, piece, target: conform.targetVideo)
+        let expected = try await expectedFrames(
+            ffmpeg, source: source, start: start, end: end, target: conform.targetVideo)
+        try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected)
         return piece
     }
 
+    /// The frame count a conformed piece should have: the kept window duration × the target
+    /// frame rate. An open end reads to the source's end, so its duration is probed; the
+    /// window is `(end ?? sourceDuration) - (start ?? 0)`. Returns `nil` when the duration
+    /// can't be determined, so `verifyConformed` skips the count check rather than fail blind.
+    private static func expectedFrames(
+        _ ffmpeg: URL, source: URL, start: Double?, end: Double?, target: VideoProperties
+    ) async throws -> Int? {
+        let windowEnd: Double
+        if let end {
+            windowEnd = end
+        } else if let dur = try await MediaProbe.probe(url: source).duration {
+            windowEnd = dur
+        } else {
+            return nil
+        }
+        return expectedFrameCount(windowDuration: windowEnd - (start ?? 0),
+                                  targetFrameRate: target.frameRate)
+    }
+
+    /// The frame count a conformed piece should have for a kept window of `windowDuration`
+    /// seconds re-encoded to `targetFrameRate`: `duration × fps`, rounded. M2's exact
+    /// frame-count assertion is relaxed to this (±1) for conformed pieces because fps
+    /// conversion legitimately changes the count (ADR-0011). `nil` when the rate is unparseable.
+    static func expectedFrameCount(windowDuration: Double, targetFrameRate: String) -> Int? {
+        guard windowDuration > 0, let fps = frameRateValue(targetFrameRate) else { return nil }
+        return Int((windowDuration * fps).rounded())
+    }
+
     /// Verifies a conformed piece against the acceptance bar (ADR-0011): its re-probed video
-    /// must match the target spec, and a full decode must succeed.
-    private static func verifyConformed(_ ffmpeg: URL, _ piece: URL, target: VideoProperties) async throws {
+    /// must match the target spec, its frame count must be within ±1 of the kept window at the
+    /// target rate (the relaxed M2 assertion), and a full decode must succeed.
+    private static func verifyConformed(
+        _ ffmpeg: URL, _ piece: URL, target: VideoProperties, expectedFrames: Int?
+    ) async throws {
         let probed = try await MediaProbe.probe(url: piece).video
         guard let v = probed, MatchEvaluator.videoMatches(v, target) else {
             throw ExportError.verificationFailed(
                 "The conformed clip did not reach the target spec (\(mismatchSummary(probed, target))).")
+        }
+        if let expected = expectedFrames {
+            let actual = try await FrameIndexer.frameCount(url: piece)
+            guard abs(actual - expected) <= 1 else {
+                throw ExportError.verificationFailed(
+                    "The conformed clip has \(actual) frames but the kept range at the target rate is ~\(expected) (±1).")
+            }
         }
         let decode = try await ProcessRunner.run(
             ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
@@ -138,6 +178,10 @@ enum ConformEngine {
         filters += scaleAndPad(source: source, target: target)
         filters.append("setsar=\(sarFraction(target.sampleAspectRatio))")
         filters.append("format=\(target.pixelFormat)")
+        // TODO(color): no colorspace/primaries/transfer conversion is emitted — only the encoder's
+        // -color_range is pinned. The real footage all probes primaries/transfer = None, so a target
+        // that sets them is caught by verifyConformed's loud fail (mismatchSummary "color") rather than
+        // converted. True color-aware conversion (zscale) is deferred per ADR-0011.
 
         // Frame-rate / scan tail. Interlacing a progressive source needs the field-rate
         // (2× the target frame rate) feeding the interlace filter, which halves it back.
@@ -185,6 +229,10 @@ enum ConformEngine {
 
     // MARK: - Encoder
 
+    // TODO(consolidate): the codec switch, profile mapping (via BoundaryReencodeEngine.encoderProfile),
+    // and level tokens here mirror BoundaryReencodeEngine.reencodeVideoArgs (ADR-0011 consequences).
+    // Conform additionally pins level + color range; M2 carries them through by copy. Fold the shared
+    // encoder/profile/level selection into one place in a later refactor rather than letting the two drift.
     private static func encoderArgs(target: VideoProperties) -> [String] {
         var args: [String]
         switch target.codec {
@@ -268,6 +316,14 @@ enum ConformEngine {
         guard p.count == 2, p[1] != 0 else { return double ? "50" : "25" }
         let num = double ? p[0] * 2 : p[0]
         return p[1] == 1 ? "\(num)" : "\(num)/\(p[1])"
+    }
+
+    /// Frames-per-second as a Double from an ffprobe "num/den" rate ("25/1" → 25.0, "30000/1001"
+    /// → 29.97). `nil` for an unparseable/degenerate rate.
+    private static func frameRateValue(_ rate: String) -> Double? {
+        let p = rate.split(separator: "/").compactMap { Double($0) }
+        guard p.count == 2, p[1] != 0 else { return nil }
+        return p[0] / p[1]
     }
 
     private static func evenRound(_ x: Double) -> Int {
