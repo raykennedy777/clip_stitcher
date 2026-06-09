@@ -4,6 +4,10 @@ A macOS app for frame-accurate video joining via smart rendering — re-encoding
 frames at edit/join boundaries while stream-copying everything untouched. See `README.md`
 for the goal, approach, and references.
 
+## Engine workflow
+
+De-risk every ffmpeg command in the shell — on all three formats and **in the actual output container** — before wiring it into Swift; force-kill the app before relaunching. See `docs/agents/engine-workflow.md`.
+
 ## Agent skills
 
 ### Issue tracker
