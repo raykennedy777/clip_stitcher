@@ -17,7 +17,7 @@ enum FrameExtractor {
     ///  3. output-seek to a midpoint just before the target — slow but always correct.
     static func imageData(
         url: URL, index: FrameIndex, frame n: Int,
-        width: Int, height: Int, filter: String? = nil
+        width: Int, height: Int, containerStart: Double, filter: String? = nil
     ) async throws -> Data? {
         guard index.count > 0, n >= 0, n < index.count else { return nil }
         let ffmpeg = try FFTools.ffmpegURL()
@@ -27,7 +27,10 @@ enum FrameExtractor {
 
         let anchor = index.keyframeIndex(atOrBefore: n)
         let offset = n - anchor
-        let anchorPTS = String(format: "%.6f", index.pts[anchor])
+        // Both input and output `-ss` are measured from the container's start_time,
+        // not absolute pts (issue #36 — verified for the output seek too).
+        let anchorPTS = String(format: "%.6f", FrameStreamDecoder.seekSeconds(
+            forPts: index.pts[anchor], containerStart: containerStart))
 
         // Match the persistent decoder: scale to the display dimensions (SAR applied),
         // or the caller's chain (the preview's spatial conform, ADR-0012).
@@ -58,7 +61,8 @@ enum FrameExtractor {
         try? FileManager.default.removeItem(at: tmp)
         let target = index.pts[n]
         let prior = n > 0 ? index.pts[n - 1] : target - 0.04
-        let midpoint = String(format: "%.6f", (prior + target) / 2.0)
+        let midpoint = String(format: "%.6f", FrameStreamDecoder.seekSeconds(
+            forPts: (prior + target) / 2.0, containerStart: containerStart))
         _ = try? await ProcessRunner.run(ffmpeg, [
             "-hide_banner", "-loglevel", "error",
             "-i", url.path, "-ss", midpoint,
@@ -71,7 +75,8 @@ enum FrameExtractor {
     /// pass, returning PNG data keyed by frame number. ~15× cheaper per frame than
     /// one process per frame — this is what makes cached stepping instant. The
     /// final 1-2 frames may be absent (EOF-flush quirk); backfill with `imageData`.
-    static func images(url: URL, index: FrameIndex, from: Int, to: Int) async throws -> [Int: Data] {
+    static func images(url: URL, index: FrameIndex, from: Int, to: Int,
+                       containerStart: Double) async throws -> [Int: Data] {
         guard index.count > 0 else { return [:] }
         let lo = max(0, from)
         let hi = min(index.count - 1, to)
@@ -84,7 +89,8 @@ enum FrameExtractor {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let anchor = index.keyframeIndex(atOrBefore: lo)
-        let anchorPTS = String(format: "%.6f", index.pts[anchor])
+        let anchorPTS = String(format: "%.6f", FrameStreamDecoder.seekSeconds(
+            forPts: index.pts[anchor], containerStart: containerStart))
         let pattern = dir.appendingPathComponent("f_%05d.png").path
 
         _ = try? await ProcessRunner.run(ffmpeg, [

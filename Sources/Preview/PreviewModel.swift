@@ -15,6 +15,9 @@ final class PreviewModel: ObservableObject {
         let url: URL
         let index: FrameIndex
         let name: String
+        /// The container's start_time — the decoder's and extractor's `-ss` is
+        /// measured from it, not absolute pts (issue #36).
+        let containerStart: Double
         let previewW: Int
         let previewH: Int
         /// The spatial conform chain for a non-matching clip (ADR-0012); nil for a
@@ -134,6 +137,7 @@ final class PreviewModel: ObservableObject {
                     throw FFError.indexFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await document.frameIndex(for: clip)
+                let containerStart = await MediaProbe.containerStartTime(url: url)
                 let conformed = !MatchEvaluator.matches(clip, target: target)
                 specs.append(PreviewTimeline.ClipSpec(
                     clipID: clip.id, pts: index.pts,
@@ -142,6 +146,7 @@ final class PreviewModel: ObservableObject {
                 ))
                 runtimes[clip.id] = ClipRuntime(
                     url: url, index: index, name: clip.displayName,
+                    containerStart: containerStart,
                     previewW: canvasW, previewH: canvasH,
                     filter: conformed
                         ? PreviewFilter.spatialConformChain(
@@ -156,7 +161,7 @@ final class PreviewModel: ObservableObject {
                 // external file, the preview degrades to silence (best-effort playback).
                 clipAudio[clip.id] = PreviewAudioPlan.ClipAudio(
                     url: url,
-                    containerStart: await MediaProbe.containerStartTime(url: url),
+                    containerStart: containerStart,
                     sources: try AudioSourceResolver.resolveSources(
                         for: clip, missingExternal: .degradeToSilence)
                 )
@@ -267,6 +272,7 @@ final class PreviewModel: ObservableObject {
         if runtime.decoder == nil {
             runtime.decoder = FrameStreamDecoder(
                 url: runtime.url, index: runtime.index,
+                containerStart: runtime.containerStart,
                 width: runtime.previewW, height: runtime.previewH,
                 useHardware: true, filter: runtime.filter, windowSize: cacheCap
             )
@@ -291,6 +297,7 @@ final class PreviewModel: ObservableObject {
            let data = try? await FrameExtractor.imageData(
                url: runtime.url, index: runtime.index, frame: source,
                width: runtime.previewW, height: runtime.previewH,
+               containerStart: runtime.containerStart,
                filter: runtime.filter) {
             produced = NSImage(data: data)
         }

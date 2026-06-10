@@ -20,6 +20,9 @@ final class FrameStreamDecoder {
 
     private let url: URL
     private let index: FrameIndex
+    /// The container's start_time — input `-ss` is measured from it, not absolute
+    /// pts (the issue #3 trap; nonzero on .mpg/.ts captures), so seeks subtract it.
+    private let containerStart: Double
     private let width: Int
     private let height: Int
     private let useHardware: Bool
@@ -40,11 +43,12 @@ final class FrameStreamDecoder {
 
     private var frameBytes: Int { width * height * 3 }
 
-    init?(url: URL, index: FrameIndex, width: Int, height: Int, useHardware: Bool,
-          filter: String? = nil, windowSize: Int = 48) {
+    init?(url: URL, index: FrameIndex, containerStart: Double, width: Int, height: Int,
+          useHardware: Bool, filter: String? = nil, windowSize: Int = 48) {
         guard let ffmpeg = try? FFTools.ffmpegURL(), width > 0, height > 0, index.count > 0 else { return nil }
         self.url = url
         self.index = index
+        self.containerStart = containerStart
         self.width = width
         self.height = height
         self.useHardware = useHardware
@@ -133,7 +137,8 @@ final class FrameStreamDecoder {
         var arguments = ["-hide_banner", "-loglevel", "error"]
         if useHardware { arguments += ["-hwaccel", "videotoolbox"] }
         arguments += [
-            "-ss", String(format: "%.6f", index.pts[anchor]),
+            "-ss", String(format: "%.6f", Self.seekSeconds(forPts: index.pts[anchor],
+                                                           containerStart: containerStart)),
             "-i", url.path, "-an",
             "-vf", "\(filter ?? "scale=\(width):\(height)"),format=rgb24",
             "-f", "rawvideo", "-",
@@ -169,6 +174,13 @@ final class FrameStreamDecoder {
         try? handle?.close()
         process = nil
         handle = nil
+    }
+
+    /// Converts an absolute frame pts to the input `-ss` value: ffmpeg measures
+    /// input `-ss` from the container's start_time (issue #36 — seeking a .mpg
+    /// capture at absolute pts lands a whole GOP late and mislabels every frame).
+    static func seekSeconds(forPts pts: Double, containerStart: Double) -> Double {
+        max(0, pts - containerStart)
     }
 
     /// Shared with `KeyframePrefetcher` — both read the same raw RGB frame layout.

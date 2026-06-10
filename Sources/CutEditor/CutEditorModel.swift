@@ -110,11 +110,12 @@ final class CutEditorModel: ObservableObject {
             let (w, h) = Self.previewSize(for: clip.video)
             previewW = w
             previewH = h
-            decoder = FrameStreamDecoder(
-                url: url, index: built, width: w, height: h,
-                useHardware: true, windowSize: cacheCap
-            )
+            // Probed before the decoder exists — its seeks subtract it (issue #36).
             containerStartTime = await MediaProbe.containerStartTime(url: url)
+            decoder = FrameStreamDecoder(
+                url: url, index: built, containerStart: containerStartTime,
+                width: w, height: h, useHardware: true, windowSize: cacheCap
+            )
             keyframes = built.keyframeFlags.enumerated().filter(\.element).map(\.offset)
             prefetcher = KeyframePrefetcher(
                 url: url, index: built, containerStart: containerStartTime,
@@ -233,7 +234,8 @@ final class CutEditorModel: ObservableObject {
                 if produced == nil,
                    let data = try? await FrameExtractor.imageData(
                        url: self.url, index: index, frame: target,
-                       width: self.previewW, height: self.previewH) {
+                       width: self.previewW, height: self.previewH,
+                       containerStart: self.containerStartTime) {
                     produced = NSImage(data: data)
                 }
                 if let produced {
