@@ -264,6 +264,31 @@ final class ProjectDocument: ReferenceFileDocument {
         commit(p)
     }
 
+    /// Replaces a clip with one clip per split range in one undo step (issue #20,
+    /// ADR-0017). The first range keeps the original clip's identity — a split
+    /// target clip stays the target and its caches stay warm — while later ranges
+    /// are copies with fresh ids. Names get " (1)", " (2)", … suffixes in range
+    /// order so the rows are tellable apart in the Source view.
+    func splitClip(id: Clip.ID, ranges: [SplitRanges.Range]) {
+        guard ranges.count > 1,
+              let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        let original = project.clips[i]
+        let pieces: [Clip] = ranges.enumerated().map { n, range in
+            var piece = original
+            if n > 0 { piece.id = UUID() }
+            piece.inPoint = range.inPoint
+            piece.outPoint = range.outPoint
+            piece.displayName = "\(original.displayName) (\(n + 1))"
+            return piece
+        }
+        var p = project
+        p.clips.replaceSubrange(i...i, with: pieces)
+        commit(p)
+        for piece in pieces.dropFirst() {
+            adoptRuntimeState(of: id, for: piece)
+        }
+    }
+
     // MARK: - Audio tracks (ADR-0014)
 
     /// Replaces the audio track slots of every clip in `ids` in one undo step;

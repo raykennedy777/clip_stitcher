@@ -14,6 +14,11 @@ final class CutEditorModel: ObservableObject {
     @Published var frameCount: Int = 0
     @Published var inPoint: Int?
     @Published var outPoint: Int?
+    /// Split points (issue #20, ADR-0017): transient cut-editor state, never
+    /// persisted — confirming turns them into clip boundaries, cancel drops them.
+    /// May hold inert points (outside the selection range after an in/out move);
+    /// only the live ones act at confirm.
+    @Published var splitPoints: Set<Int> = []
     @Published var isIndexing = true
     @Published var isPlaying = false
     @Published var isSceneScanning = false
@@ -258,9 +263,48 @@ final class CutEditorModel: ObservableObject {
         if let start = inPoint, start > currentFrame { inPoint = nil }
     }
 
-    /// OK: write the selection back to the document, then close.
+    // MARK: - Split points (issue #20)
+
+    /// Whether ⌘B can act at the playhead: a split at frame N starts the range
+    /// [N … out], so N must lie strictly inside the selection range (in < N ≤ out).
+    var canToggleSplit: Bool {
+        frameCount > 0 && SplitRanges.isLive(
+            currentFrame, inPoint: inPoint, outPoint: outPoint, lastFrame: lastFrame)
+    }
+
+    var isSplitAtPlayhead: Bool { splitPoints.contains(currentFrame) }
+
+    /// The split points that will act at confirm, in frame order.
+    var liveSplitPoints: [Int] {
+        SplitRanges.liveSplits(splitPoints, inPoint: inPoint, outPoint: outPoint, lastFrame: lastFrame)
+    }
+
+    /// Split points stranded outside the selection range by an in/out move — kept
+    /// (drawn dimmed) so widening the range revives them, ignored at confirm.
+    var inertSplitPoints: [Int] {
+        splitPoints.subtracting(liveSplitPoints).sorted()
+    }
+
+    /// Adds a split point at the playhead, or removes the one already there.
+    func toggleSplit() {
+        guard canToggleSplit else { return }
+        if splitPoints.contains(currentFrame) {
+            splitPoints.remove(currentFrame)
+        } else {
+            splitPoints.insert(currentFrame)
+        }
+    }
+
+    /// OK: write the selection back to the document — as one in/out pair, or as a
+    /// clip-per-split-range replacement when live split points exist — then close.
     func confirm() {
-        document?.setInOut(id: clip.id, inPoint: inPoint, outPoint: outPoint)
+        let ranges = SplitRanges.ranges(
+            splits: splitPoints, inPoint: inPoint, outPoint: outPoint, lastFrame: lastFrame)
+        if ranges.count > 1 {
+            document?.splitClip(id: clip.id, ranges: ranges)
+        } else {
+            document?.setInOut(id: clip.id, inPoint: inPoint, outPoint: outPoint)
+        }
         teardown()
         onClose?()
     }

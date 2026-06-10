@@ -109,6 +109,22 @@ _Avoid_: start mark/end mark, trim handles
 The span of frames from in point to out point that will be included in output.
 _Avoid_: trim, segment, region
 
+**Split point**:
+A frame marker placed inside a clip's selection range that divides it; the marked frame is
+the first frame of the split range that follows it. A split point outside the selection
+range is inert — it has no effect unless the range widens to include it again.
+_Avoid_: cut point, split marker, blade point
+
+**Split range**:
+One span of a selection range between consecutive split points (or a split point and a
+range end). Confirming the cut-editor turns each split range into its own clip.
+_Avoid_: segment, section, sub-clip
+
+**Jump popover**:
+The cut-editor control for moving the playhead to a typed timecode or frame number, in
+either relative (offset from the playhead) or absolute (from the clip's first frame) mode.
+_Avoid_: go-to dialog, seek box
+
 **Output preview**:
 The view that plays back the whole assembled timeline as it would be exported.
 _Avoid_: render preview

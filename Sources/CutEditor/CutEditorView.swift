@@ -5,6 +5,10 @@ struct CutEditorView: View {
     /// Observed so the audio track dropdown follows live edits from the settings sheet.
     @ObservedObject var document: ProjectDocument
     @State private var showingAudioSettings = false
+    @State private var showingJump = false
+    /// The jump popover's relative/absolute choice, kept here so it persists
+    /// while the window is open (issue #21).
+    @State private var jumpRelative = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -104,14 +108,8 @@ struct CutEditorView: View {
     }
 
     private var scrubber: some View {
-        Slider(
-            value: Binding(
-                get: { Double(model.currentFrame) },
-                set: { model.seek(to: Int($0.rounded())) }
-            ),
-            in: 0...Double(max(1, model.lastFrame))
-        )
-        .disabled(model.isIndexing || model.frameCount == 0)
+        CutScrubberView(model: model)
+            .disabled(model.isIndexing || model.frameCount == 0)
     }
 
     private var readout: some View {
@@ -119,9 +117,25 @@ struct CutEditorView: View {
             Text("Frame \(model.currentFrame) / \(model.lastFrame)")
                 .monospacedDigit()
             Spacer()
+            // The timecode readout doubles as the jump popover's anchor (issue
+            // #21): click it — or ⌘J via the hidden button — to go to a typed
+            // time or frame.
             Text(model.timecode(forFrame: model.currentFrame))
                 .monospacedDigit()
                 .font(.body.weight(.medium))
+                .contentShape(Rectangle())
+                .onTapGesture { showingJump = true }
+                .help("Go to a time or frame (⌘J)")
+                .popover(isPresented: $showingJump, arrowEdge: .bottom) {
+                    JumpPopoverView(model: model, isPresented: $showingJump, relative: $jumpRelative)
+                }
+                .background(
+                    Button("") { showingJump = true }
+                        .keyboardShortcut("j", modifiers: .command)
+                        .opacity(0)
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                )
             Spacer()
             selectionReadout
         }
@@ -197,6 +211,14 @@ struct CutEditorView: View {
             Button { model.setOut() } label: { Text("]").font(.title3.bold()).frame(width: 28) }
                 .help("Set out point ( ] )")
                 .keyboardShortcut("]", modifiers: [])
+
+            Divider().frame(height: 20).padding(.horizontal, 6)
+
+            button("scissors", help: model.isSplitAtPlayhead
+                   ? "Remove the split point at the playhead (⌘B)"
+                   : "Split at the playhead (⌘B)") { model.toggleSplit() }
+                .keyboardShortcut("b", modifiers: .command)
+                .disabled(!model.canToggleSplit)
         }
         .controlSize(.large)
         .disabled(model.isIndexing || model.frameCount == 0)
