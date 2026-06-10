@@ -74,6 +74,18 @@ final class CutEditorModel: ObservableObject {
     private var cacheOrder: [Int] = []
     private let cacheCap = 48
 
+    /// Keyframe images warmed around the playhead (issue #34), so `]`/`[` keyframe
+    /// steps paint instantly instead of paying the live decoder's ~0.3 s restart.
+    /// Separate from the FIFO above: keyframes must survive the decode windows that
+    /// would otherwise evict them. LRU, bounded.
+    private var keyframeCache = BoundedLRU<NSImage>(capacity: 16)
+    private var prefetcher: KeyframePrefetcher?
+    /// Every keyframe's frame number, in order — the prefetch neighborhood source.
+    private var keyframes: [Int] = []
+    /// The anchor of the last prefetch request, so a run of seeks inside one GOP
+    /// doesn't re-issue the same neighborhood.
+    private var lastPrefetchAnchor = -1
+
     init(clip: Clip, url: URL, document: ProjectDocument) {
         self.clip = clip
         self.url = url
@@ -103,6 +115,11 @@ final class CutEditorModel: ObservableObject {
                 useHardware: true, windowSize: cacheCap
             )
             containerStartTime = await MediaProbe.containerStartTime(url: url)
+            keyframes = built.keyframeFlags.enumerated().filter(\.element).map(\.offset)
+            prefetcher = KeyframePrefetcher(
+                url: url, index: built, containerStart: containerStartTime,
+                width: w, height: h
+            )
             isIndexing = false
             // Resume where this clip's editor was last closed; a never-opened clip
             // starts at its in point (frame 0 when none is set).
@@ -130,6 +147,10 @@ final class CutEditorModel: ObservableObject {
             startAudio(atFrame: clamped)
         }
 
+        // Warm the keyframes around wherever the playhead lands (issue #34), so the
+        // next `]`/`[` press paints from cache.
+        prefetchNeighborhood(around: clamped)
+
         // Instant path: a recently-decoded frame (e.g. stepping back over the cache).
         if let cached = cache[clamped] {
             image = cached
@@ -137,12 +158,49 @@ final class CutEditorModel: ObservableObject {
             return
         }
 
+        // Prefetched keyframe (issue #34): paint instantly, then fall through so the
+        // live decoder still re-anchors here — subsequent single-frame steps stay
+        // frame-accurate, and its decode of this same frame repaints identical pixels.
+        let warmed = keyframeCache.value(at: clamped)
+        if let warmed {
+            image = warmed
+        }
+
         // Otherwise hand the frame to the decode worker. A move beyond a contiguous
         // run is a "jump" worth an instant keyframe preview; ±1 steps are not (a
-        // keyframe flash there would be jarring).
+        // keyframe flash there would be jarring). A frame already painted from the
+        // keyframe cache needs no preview flash either.
         pendingFrame = clamped
-        pendingIsJump = abs(clamped - previous) > cacheCap
+        pendingIsJump = warmed == nil && abs(clamped - previous) > cacheCap
         startDecodeWorker()
+    }
+
+    /// Issues a prefetch for the keyframes around `frame`, nearest first — once per
+    /// anchor keyframe, never during playback (the player owns the pipeline then),
+    /// and only for frames not already warmed. Arriving images land in the keyframe
+    /// cache; one that the user is still waiting on paints immediately, which is what
+    /// makes an *uncached* keyframe step fast too (~50–80 ms instead of ~0.3 s).
+    private func prefetchNeighborhood(around frame: Int) {
+        guard !isPlaying, let index, let prefetcher, !keyframes.isEmpty else { return }
+        let anchor = index.keyframeIndex(atOrBefore: frame)
+        guard anchor != lastPrefetchAnchor,
+              let position = keyframes.firstIndex(of: anchor) else { return }
+        lastPrefetchAnchor = anchor
+        let wanted = KeyframePrefetcher
+            .neighborhood(position: position, keyframes: keyframes, cap: keyframeCache.capacity)
+            .filter { !keyframeCache.contains($0) }
+        guard !wanted.isEmpty else { return }
+        prefetcher.fetch(wanted) { [weak self] frame, image in
+            Task { @MainActor in
+                guard let self else { return }
+                self.keyframeCache.insert(image, at: frame)
+                // Paint only if the user is still waiting on exactly this frame —
+                // the decode worker's accurate repaint owns the frame after that.
+                if self.currentFrame == frame, self.pendingFrame == frame {
+                    self.image = image
+                }
+            }
+        }
     }
 
     /// Drives the decoder toward `pendingFrame`, retargeting whenever the user moves
@@ -472,6 +530,8 @@ final class CutEditorModel: ObservableObject {
         isSceneScanning = false
         decoder?.stop()
         decoder = nil
+        prefetcher?.stop() // kills any in-flight keyframe one-shot (same no-orphans rule)
+        prefetcher = nil
         audioPlayer?.stop() // kills the audio ffmpeg process (same no-orphans rule)
         audioPlayer = nil
     }

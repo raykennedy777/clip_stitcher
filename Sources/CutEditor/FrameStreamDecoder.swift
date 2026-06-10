@@ -171,7 +171,8 @@ final class FrameStreamDecoder {
         handle = nil
     }
 
-    private static func makeImage(from data: Data, width: Int, height: Int) -> NSImage? {
+    /// Shared with `KeyframePrefetcher` — both read the same raw RGB frame layout.
+    static func makeImage(from data: Data, width: Int, height: Int) -> NSImage? {
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: width, pixelsHigh: height,
