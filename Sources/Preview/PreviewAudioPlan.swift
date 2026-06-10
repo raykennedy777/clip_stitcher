@@ -41,7 +41,7 @@ struct PreviewAudioPlan {
         let sources: [ExportEngine.AudioSource?]
     }
 
-    /// The output tracks the export would carry (`AudioCodecPolicy.resolveOutputTracks`)
+    /// The output tracks the export would carry (`AudioSourceResolver.resolveOutputTracks`)
     /// — the picker's rows, and each leg's conform target.
     let tracks: [AudioCodecPolicy.OutputAudioTrack]
     /// `legs[track][segment]`, matching the timeline's segment order.

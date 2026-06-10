@@ -3,46 +3,10 @@ import Foundation
 @testable import VidConform
 
 /// Exercises the audio codec policy — which codec the rebuilt audio encodes to
-/// (ADR-0010), the extensions that follow from it, and which output audio tracks an
-/// export carries (ADR-0014). Moved verbatim from the export engine's test surface
-/// when the policy was extracted (issue #25).
+/// (ADR-0010) and the extensions that follow from it. Moved verbatim from the export
+/// engine's test surface when the policy was extracted (issue #25); the output-track
+/// derivation tests moved on to the audio source resolver's surface (issue #27).
 struct AudioCodecPolicyTests {
-
-    // MARK: output track resolution (ADR-0014)
-
-    private func clipWithTracks(_ tracks: [AudioProperties]) -> Clip {
-        var c = Clip(bookmark: Data(), displayName: "c")
-        c.audio = tracks.first
-        c.audioTracks = tracks
-        return c
-    }
-
-    @Test func outputTrackCountIsTheRichestClips() {
-        let a = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2)
-        let clips = [clipWithTracks([a]), clipWithTracks([a, a, a]), clipWithTracks([a, a])]
-        let tracks = AudioCodecPolicy.resolveOutputTracks(target: clips[0], clips: clips)
-        #expect(tracks.count == 3)
-    }
-
-    @Test func trackFormatComesFromTheTargetFirstThenTimelineOrder() {
-        let mono = AudioProperties(codec: "mp2", sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport")
-        let stereo = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2, language: "spa", title: "TVE")
-        let other = AudioProperties(codec: "ac3", sampleRate: 32000, channels: 2)
-        // target carries one track; the second output track's spec falls to the first
-        // clip in timeline order that has one.
-        let target = clipWithTracks([mono])
-        let clips = [clipWithTracks([other]), clipWithTracks([other, stereo])]
-        let tracks = AudioCodecPolicy.resolveOutputTracks(target: target, clips: clips)
-        #expect(tracks == [
-            AudioCodecPolicy.OutputAudioTrack(sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport"),
-            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "spa", title: "TVE"),
-        ])
-    }
-
-    @Test func noAudioAnywhereResolvesToNoTracks() {
-        let clips = [clipWithTracks([]), clipWithTracks([])]
-        #expect(AudioCodecPolicy.resolveOutputTracks(target: nil, clips: clips).isEmpty)
-    }
 
     // MARK: audio codec resolution (ADR-0010)
 

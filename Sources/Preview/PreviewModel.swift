@@ -150,25 +150,15 @@ final class PreviewModel: ObservableObject {
                         : nil,
                     decoder: nil
                 )
-                // The clip's audio legs, resolved like the export's (ADR-0014): one
-                // source per output track — its own stream, an external file, or nil
-                // for silence. Where the export errors on a missing external file,
-                // the preview degrades to silence (best-effort playback).
+                // The clip's audio legs, resolved by the same resolver the export uses
+                // (ADR-0014): one source per output track — its own stream, an external
+                // file, or nil for silence. Where the export errors on a missing
+                // external file, the preview degrades to silence (best-effort playback).
                 clipAudio[clip.id] = PreviewAudioPlan.ClipAudio(
                     url: url,
                     containerStart: await MediaProbe.containerStartTime(url: url),
-                    sources: clip.resolvedAudioSelections.map { selection in
-                        switch selection {
-                        case .stream(let s):
-                            return s < clip.allAudioTracks.count ? .stream(s) : nil
-                        case .external(let bookmark, _, let streamIndex, _, _):
-                            var stale = false
-                            guard let extURL = try? URL(
-                                      resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale),
-                                  FileManager.default.fileExists(atPath: extURL.path) else { return nil }
-                            return .external(extURL, stream: streamIndex)
-                        }
-                    }
+                    sources: try AudioSourceResolver.resolveSources(
+                        for: clip, missingExternal: .degradeToSilence)
                 )
             }
             let built = PreviewTimeline.build(clips: specs, targetFrameRate: targetVideo.frameRate)
@@ -179,7 +169,7 @@ final class PreviewModel: ObservableObject {
             // The same track list the export resolves (count from the richest clip,
             // formats target-first — ADR-0014), so the picker shows exactly the
             // output's tracks. The saved choice is clamped in case clips changed.
-            let tracks = AudioCodecPolicy.resolveOutputTracks(
+            let tracks = AudioSourceResolver.resolveOutputTracks(
                 target: document.project.targetClip, clips: clips)
             audioPlan = PreviewAudioPlan.build(
                 segments: built.segments, targetFps: built.targetFps,

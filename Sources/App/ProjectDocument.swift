@@ -452,23 +452,24 @@ final class ProjectDocument: ReferenceFileDocument {
                     containerStart: containerStart)
                 let (audioStart, audioEnd, audioDuration) = (window.start, window.end, window.duration)
                 // Each output track's leg comes from the clip's selected source for it:
-                // one of its own streams, an external file, or silence (ADR-0014).
-                let audioSources: [ExportEngine.AudioSource?] = try clip.resolvedAudioSelections.enumerated().map { slot, selection in
-                    switch selection {
-                    case .stream(let s):
-                        return s < clip.allAudioTracks.count ? .stream(s) : nil
-                    case .external(let bookmark, let name, let streamIndex, _, _):
-                        var stale = false
-                        guard let extURL = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale),
-                              FileManager.default.fileExists(atPath: extURL.path) else {
-                            throw ExportError.cutFailed("External audio file “\(name)” (track \(slot + 1) of “\(clip.displayName)”) was not found.")
-                        }
-                        // Pad/trim is by design; a gap of 1 s or more gets a notice (ADR-0014).
-                        if let gap = clip.externalAudioMismatch(slot: slot), abs(gap) >= 1.0 {
-                            let direction = gap < 0 ? "shorter — silence fills the rest" : "longer — the extra is unused"
-                            warnings.append("“\(name)” is \(String(format: "%.1f", abs(gap))) s \(direction) (track \(slot + 1) of “\(clip.displayName)”).")
-                        }
-                        return .external(extURL, stream: streamIndex)
+                // one of its own streams, an external file, or silence (ADR-0014). The
+                // shared resolver throws on a missing external file — the export refuses
+                // to silently drop a selected track (the preview degrades instead).
+                // MissingExternalFile is the resolver's only error; map it to the
+                // user-facing export failure.
+                let audioSources: [ExportEngine.AudioSource?]
+                do {
+                    audioSources = try AudioSourceResolver.resolveSources(
+                        for: clip, missingExternal: .throwError)
+                } catch let missing as AudioSourceResolver.MissingExternalFile {
+                    throw ExportError.cutFailed("External audio file “\(missing.name)” (track \(missing.slot + 1) of “\(clip.displayName)”) was not found.")
+                }
+                // Pad/trim is by design; a gap of 1 s or more gets a notice (ADR-0014).
+                for (slot, selection) in clip.resolvedAudioSelections.enumerated() {
+                    if case .external(_, let name, _, _, _) = selection,
+                       let gap = clip.externalAudioMismatch(slot: slot), abs(gap) >= 1.0 {
+                        let direction = gap < 0 ? "shorter — silence fills the rest" : "longer — the extra is unused"
+                        warnings.append("“\(name)” is \(String(format: "%.1f", abs(gap))) s \(direction) (track \(slot + 1) of “\(clip.displayName)”).")
                     }
                 }
 
@@ -523,7 +524,7 @@ final class ProjectDocument: ReferenceFileDocument {
             // Output track count = the richest clip's; formats/tags target-first
             // (ADR-0014). An audio-only export goes to a single elementary stream, which
             // can only carry one track — keep track 1.
-            var tracks = AudioCodecPolicy.resolveOutputTracks(target: project.targetClip, clips: project.clips)
+            var tracks = AudioSourceResolver.resolveOutputTracks(target: project.targetClip, clips: project.clips)
             if project.output.type == .audioOnly { tracks = Array(tracks.prefix(1)) }
             try await ExportEngine.export(items: items, settings: project.output,
                                           audioCodec: audio.encoder, tracks: tracks, to: destination) { p in

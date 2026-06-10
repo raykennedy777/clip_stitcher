@@ -154,7 +154,7 @@ struct AudioTrackModelTests {
                                           tracks: [a], duration: nil)]
         var plain = Clip(bookmark: Data(), displayName: "p")
         plain.audioTracks = [a]
-        let tracks = AudioCodecPolicy.resolveOutputTracks(target: plain, clips: [plain, rich])
+        let tracks = AudioSourceResolver.resolveOutputTracks(target: plain, clips: [plain, rich])
         #expect(tracks.count == 3)
     }
 }

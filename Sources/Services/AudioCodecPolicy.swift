@@ -1,9 +1,10 @@
 import Foundation
 
 /// The audio codec policy (ADR-0010 / ADR-0014): which codec the rebuilt audio encodes
-/// to for a given target clip and container, the ffmpeg encoder and file extensions
-/// that follow from it, and which output audio tracks an export carries. Pure decisions
-/// only — the ffmpeg invocations that act on them live in the export engines.
+/// to for a given target clip and container, and the ffmpeg encoder and file extensions
+/// that follow from it. Pure decisions only — the ffmpeg invocations that act on them
+/// live in the export engines, and which sources feed the output tracks is
+/// `AudioSourceResolver`'s job.
 enum AudioCodecPolicy {
     /// Fallback audio codec when the target clip's codec can't be used (ADR-0010): AAC is
     /// broadly supported across the TS/MKV/MP4 containers and audibly transparent at the
@@ -92,24 +93,5 @@ enum AudioCodecPolicy {
     /// mp3); TS and MKV carry mp2/aac/ac3/mp3, and MP4 carries aac/ac3/mp3.
     static func audioCodecFitsContainer(_ codec: String, _ container: Container) -> Bool {
         !(container == .mp4 && codec == "mp2")
-    }
-
-    /// The output audio tracks an export will carry (ADR-0014): as many as the richest
-    /// clip's selected sources, each track's format/tags taken from the target clip's
-    /// corresponding track when it has one, else from the first clip in timeline order
-    /// that does.
-    static func resolveOutputTracks(target: Clip?, clips: [Clip]) -> [OutputAudioTrack] {
-        let count = clips.map { $0.resolvedAudioSelections.count }.max() ?? 0
-        let donors = (target.map { [$0] } ?? []) + clips
-        return (0..<count).map { t in
-            let donor = donors.lazy.compactMap { clip -> AudioProperties? in
-                let tracks = clip.effectiveAudioTracks
-                return t < tracks.count ? tracks[t] : nil
-            }.first
-            return OutputAudioTrack(sampleRate: donor?.sampleRate ?? 48000,
-                                    channels: donor?.channels ?? 2,
-                                    language: donor?.language,
-                                    title: donor?.title)
-        }
     }
 }
