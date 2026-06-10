@@ -74,10 +74,27 @@ final class AudioStreamPlayer {
 
     /// Starts streaming `streamIndex` (0-based among the file's audio streams) from
     /// `seekSeconds` into the file. Restarts cleanly if already playing — a seek or
-    /// a monitor-track switch is just another `start`. Failure (missing ffmpeg,
-    /// engine refusal, spawn error) leaves `elapsedSeconds` nil; the caller keeps
-    /// its fallback clock.
-    func start(url: URL, streamIndex: Int, seekSeconds: Double) {
+    /// a monitor-track switch is just another `start`. `filter` conforms the decode
+    /// to an output track's rate/layout before the engine conform (preview parity,
+    /// issue #8); `duration` caps the leg so audio past a clip's out point is never
+    /// heard even if the caller restarts late. Failure (missing ffmpeg, engine
+    /// refusal, spawn error) leaves `elapsedSeconds` nil; the caller keeps its
+    /// fallback clock.
+    func start(url: URL, streamIndex: Int, seekSeconds: Double,
+               filter: String? = nil, duration: Double? = nil) {
+        startDecode(arguments: Self.arguments(
+            filePath: url.path, streamIndex: streamIndex, seekSeconds: seekSeconds,
+            filter: filter, duration: duration))
+    }
+
+    /// Plays `duration` seconds of generated silence (a silence-filled span of the
+    /// output timeline — ADR-0014): the clock runs and the speakers are quiet, so
+    /// the preview's playhead keeps moving exactly as the export would sound.
+    func startSilence(duration: Double) {
+        startDecode(arguments: Self.silenceArguments(duration: duration))
+    }
+
+    private func startDecode(arguments: [String]) {
         stop()
         guard let ffmpeg = try? FFTools.ffmpegURL() else { return }
         if !engine.isRunning { try? engine.start() }
@@ -85,8 +102,7 @@ final class AudioStreamPlayer {
 
         let process = Process()
         process.executableURL = ffmpeg
-        process.arguments = Self.arguments(
-            filePath: url.path, streamIndex: streamIndex, seekSeconds: seekSeconds)
+        process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -185,13 +201,29 @@ final class AudioStreamPlayer {
 
     /// The PCM decode command: input-seek to `seekSeconds` (sample-exact —
     /// accurate_seek discards up to the target), decode one audio stream, conform
-    /// to 48 kHz stereo float, stream to stdout.
-    static func arguments(filePath: String, streamIndex: Int, seekSeconds: Double) -> [String] {
+    /// to 48 kHz stereo float, stream to stdout. `duration` is an input `-t` cap
+    /// (read that much from the seek point, then EOF); `filter` is an `-af` chain
+    /// applied before the engine conform — the preview's per-leg track conform
+    /// (both de-risked in the shell on all three formats + the 4-track MKV,
+    /// 2026-06: exact byte counts, first byte in 13–23 ms).
+    static func arguments(filePath: String, streamIndex: Int, seekSeconds: Double,
+                          filter: String? = nil, duration: Double? = nil) -> [String] {
+        var args = ["-v", "error", "-ss", String(format: "%.6f", seekSeconds)]
+        if let duration { args += ["-t", String(format: "%.6f", duration)] }
+        args += ["-i", filePath, "-map", "0:a:\(streamIndex)", "-vn"]
+        if let filter { args += ["-af", filter] }
+        args += ["-f", "f32le", "-ac", "\(channelCount)", "-ar", "\(sampleRate)", "-"]
+        return args
+    }
+
+    /// The silence-leg command: `duration` seconds of anullsrc, conformed like any
+    /// other source. Digital silence at the engine format (verified byte-for-byte
+    /// zero in the shell).
+    static func silenceArguments(duration: Double) -> [String] {
         [
             "-v", "error",
-            "-ss", String(format: "%.6f", seekSeconds),
-            "-i", filePath,
-            "-map", "0:a:\(streamIndex)", "-vn",
+            "-t", String(format: "%.6f", duration),
+            "-f", "lavfi", "-i", "anullsrc=r=\(sampleRate):cl=stereo",
             "-f", "f32le", "-ac", "\(channelCount)", "-ar", "\(sampleRate)",
             "-",
         ]

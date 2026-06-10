@@ -117,6 +117,43 @@ struct PreviewTimeline {
         return nearestFrame(to: time, in: pts, from: segment.keptStart, through: segment.keptEnd)
     }
 
+    /// The global output frame showing source frame `src` of `segment` — the
+    /// inverse of `sourceFrame`. Matching segments map 1:1 from the kept range;
+    /// conformed segments map through time (the source frame's timestamp at the
+    /// target rate, rounded). Clamped into the segment either way.
+    func outputFrame(forSource src: Int, in segment: Segment, pts: [Double]) -> Int {
+        let local: Int
+        if segment.conformed {
+            guard !pts.isEmpty else { return segment.outputStart }
+            let time = pts[min(max(0, src), pts.count - 1)]
+            local = Int(((time - segment.windowStart) * targetFps).rounded())
+        } else {
+            local = src - segment.keptStart
+        }
+        return segment.outputStart + min(max(0, local), segment.outputCount - 1)
+    }
+
+    /// Output frames that act as keyframe anchors for ⇧←/⇧→ navigation (issue #8
+    /// follow-up): every kept-range keyframe mapped to its output frame, plus each
+    /// segment's first frame — a join is a clean seek anchor in the output (the
+    /// export re-encodes from the in point), and it makes the keys walk across
+    /// clips the way frame 0 anchors the cut-editor. Sorted ascending; `index`
+    /// resolves a clip's frame index (a clip without one contributes only its
+    /// segment start).
+    func keyframeAnchorFrames(index: (UUID) -> FrameIndex?) -> [Int] {
+        var anchors: Set<Int> = []
+        for segment in segments {
+            anchors.insert(segment.outputStart)
+            guard let idx = index(segment.clipID) else { continue }
+            var keyframe = idx.keyframeIndex(after: segment.keptStart - 1)
+            while let src = keyframe, src <= segment.keptEnd {
+                anchors.insert(outputFrame(forSource: src, in: segment, pts: idx.pts))
+                keyframe = idx.keyframeIndex(after: src)
+            }
+        }
+        return anchors.sorted()
+    }
+
     /// Binary search for the frame whose timestamp is nearest `time` within
     /// `[from, through]` (inclusive).
     private func nearestFrame(to time: Double, in pts: [Double], from: Int, through: Int) -> Int {

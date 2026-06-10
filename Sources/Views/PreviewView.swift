@@ -62,9 +62,32 @@ struct PreviewView: View {
             scrubber
             readout
             transport
+            if !model.outputTracks.isEmpty {
+                HStack {
+                    audioTrackPicker
+                    Spacer()
+                }
+            }
         }
         .padding(12)
         .background(.bar)
+    }
+
+    /// Which output track to hear during playback (issue #8) — one track at a
+    /// time, named like the cut-editor's dropdown, persisted with the project.
+    /// Switching mid-play restarts the stream on the new track.
+    private var audioTrackPicker: some View {
+        Picker("Audio:", selection: Binding(
+            get: { model.monitoredTrack },
+            set: { model.setMonitoredTrack($0) }
+        )) {
+            ForEach(model.outputTracks.indices, id: \.self) { t in
+                Text(model.trackName(t)).tag(t)
+            }
+        }
+        .pickerStyle(.menu)
+        .fixedSize()
+        .help("The output track heard during playback — the choice is saved with the project")
     }
 
     private var scrubber: some View {
@@ -120,18 +143,33 @@ struct PreviewView: View {
     private var transport: some View {
         HStack(spacing: 8) {
             button("backward.end.fill", help: "First frame") { model.goToStart() }
-            button("backward.frame.fill", help: "Back one frame (←)") { model.step(by: -1) }
+            button("backward.fill", help: "Previous keyframe (⇧←)") { model.stepToPreviousKeyframe() }
+            // One registered shortcut per arrow key, dispatching on the live Shift
+            // state: SwiftUI matches arrow-key equivalents ignoring Shift, so two
+            // buttons declaring ← and ⇧← both fire the first-registered one (the
+            // cut-editor's pattern).
+            button("backward.frame.fill", help: "Back one frame (←)") { arrowJump(-1) }
                 .keyboardShortcut(.leftArrow, modifiers: [])
 
             button(model.isPlaying ? "pause.fill" : "play.fill", help: "Play / Pause (Space)") { model.togglePlay() }
                 .keyboardShortcut(.space, modifiers: [])
 
-            button("forward.frame.fill", help: "Forward one frame (→)") { model.step(by: 1) }
+            button("forward.frame.fill", help: "Forward one frame (→)") { arrowJump(1) }
                 .keyboardShortcut(.rightArrow, modifiers: [])
+            button("forward.fill", help: "Next keyframe (⇧→)") { model.stepToNextKeyframe() }
             button("forward.end.fill", help: "Last frame") { model.goToEnd() }
         }
         .controlSize(.large)
         .disabled(model.isLoading || model.frameCount == 0)
+    }
+
+    /// ←/→ step a frame; with Shift held they jump a keyframe instead.
+    private func arrowJump(_ delta: Int) {
+        if NSEvent.modifierFlags.contains(.shift) {
+            delta < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe()
+        } else {
+            model.step(by: delta)
+        }
     }
 
     private func button(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {

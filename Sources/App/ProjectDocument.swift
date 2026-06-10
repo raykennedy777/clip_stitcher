@@ -233,6 +233,14 @@ final class ProjectDocument: ReferenceFileDocument {
         commit(p)
     }
 
+    /// Stores the Preview's monitored output-track choice (issue #8) — the track
+    /// heard when the assembled timeline plays, saved with the project.
+    func setMonitoredOutputTrack(_ slot: Int) {
+        var p = project
+        p.monitoredOutputTrack = slot
+        commit(p)
+    }
+
     /// Stores the cut-editor's monitored-track choice for a clip.
     func setMonitoredAudioTrack(id: Clip.ID, slot: Int) {
         guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }

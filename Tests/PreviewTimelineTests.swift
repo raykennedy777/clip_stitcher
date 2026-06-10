@@ -119,4 +119,72 @@ struct PreviewTimelineTests {
             #expect(frame >= 10 && frame <= 20)
         }
     }
+
+    // MARK: Keyframe anchors (⇧←/⇧→ navigation — issue #8 follow-up)
+
+    /// Keyframe flags with keyframes at the given source frames.
+    private func flags(_ count: Int, keyframes: [Int]) -> [Bool] {
+        (0..<count).map { keyframes.contains($0) }
+    }
+
+    @Test func anchorsMapKeptKeyframesToOutputFramesAndIncludeJoins() {
+        // Clip A keeps 0–24 with keyframes at 0, 12, 40 (40 is outside the kept
+        // range — dropped). Clip B keeps 5–14 with keyframes at 5 and 10: they map
+        // to output 25 + (src − 5). The join (25) doubles as B's first anchor.
+        let a = FrameIndex(pts: pts(100, fps: 25), keyframeFlags: flags(100, keyframes: [0, 12, 40]))
+        let b = FrameIndex(pts: pts(100, fps: 25), keyframeFlags: flags(100, keyframes: [5, 10]))
+        let timeline = PreviewTimeline.build(clips: [
+            .init(clipID: idA, pts: a.pts, inPoint: nil, outPoint: 24, duration: 4, conformed: false),
+            .init(clipID: idB, pts: b.pts, inPoint: 5, outPoint: 14, duration: 4, conformed: false),
+        ], targetFrameRate: "25/1")
+        let indexes = [idA: a, idB: b]
+
+        let anchors = timeline.keyframeAnchorFrames { indexes[$0] }
+        #expect(anchors == [0, 12, 25, 30])
+    }
+
+    /// A clip whose kept range holds no keyframe still contributes its segment
+    /// start: the join is a clean seek anchor in the output, so the keys always
+    /// have somewhere to land when walking across clips.
+    @Test func aKeyframelessKeptRangeStillAnchorsItsJoin() {
+        let a = FrameIndex(pts: pts(50, fps: 25), keyframeFlags: flags(50, keyframes: [0]))
+        let b = FrameIndex(pts: pts(50, fps: 25), keyframeFlags: flags(50, keyframes: [0]))
+        let timeline = PreviewTimeline.build(clips: [
+            .init(clipID: idA, pts: a.pts, inPoint: nil, outPoint: 9, duration: 2, conformed: false),
+            .init(clipID: idB, pts: b.pts, inPoint: 20, outPoint: 29, duration: 2, conformed: false),
+        ], targetFrameRate: "25/1")
+        let indexes = [idA: a, idB: b]
+
+        // B keeps 20–29, no keyframe inside — only its join (output 10) anchors it.
+        let anchors = timeline.keyframeAnchorFrames { indexes[$0] }
+        #expect(anchors == [0, 10])
+    }
+
+    @Test func conformedKeyframesMapThroughTimeToOutputFrames() {
+        // A 50fps conformed clip keeping 10–60 in a 25fps project (25 output
+        // frames): the keyframe at source 30 sits 0.4 s into the window → output
+        // frame 10; outputFrame is the inverse of sourceFrame there.
+        let source = pts(100, fps: 50)
+        let index = FrameIndex(pts: source, keyframeFlags: flags(100, keyframes: [30]))
+        let timeline = PreviewTimeline.build(clips: [
+            .init(clipID: idA, pts: source, inPoint: 10, outPoint: 60, duration: 2, conformed: true),
+        ], targetFrameRate: "25/1")
+        let segment = timeline.segments[0]
+
+        #expect(timeline.outputFrame(forSource: 30, in: segment, pts: source) == 10)
+        #expect(timeline.sourceFrame(in: segment, local: 10, pts: source) == 30)
+        let anchors = timeline.keyframeAnchorFrames { _ in index }
+        #expect(anchors == [0, 10])
+    }
+
+    @Test func outputFrameClampsIntoTheSegment() {
+        let source = pts(100, fps: 25)
+        let timeline = PreviewTimeline.build(clips: [
+            .init(clipID: idA, pts: source, inPoint: 10, outPoint: 19, duration: 4, conformed: false),
+        ], targetFrameRate: "25/1")
+        let segment = timeline.segments[0]
+
+        #expect(timeline.outputFrame(forSource: 5, in: segment, pts: source) == 0)
+        #expect(timeline.outputFrame(forSource: 50, in: segment, pts: source) == 9)
+    }
 }
