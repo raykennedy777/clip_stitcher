@@ -146,6 +146,7 @@ struct OutputView: View {
             panel.canChooseFiles = false
             panel.canCreateDirectories = true
             panel.allowsMultipleSelection = false
+            if let dir = defaultExportDirectory { panel.directoryURL = dir }
 
             guard panel.runModal() == .OK, let url = panel.url else { return }
             document.startExport(to: url)
@@ -165,11 +166,25 @@ struct OutputView: View {
         panel.title = "Export"
         panel.prompt = "Export"
         panel.canCreateDirectories = true
+        panel.showsTagField = false
         panel.nameFieldStringValue = "\(defaultName).\(ext)"
+        if let dir = defaultExportDirectory { panel.directoryURL = dir }
 
         guard panel.runModal() == .OK, var url = panel.url else { return }
         if url.pathExtension.lowercased() != ext { url.appendPathExtension(ext) }
         document.startExport(to: url)
+    }
+
+    /// Where the export panel opens: the target clip's folder, else the first clip's.
+    /// Nil (unresolvable bookmarks, no clips) leaves the panel at the system default.
+    private var defaultExportDirectory: URL? {
+        let candidates = [document.project.targetClip, document.project.clips.first]
+        for clip in candidates {
+            if let clip, let url = document.url(for: clip) {
+                return url.deletingLastPathComponent()
+            }
+        }
+        return nil
     }
 
     /// A starting filename: the first clip's name without its extension, else a default.
