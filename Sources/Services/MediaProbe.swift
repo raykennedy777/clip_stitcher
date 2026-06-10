@@ -1,6 +1,13 @@
 import Foundation
 
 /// Probes a media file with ffprobe and maps the result to our property types.
+///
+/// One interface over ffprobe: callers ask for facts — the stream/format properties,
+/// the container start time, a video stream's timebase — and the ffprobe invocation
+/// shapes and parsing quirks stay inside. Each probe splits into the invocation (the
+/// exact, shell-validated argument array) and a pure parser unit-tested off canned
+/// ffprobe output, including the known quirks: ffprobe's CSV writer emits a trailing
+/// comma on MPEG-2 streams, and reports "N/A" for values a demuxer doesn't carry.
 enum MediaProbe {
     struct Result: Sendable {
         var video: VideoProperties?
@@ -24,8 +31,15 @@ enum MediaProbe {
         guard output.status == 0 else {
             throw FFError.probeFailed(String(data: output.stderr, encoding: .utf8) ?? "exit \(output.status)")
         }
+        return try parseProbe(json: output.stdout)
+    }
 
-        let decoded = try JSONDecoder().decode(FFProbeOutput.self, from: output.stdout)
+    /// Maps ffprobe's `-print_format json -show_streams -show_format` output to a
+    /// `Result`: the first video stream, every audio stream in container order, and the
+    /// format duration. Pure, so the mapping — including the case-varying tag keys —
+    /// is unit-testable off canned ffprobe output.
+    static func parseProbe(json: Data) throws -> Result {
+        let decoded = try JSONDecoder().decode(FFProbeOutput.self, from: json)
         let v = decoded.streams.first { $0.codec_type == "video" }
         let audioStreams = decoded.streams.filter { $0.codec_type == "audio" }
 
@@ -61,10 +75,6 @@ enum MediaProbe {
         return Result(video: video, audio: audioTracks.first, audioTracks: audioTracks, duration: duration)
     }
 
-    /// The container-level start_time in seconds — the offset ffmpeg measures input
-    /// `-ss` from (the ADR-0013 trap; audio playback subtracts it to seek by source
-    /// presentation time). 0 when the demuxer reports none ("N/A") or the probe fails;
-    /// that's also the correct value for such files.
     /// The first video stream's timebase as ffprobe reports it (e.g. "1/16000"), or nil
     /// when the file has none or the probe fails. Read off the issue-#18 timescale probe
     /// piece to learn the MP4 track timescale stream-copied pieces of a source inherit.
@@ -79,10 +89,21 @@ enum MediaProbe {
               ]),
               output.status == 0,
               let text = String(data: output.stdout, encoding: .utf8) else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return parseTimeBase(csv: text)
+    }
+
+    /// Parses the `stream=time_base` CSV value to the bare "num/den" fact. ffprobe's csv
+    /// writer leaves a trailing comma on MPEG-2 streams — stripped here so callers get
+    /// the fact, not the quirk. Empty output (no video stream) is nil.
+    static func parseTimeBase(csv: String) -> String? {
+        let trimmed = csv.trimmingCharacters(in: CharacterSet(charactersIn: ", \n\r\t"))
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// The container-level start_time in seconds — the offset ffmpeg measures input
+    /// `-ss` from (the ADR-0013 trap; audio playback subtracts it to seek by source
+    /// presentation time). 0 when the demuxer reports none ("N/A") or the probe fails;
+    /// that's also the correct value for such files.
     static func containerStartTime(url: URL) async -> Double {
         guard let ffprobe = try? FFTools.ffprobeURL(),
               let output = try? await ProcessRunner.run(ffprobe, [
@@ -93,7 +114,14 @@ enum MediaProbe {
               ]),
               output.status == 0,
               let text = String(data: output.stdout, encoding: .utf8) else { return 0 }
-        return Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return parseStartTime(csv: text)
+    }
+
+    /// Parses the `format=start_time` CSV value to seconds. "N/A" (the demuxer carries
+    /// no start time) and anything unparseable are 0 — also the correct seek offset for
+    /// such files.
+    static func parseStartTime(csv: String) -> Double {
+        Double(csv.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 }
 
