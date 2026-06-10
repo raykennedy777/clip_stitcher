@@ -98,6 +98,48 @@ struct ExportEngineTests {
         #expect(a == ["-ss", "10", "-i", "/tmp/clip.mp4"])
     }
 
+    // MARK: - Kept window (issue #3: input -ss is measured from the container's
+    // start_time, not absolute pts — ADR-0015)
+
+    @Test func keptWindowSubtractsTheContainerStartFromTheSeek() {
+        // The measured .mpg case: in point at pts 60.2 in a 0.24-start container must
+        // seek 59.96 — passing 60.2 lands 0.24 s late in content (measured +230 ms
+        // audio-ahead lip-sync error in the real TS output).
+        let w = ExportEngine.keptWindow(inPts: 60.2, outPts: 70.2, firstPts: 0.24,
+                                        lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
+        #expect(w.start == 59.96)
+        #expect(abs(w.end! - 69.96) < 1e-9)
+        #expect(w.duration == 10.0)
+    }
+
+    @Test func keptWindowIsUnchangedOnAZeroStartContainer() {
+        let w = ExportEngine.keptWindow(inPts: 57.0, outPts: 60.0, firstPts: 0.04,
+                                        lastPts: 5169.0, frameDuration: 0.04, containerStart: 0)
+        #expect(w.start == 57.0)
+        #expect(w.end == 60.0)
+        #expect(w.duration == 3.0)
+    }
+
+    @Test func keptWindowOpenStartReadsFromTheFileStart() {
+        // No in point: no seek at all (and none needed — reading from the start is
+        // immune to the start_time trap). Duration spans first frame to the out pts.
+        let w = ExportEngine.keptWindow(inPts: nil, outPts: 10.24, firstPts: 0.24,
+                                        lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
+        #expect(w.start == nil)
+        #expect(w.end == 10.0)
+        #expect(w.duration == 10.0)
+    }
+
+    @Test func keptWindowOpenEndRunsToTheLastFrame() {
+        // No out point: read to the file end; the kept span ends one frame *after*
+        // the last frame's pts (the last frame still displays for a frame).
+        let w = ExportEngine.keptWindow(inPts: 4010.2, outPts: nil, firstPts: 0.24,
+                                        lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
+        #expect(w.start == 4009.96)
+        #expect(w.end == nil)
+        #expect(abs(w.duration - 10.04) < 1e-9)
+    }
+
     private let stereoTrack = ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2)
 
     @Test func audioMuxConcatenatesItemAudioOverCopiedVideo() {

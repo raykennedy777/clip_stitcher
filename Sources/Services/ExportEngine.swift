@@ -6,10 +6,11 @@ import Foundation
 /// `codec_name`, used to refuse a stream-copy concat across different codecs (that is
 /// conform — a later milestone).
 ///
-/// `audioStart`/`audioEnd` are the clip's kept range in **source presentation time**
-/// (seconds) — the audio is re-encoded over exactly this window so it stays aligned with
-/// the video and the joins are gap-free (ADR-0008). `nil` means that end is the clip
-/// boundary (no cut there).
+/// `audioStart`/`audioEnd` are the clip's kept range as **input-seek seconds** — measured
+/// from the container's start_time, i.e. `pts − start_time` (`keptWindow`; issue #3) —
+/// the audio is re-encoded over exactly this window so it stays aligned with the video
+/// and the joins are gap-free (ADR-0008). `nil` means that end is the clip boundary (no
+/// cut there).
 struct ExportItem {
     var source: URL
     var codec: String? = nil
@@ -270,9 +271,35 @@ enum ExportEngine {
         return nil
     }
 
+    /// A clip's kept range as ffmpeg sees it: `start`/`end` are input-seek seconds —
+    /// measured from the **container's start_time**, not absolute pts (ADR-0015) —
+    /// and `duration` is the kept video span used to force every audio leg's length.
+    struct KeptWindow: Equatable {
+        var start: Double?
+        var end: Double?
+        var duration: Double
+    }
+
+    /// Converts a clip's kept range from frame-index pts (absolute presentation time)
+    /// to the seek window the ffmpeg invocations need. ffmpeg's input `-ss` counts from
+    /// the container's start_time, so passing absolute pts lands `containerStart`
+    /// seconds late in content on a non-zero-start file (measured +230 ms audio-ahead
+    /// on the MPEG-PS test clip — issue #3); the seek values subtract it. The duration
+    /// stays in absolute pts: first/last frame fill open ends, and the last frame
+    /// displays for one frame beyond its pts.
+    static func keptWindow(inPts: Double?, outPts: Double?, firstPts: Double?,
+                           lastPts: Double?, frameDuration: Double?, containerStart: Double) -> KeptWindow {
+        let spanStart = inPts ?? firstPts ?? 0
+        let spanEnd = outPts ?? ((lastPts ?? 0) + (frameDuration ?? 0))
+        return KeptWindow(start: inPts.map { $0 - containerStart },
+                          end: outPts.map { $0 - containerStart },
+                          duration: max(0, spanEnd - spanStart))
+    }
+
     /// Input args selecting one clip's audio source range: a fast seek to `start` and a
     /// read duration. `-ss`/`-t` before `-i` are input options. An open start/end omits
-    /// the corresponding flag (read from the file start / to the file end).
+    /// the corresponding flag (read from the file start / to the file end). `start`/`end`
+    /// are input-seek seconds (`KeptWindow`), never absolute pts.
     static func audioInputArgs(source: URL, start: Double?, end: Double?) -> [String] {
         var a: [String] = []
         if let start { a += ["-ss", timeString(start)] }

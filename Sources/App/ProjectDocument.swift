@@ -344,18 +344,21 @@ final class ProjectDocument: ReferenceFileDocument {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await frameIndex(for: clip)
-                // The kept range as a time window, in source presentation time. A `nil` point
-                // means that end is the clip boundary (no cut there), so audio — and a
-                // conformed clip's video — runs to the file's start/end too.
-                let audioStart = clip.inPoint.map { index.pts[$0] }
-                let audioEnd = clip.outPoint.map { index.pts[$0] }
-                // The kept *video* span — every audio leg is forced to exactly this length
-                // so the output tracks stay sample-aligned at joins (ADR-0014). Open ends
-                // resolve to the video stream's first/last frame.
-                let frameDur = Self.frameDuration(clip.video?.frameRate) ?? 0
-                let spanStart = audioStart ?? index.pts.first ?? 0
-                let spanEnd = audioEnd ?? ((index.pts.last ?? 0) + frameDur)
-                let audioDuration = max(0, spanEnd - spanStart)
+                // The kept range as a seek window. A `nil` point means that end is the
+                // clip boundary (no cut there), so audio — and a conformed clip's video —
+                // runs to the file's start/end too. The window subtracts the container's
+                // start_time (issue #3: input `-ss` is measured from it, not absolute
+                // pts — passing pts cut every leg 0.24 s late on the MPEG-PS clip), and
+                // its duration is the kept *video* span every audio leg is forced to, so
+                // the output tracks stay sample-aligned at joins (ADR-0014).
+                let containerStart = await MediaProbe.containerStartTime(url: url)
+                let window = ExportEngine.keptWindow(
+                    inPts: clip.inPoint.map { index.pts[$0] },
+                    outPts: clip.outPoint.map { index.pts[$0] },
+                    firstPts: index.pts.first, lastPts: index.pts.last,
+                    frameDuration: Self.frameDuration(clip.video?.frameRate),
+                    containerStart: containerStart)
+                let (audioStart, audioEnd, audioDuration) = (window.start, window.end, window.duration)
                 // Each output track's leg comes from the clip's selected source for it:
                 // one of its own streams, an external file, or silence (ADR-0014).
                 let audioSources: [ExportEngine.AudioSource?] = try clip.resolvedAudioSelections.enumerated().map { slot, selection in

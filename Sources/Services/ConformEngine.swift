@@ -42,7 +42,9 @@ enum ConformEngine {
     }
 
     /// Full ffmpeg args to conform one clip's kept range into `output`: a fast seek to the
-    /// in-point time and a read duration (the same time window the audio uses), then the
+    /// in point — `start`/`end` are input-seek seconds (`ExportEngine.keptWindow`), measured
+    /// from the container's start_time — and a read duration (the same window the audio
+    /// uses, so a conformed clip's video and audio stay aligned), then the
     /// source→target transform. Audio is dropped; the rebuilt track is muxed in later. An
     /// open start/end omits the corresponding seek flag (read from file start / to file end).
     static func conformArguments(
