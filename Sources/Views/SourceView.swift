@@ -176,6 +176,7 @@ struct SourceView: View {
 
             Spacer()
         }
+        .labelStyle(FixedIconColumnLabelStyle())
         .padding()
         .frame(width: 200)
     }
@@ -330,5 +331,17 @@ struct SourceView: View {
         if acceptedExtensions.contains(url.pathExtension.lowercased()) { return true }
         guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return false }
         return contentTypes.contains { type.conforms(to: $0) }
+    }
+}
+
+/// Pins every icon into a uniform 28 pt slot (same width as `PreviewView`'s
+/// transport buttons) so button titles share one left edge regardless of how
+/// wide each SF Symbol happens to be.
+private struct FixedIconColumnLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            configuration.icon.frame(width: 28)
+            configuration.title
+        }
     }
 }
