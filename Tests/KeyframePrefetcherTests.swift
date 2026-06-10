@@ -71,4 +71,35 @@ struct KeyframePrefetcherTests {
         #expect(!lru.contains(1))
         #expect(lru.contains(2))
     }
+
+    // MARK: emitted-frame verification (the open-GOP CRA mislabel fix)
+
+    @Test func showinfoPtsIsParsedFromTheFirstFrameLine() {
+        let stderr = """
+        Input #0, matroska,webm, from 'x.mkv':
+        [Parsed_showinfo_0 @ 0x600] n:   0 pts: 108066 pts_time:5.04 duration_time:0.02
+        [Parsed_showinfo_0 @ 0x600] n:   1 pts: 108316 pts_time:10.04
+        """
+        #expect(KeyframePrefetcher.firstShowinfoPts(in: stderr) == 5.04)
+    }
+
+    @Test func showinfoPtsIsNilWithoutAFrameLine() {
+        #expect(KeyframePrefetcher.firstShowinfoPts(in: "Input #0…\nno frames here") == nil)
+    }
+
+    @Test func nearestFrameMatchesAnExactPts() {
+        let pts = (0..<100).map { Double($0) * 0.02 }
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 0.40, in: pts) == 20)
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 0.401, in: pts) == 20)   // FP fuzz
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 0.0, in: pts) == 0)
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 1.98, in: pts) == 99)
+    }
+
+    @Test func nearestFrameRefusesAMidGapPts() {
+        // A pts landing between frames means the decode emitted something we can't
+        // name — the image must not be filed under a guess.
+        let pts = (0..<100).map { Double($0) * 0.02 }
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 0.41, in: pts) == nil)
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 5.0, in: pts) == nil)    // far past the end
+    }
 }
