@@ -436,21 +436,7 @@ final class ProjectDocument: ReferenceFileDocument {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await frameIndex(for: clip)
-                // The kept range as a seek window. A `nil` point means that end is the
-                // clip boundary (no cut there), so audio — and a conformed clip's video —
-                // runs to the file's start/end too. The window subtracts the container's
-                // start_time (issue #3: input `-ss` is measured from it, not absolute
-                // pts — passing pts cut every leg 0.24 s late on the MPEG-PS clip), and
-                // its duration is the kept *video* span every audio leg is forced to, so
-                // the output tracks stay sample-aligned at joins (ADR-0014).
                 let containerStart = await MediaProbe.containerStartTime(url: url)
-                let window = ExportEngine.keptWindow(
-                    inPts: clip.inPoint.map { index.pts[$0] },
-                    outPts: clip.outPoint.map { index.pts[$0] },
-                    firstPts: index.pts.first, lastPts: index.pts.last,
-                    frameDuration: Self.frameDuration(clip.video?.frameRate),
-                    containerStart: containerStart)
-                let (audioStart, audioEnd, audioDuration) = (window.start, window.end, window.duration)
                 // Each output track's leg comes from the clip's selected source for it:
                 // one of its own streams, an external file, or silence (ADR-0014). The
                 // shared resolver throws on a missing external file — the export refuses
@@ -473,36 +459,14 @@ final class ProjectDocument: ReferenceFileDocument {
                     }
                 }
 
-                // A clip that doesn't match the target is conformed: a full re-encode of its
-                // kept range to the target spec (ADR-0011). A matching clip is smart-rendered.
-                // Audio never enters the verdict — every leg is conformed to its output
-                // track's format inside the rebuild chain (ADR-0014).
-                let target = project.targetClip
-                if let target, let tv = target.video, let cv = clip.video,
-                   !MatchEvaluator.matches(clip, target: target) {
-                    items.append(ExportItem(source: url, codec: tv.codec,
-                                            audioStart: audioStart, audioEnd: audioEnd,
-                                            audioSources: audioSources, audioDuration: audioDuration,
-                                            conform: ConformEngine.VideoConform(sourceVideo: cv, targetVideo: tv)))
-                } else {
-                    let leadingCounts = CopySafeBoundaryDetector.leadingPictureCounts(
-                        keyframeFlags: index.keyframeFlags, dts: index.dts)
-                    let segments = BoundaryReencodePlanner.plan(
-                        leadingCounts: leadingCounts, frameCount: index.count,
-                        inFrame: clip.inPoint, outFrame: clip.outPoint)
-                    guard !segments.isEmpty else { throw ExportError.invalidPlan }
-                    // Re-encode args matched to the source so the edges concat cleanly with the
-                    // copied middle (ADR-0009).
-                    let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
-                        codec: clip.video?.codec,
-                        profile: clip.video?.profile,
-                        pixelFormat: clip.video?.pixelFormat,
-                        fieldOrder: clip.video?.fieldOrder)
-                    items.append(ExportItem(source: url, codec: clip.video?.codec,
-                                            segments: segments, index: index, encoder: encoder,
-                                            audioStart: audioStart, audioEnd: audioEnd,
-                                            audioSources: audioSources, audioDuration: audioDuration))
-                }
+                // The planning itself — the smart-render-vs-conform verdict, the
+                // boundary re-encode segment plan, and the kept window — is pure and
+                // lives in ExportPlanner (ADR-0009 / ADR-0011).
+                items.append(try ExportPlanner.planItem(
+                    for: ExportPlanner.ClipInput(clip: clip, url: url, index: index,
+                                                 containerStart: containerStart,
+                                                 audioSources: audioSources),
+                    target: project.targetClip))
             }
             // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins
             // and mislabels the audio; TS is the right container for this footage (ADR-0008).
@@ -549,15 +513,6 @@ final class ProjectDocument: ReferenceFileDocument {
     /// broadcast video belongs in TS; H.264/HEVC default to MP4 (ADR-0008).
     static func defaultContainer(forCodec codec: String) -> Container {
         codec == "mpeg2video" ? .ts : .mp4
-    }
-
-    /// One frame's duration in seconds from an ffprobe rational rate ("25/1" → 0.04);
-    /// nil when the rate is missing or malformed.
-    static func frameDuration(_ frameRate: String?) -> Double? {
-        let parts = (frameRate ?? "").split(separator: "/")
-        guard parts.count == 2, let num = Double(parts[0]), let den = Double(parts[1]),
-              num > 0, den > 0 else { return nil }
-        return den / num
     }
 
     // MARK: - Import pipeline
