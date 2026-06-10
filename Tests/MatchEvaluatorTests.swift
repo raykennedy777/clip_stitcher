@@ -2,10 +2,9 @@ import Testing
 import Foundation
 @testable import VidConform
 
-/// Exercises the smart-render-vs-conform match verdict (ADR-0005), focusing on the audio
-/// rule: audio *codec* is no longer compared (the track is always rebuilt to the target's
-/// codec, so the source codec can't block video smart-render — ADR-0010), but sample rate
-/// and channels still are (the rebuild preserves them rather than resampling).
+/// Exercises the smart-render-vs-conform match verdict (ADR-0005). Audio is not compared
+/// at all (ADR-0014): every audio leg is rebuilt and conformed to its output track's
+/// codec/rate/layout, so no audio property can block video smart-render.
 struct MatchEvaluatorTests {
     private func video(codec: String = "h264", width: Int = 1920,
                        field: String? = "progressive") -> VideoProperties {
@@ -29,16 +28,14 @@ struct MatchEvaluatorTests {
         #expect(MatchEvaluator.matches(reimported, target: target))
     }
 
-    @Test func audioSampleRateMismatchFailsTheMatch() {
-        let target = clip(video: video(), audio: audio(rate: 48000))
-        let other = clip(video: video(), audio: audio(rate: 44100))
-        #expect(!MatchEvaluator.matches(other, target: target))
-    }
-
-    @Test func audioChannelCountMismatchFailsTheMatch() {
-        let target = clip(video: video(), audio: audio(channels: 2))
-        let other = clip(video: video(), audio: audio(channels: 1))
-        #expect(!MatchEvaluator.matches(other, target: target))
+    @Test func noAudioPropertyBlocksTheMatch() {
+        // ADR-0014: every audio leg is conformed to its output track's format inside the
+        // rebuild chain, so rate/channel differences — and missing audio entirely — can
+        // no longer force a video re-encode.
+        let target = clip(video: video(), audio: audio(rate: 48000, channels: 2))
+        #expect(MatchEvaluator.matches(clip(video: video(), audio: audio(rate: 44100)), target: target))
+        #expect(MatchEvaluator.matches(clip(video: video(), audio: audio(channels: 1)), target: target))
+        #expect(MatchEvaluator.matches(clip(video: video(), audio: nil), target: target))
     }
 
     @Test func identicalClipsMatch() {
@@ -104,12 +101,6 @@ struct MatchEvaluatorTests {
         let target = clip(video: video(width: 1920), audio: audio())
         let other = clip(video: video(width: 1280), audio: audio())
         #expect(!MatchEvaluator.matches(other, target: target))
-    }
-
-    @Test func oneSideMissingAudioFailsTheMatch() {
-        // A missing audio stream can't feed the concat — still a mismatch.
-        let target = clip(video: video(), audio: audio())
-        #expect(!MatchEvaluator.matches(clip(video: video(), audio: nil), target: target))
     }
 
     @Test func bothMissingAudioMatchWhenVideoMatches() {

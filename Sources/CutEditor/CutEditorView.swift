@@ -2,6 +2,9 @@ import SwiftUI
 
 struct CutEditorView: View {
     @ObservedObject var model: CutEditorModel
+    /// Observed so the audio track dropdown follows live edits from the settings sheet.
+    @ObservedObject var document: ProjectDocument
+    @State private var showingAudioSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -9,6 +12,15 @@ struct CutEditorView: View {
             controls
         }
         .frame(minWidth: 640, minHeight: 480)
+        .sheet(isPresented: $showingAudioSettings) {
+            AudioSettingsView(document: document, clipID: model.clip.id)
+        }
+    }
+
+    /// The clip's live state in the document (the model's copy is a snapshot from
+    /// when the window opened).
+    private var liveClip: Clip? {
+        document.project.clips.first { $0.id == model.clip.id }
     }
 
     // MARK: - Preview area
@@ -52,11 +64,38 @@ struct CutEditorView: View {
 
     private var confirmBar: some View {
         HStack {
+            audioTrackPicker
+            Button {
+                showingAudioSettings = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .help("Audio Settings…")
             Spacer()
             Button("Cancel", role: .cancel) { model.cancel() }
                 .keyboardShortcut(.cancelAction)
             Button("OK") { model.confirm() }
                 .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    /// Which of the clip's audio tracks to monitor (ADR-0014). The choice is stored
+    /// now and becomes audible when the cut-editor gains audio playback; tracks are
+    /// named from container metadata with the "Track N" fallback.
+    @ViewBuilder
+    private var audioTrackPicker: some View {
+        if let clip = liveClip, !clip.resolvedAudioSelections.isEmpty {
+            Picker("Audio:", selection: Binding(
+                get: { min(clip.monitoredAudioTrack ?? 0, clip.resolvedAudioSelections.count - 1) },
+                set: { document.setMonitoredAudioTrack(id: clip.id, slot: $0) }
+            )) {
+                ForEach(clip.resolvedAudioSelections.indices, id: \.self) { slot in
+                    Text(clip.audioTrackName(slot)).tag(slot)
+                }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            .help("The track you'd hear in this editor — selection is saved, audio playback arrives later")
         }
     }
 

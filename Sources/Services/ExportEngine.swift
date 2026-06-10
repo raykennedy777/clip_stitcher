@@ -18,9 +18,14 @@ struct ExportItem {
     var encoder: [String] = []
     var audioStart: Double? = nil
     var audioEnd: Double? = nil
-    /// Set when this clip is conformed and its audio must be resampled/remixed to the target
-    /// before the sample-level concat (ADR-0011); `nil` for a matching clip (no audio filter).
-    var audioConform: ExportEngine.AudioConform? = nil
+    /// What feeds each of this clip's audio legs, by output track (ADR-0014): the clip's
+    /// own Nth audio stream, an external file, or `nil` for silence. Output tracks past
+    /// the end of this list are silence too.
+    var audioSources: [ExportEngine.AudioSource?] = [.stream(0)]
+    /// The clip's kept video duration in seconds — every audio leg is trimmed/padded to
+    /// exactly this many samples so the output tracks can't drift apart at joins
+    /// (ADR-0014). Falls back to `audioEnd - audioStart` when unset.
+    var audioDuration: Double? = nil
     /// Set when this clip does not match the target and its video must be fully re-encoded to
     /// the target spec (ADR-0011). When present the clip is conformed instead of smart-rendered,
     /// and `segments` is unused; `nil` for a matching clip (the M2 smart-render path).
@@ -71,11 +76,24 @@ enum ExportEngine {
     static let fallbackAudioCodec = "aac"
     private static let audioBitrate = "192k"
 
-    /// The target audio rate/channels a conforming clip's audio is resampled/remixed to
-    /// before the sample-level concat (ADR-0011).
-    struct AudioConform: Equatable {
+    /// One output audio track's spec (ADR-0014): every leg of its concat chain is
+    /// conformed to this rate/layout (silence is generated in it), and the tags are
+    /// written on the output stream (titles only survive in MKV — container reality).
+    struct OutputAudioTrack: Equatable {
         var sampleRate: Int
         var channels: Int
+        var language: String? = nil
+        var title: String? = nil
+    }
+
+    /// What feeds one audio leg (ADR-0014).
+    enum AudioSource: Equatable {
+        /// The clip's own file's Nth audio stream (0-based).
+        case stream(Int)
+        /// The Nth audio stream of an external file (audio-only or another video),
+        /// aligned file start = video-file start, so the clip's kept window cuts the
+        /// same span out of it.
+        case external(URL, stream: Int)
     }
 
     /// The audio codec the export will actually encode to, and whether it had to fall back.
@@ -263,39 +281,105 @@ enum ExportEngine {
         return a
     }
 
-    /// Final-mux args: copy `videoInput`'s video (when present) and build one continuous,
-    /// re-encoded audio track by concatenating each item's source audio range at the
-    /// sample level. `videoInput` is `nil` for an audio-only export.
-    static func audioMuxArguments(videoInput: URL?, items: [ExportItem], audioCodec: String, output: URL) -> [String] {
+    /// A clip's kept duration in seconds — the length every one of its audio legs is
+    /// forced to. The app supplies it explicitly; the closed window is the fallback.
+    private static func keptDuration(_ item: ExportItem) -> Double? {
+        if let d = item.audioDuration, d > 0 { return d }
+        guard let s = item.audioStart, let e = item.audioEnd, e > s else { return nil }
+        return e - s
+    }
+
+    /// Final-mux args (ADR-0014): copy `videoInput`'s video (when present) and rebuild N
+    /// continuous audio tracks — one sample-level concat chain per output track. Every
+    /// leg is conformed to its track's rate/layout and forced to the clip's exact kept
+    /// duration in samples (`atrim`+`apad` — tracks of one clip decode to slightly
+    /// different lengths otherwise, and the output tracks would drift apart at every
+    /// join). A clip with no source for a track contributes `anullsrc` silence in the
+    /// track's format. `videoInput` is `nil` for an audio-only export.
+    static func audioMuxArguments(videoInput: URL?, items: [ExportItem], tracks: [OutputAudioTrack],
+                                  audioCodec: String, output: URL) -> [String] {
         var args = ["-v", "error"]
-        var audioBase = 0
+        var nextInput = 0
         if let videoInput {
             args += ["-i", videoInput.path]
-            audioBase = 1
+            nextInput = 1
         }
+        // One input per clip, plus one per distinct external audio file a clip uses.
+        // An external file gets the same seek window as the clip — it is aligned
+        // file start = video-file start (ADR-0014), like a stream of the clip's own file.
+        var ownInput: [Int] = []
+        var externalInput: [[URL: Int]] = []
         for item in items {
             args += audioInputArgs(source: item.source, start: item.audioStart, end: item.audioEnd)
-        }
-        // A conforming leg is resampled/remixed to the target before the concat; a matching
-        // leg is referenced directly, so an all-matching export keeps its plain concat shape.
-        var prechains: [String] = []
-        var labels: [String] = []
-        for (i, item) in items.enumerated() {
-            let input = "[\(audioBase + i):a:0]"
-            if let ac = item.audioConform {
-                let label = "[ca\(i)]"
-                prechains.append("\(input)\(ConformEngine.audioFilter(sampleRate: ac.sampleRate, channels: ac.channels))\(label)")
-                labels.append(label)
-            } else {
-                labels.append(input)
+            ownInput.append(nextInput)
+            nextInput += 1
+            var externals: [URL: Int] = [:]
+            for case .external(let url, _)? in item.audioSources where externals[url] == nil {
+                args += audioInputArgs(source: url, start: item.audioStart, end: item.audioEnd)
+                externals[url] = nextInput
+                nextInput += 1
             }
+            externalInput.append(externals)
         }
-        let concat = "\(labels.joined())concat=n=\(items.count):v=0:a=1[a]"
-        let filterComplex = prechains.isEmpty ? concat : prechains.joined(separator: ";") + ";" + concat
-        args += ["-filter_complex", filterComplex]
+
+        var chains: [String] = []
+        for (t, track) in tracks.enumerated() {
+            var labels: [String] = []
+            for (i, item) in items.enumerated() {
+                let label = "[c\(i)t\(t)]"
+                let samples = keptDuration(item).map { Int(($0 * Double(track.sampleRate)).rounded()) }
+                let layout = ConformEngine.channelLayout(track.channels)
+                let source = t < item.audioSources.count ? item.audioSources[t] : nil
+                switch source {
+                case .stream(let s):
+                    chains.append("[\(ownInput[i]):a:\(s)]" + legFilter(track: track, samples: samples) + label)
+                case .external(let url, let s):
+                    chains.append("[\(externalInput[i][url]!):a:\(s)]" + legFilter(track: track, samples: samples) + label)
+                case nil:
+                    chains.append("anullsrc=r=\(track.sampleRate):cl=\(layout),atrim=end_sample=\(samples ?? 0)" + label)
+                }
+                labels.append(label)
+            }
+            chains.append("\(labels.joined())concat=n=\(items.count):v=0:a=1[a\(t)]")
+        }
+
+        if !chains.isEmpty { args += ["-filter_complex", chains.joined(separator: ";")] }
         if videoInput != nil { args += ["-map", "0:v:0", "-c:v", "copy"] }
-        args += ["-map", "[a]", "-c:a", audioCodec, "-b:a", audioBitrate, output.path]
+        for t in tracks.indices { args += ["-map", "[a\(t)]"] }
+        if !tracks.isEmpty { args += ["-c:a", audioCodec, "-b:a", audioBitrate] }
+        for (t, track) in tracks.enumerated() {
+            if let language = track.language { args += ["-metadata:s:a:\(t)", "language=\(language)"] }
+            if let title = track.title { args += ["-metadata:s:a:\(t)", "title=\(title)"] }
+        }
+        args.append(output.path)
         return args
+    }
+
+    /// One real audio leg's filter: conform to the track's rate/layout, then force the
+    /// exact kept length — trim the overshoot, silence-pad the shortfall.
+    private static func legFilter(track: OutputAudioTrack, samples: Int?) -> String {
+        var f = ConformEngine.audioFilter(sampleRate: track.sampleRate, channels: track.channels)
+        if let n = samples { f += ",atrim=end_sample=\(n),apad=whole_len=\(n)" }
+        return f
+    }
+
+    /// The output audio tracks an export will carry (ADR-0014): as many as the richest
+    /// clip's selected sources, each track's format/tags taken from the target clip's
+    /// corresponding track when it has one, else from the first clip in timeline order
+    /// that does.
+    static func resolveOutputTracks(target: Clip?, clips: [Clip]) -> [OutputAudioTrack] {
+        let count = clips.map { $0.resolvedAudioSelections.count }.max() ?? 0
+        let donors = (target.map { [$0] } ?? []) + clips
+        return (0..<count).map { t in
+            let donor = donors.lazy.compactMap { clip -> AudioProperties? in
+                let tracks = clip.effectiveAudioTracks
+                return t < tracks.count ? tracks[t] : nil
+            }.first
+            return OutputAudioTrack(sampleRate: donor?.sampleRate ?? 48000,
+                                    channels: donor?.channels ?? 2,
+                                    language: donor?.language,
+                                    title: donor?.title)
+        }
     }
 
     /// ffmpeg prints times locale-independently; format without scientific notation or
@@ -320,6 +404,7 @@ enum ExportEngine {
         items: [ExportItem],
         settings: OutputSettings,
         audioCodec: String = fallbackAudioCodec,
+        tracks: [OutputAudioTrack] = [OutputAudioTrack(sampleRate: 48000, channels: 2)],
         to destination: URL,
         progress: @escaping (Double) -> Void = { _ in }
     ) async throws {
@@ -383,7 +468,7 @@ enum ExportEngine {
                 }
             }
             if wantsAudio {
-                try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, audioCodec: audioCodec, output: destination),
+                try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, tracks: tracks, audioCodec: audioCodec, output: destination),
                                     failure: ExportError.concatFailed)
             } else {
                 try placeFile(videoInput!, at: destination)
@@ -394,7 +479,7 @@ enum ExportEngine {
                 let out = separateURL(destination: destination, index: i, count: items.count, ext: ext)
                 let videoInput = wantsVideo ? videoPieces[i] : nil
                 if wantsAudio {
-                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], audioCodec: audioCodec, output: out),
+                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], tracks: tracks, audioCodec: audioCodec, output: out),
                                         failure: ExportError.cutFailed)
                 } else {
                     try placeFile(videoInput!, at: out)

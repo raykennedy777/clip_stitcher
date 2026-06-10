@@ -8,6 +8,7 @@ struct SourceView: View {
     @State private var importing = false
     @State private var importPurpose: ImportPurpose = .add
     @State private var isDropTargeted = false
+    @State private var audioSettingsClip: Clip.ID?
 
     /// What a presented file picker is for. A single `.fileImporter` serves both jobs —
     /// stacking two of the same presentation modifier on one view silently breaks all but
@@ -32,6 +33,14 @@ struct SourceView: View {
                     .strokeBorder(Color.accentColor, lineWidth: 3)
                     .background(Color.accentColor.opacity(0.08))
                     .allowsHitTesting(false)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { audioSettingsClip != nil },
+            set: { if !$0 { audioSettingsClip = nil } }
+        )) {
+            if let id = audioSettingsClip {
+                AudioSettingsView(document: document, clipID: id)
             }
         }
         .fileImporter(
@@ -87,6 +96,7 @@ struct SourceView: View {
                             openCutEditor(for: clip)
                         }
                         Button("Duplicate") { duplicate(clip.id) }
+                        Button("Audio Settings…") { audioSettingsClip = clip.id }
                         Divider()
                         Button("Delete", role: .destructive) { delete(clip.id) }
                     }
@@ -146,6 +156,9 @@ struct SourceView: View {
 
             Divider().padding(.vertical, 6)
 
+            action("Audio Settings…", systemImage: "waveform", enabled: selection != nil) {
+                audioSettingsClip = selection
+            }
             action("Set as Target Clip", systemImage: "target", enabled: canSetTarget) {
                 if let id = selection { document.setTarget(id: id) }
             }

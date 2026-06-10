@@ -32,11 +32,20 @@ Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)
 
 **Audio rebuild**:
-Decoding every clip's audio over its kept range and re-encoding it as one continuous,
-sample-level track to the target clip's audio codec — done on every export, since audio is
-never stream-copied (it would drift from the frame-exact video cut). Distinct from smart
-render, which copies what it can.
+Decoding every clip's audio over its kept range and re-encoding it as continuous,
+sample-level output tracks to the target clip's audio codec — done on every export, since
+audio is never stream-copied (it would drift from the frame-exact video cut). One rebuild
+chain per output audio track, with silence filling where a clip has no corresponding
+track (ADR-0014). Distinct from smart render, which copies what it can.
 _Avoid_: audio passthrough, audio copy
+
+**Audio track**:
+One audio stream position, numbered from 1. A clip's audio tracks are its ordered selected
+audio sources (a stream of its own file or an external audio file); the output has as many
+audio tracks as the richest clip. "Track" alone stays reserved for audio — a clip is never
+a "track" (see Clip).
+_Avoid_: audio channel (that's mono/stereo layout), audio stream (use for the raw stream
+inside a container)
 
 ### Domain concepts
 
@@ -47,8 +56,10 @@ clip; manually reassignable.
 _Avoid_: master clip, reference clip, anchor clip
 
 **Match / Matching**:
-A clip matches when all of its strict-comparison properties equal the target clip's. Matching
-determines smart-render eligibility (match → smart render; mismatch → conform).
+A clip matches when all of its strict-comparison **video** properties equal the target
+clip's. Matching determines smart-render eligibility (match → smart render; mismatch →
+conform). Audio never enters the verdict — every audio leg is conformed inside the
+rebuild chain (ADR-0014).
 _Avoid_: compatible, conforming
 
 **Clip**:

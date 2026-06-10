@@ -177,6 +177,7 @@ final class ProjectDocument: ReferenceFileDocument {
         p.clips[i].displayName = newURL.lastPathComponent
         p.clips[i].video = nil
         p.clips[i].audio = nil
+        p.clips[i].audioTracks = nil
         p.clips[i].duration = nil
         p.clips[i].frameCount = nil
         urlCache[id] = newURL
@@ -214,6 +215,49 @@ final class ProjectDocument: ReferenceFileDocument {
         p.clips[i].inPoint = inPoint
         p.clips[i].outPoint = outPoint
         commit(p)
+    }
+
+    // MARK: - Audio tracks (ADR-0014)
+
+    /// Replaces a clip's audio track slots; `nil` restores the default (all of the
+    /// clip's own streams in container order).
+    func setAudioSelections(id: Clip.ID, selections: [AudioTrackSelection]?) {
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        var p = project
+        p.clips[i].audioSelections = selections
+        // Keep the monitored slot inside the new list.
+        if let monitored = p.clips[i].monitoredAudioTrack {
+            let count = p.clips[i].resolvedAudioSelections.count
+            p.clips[i].monitoredAudioTrack = count == 0 ? nil : min(monitored, count - 1)
+        }
+        commit(p)
+    }
+
+    /// Stores the cut-editor's monitored-track choice for a clip.
+    func setMonitoredAudioTrack(id: Clip.ID, slot: Int) {
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        var p = project
+        p.clips[i].monitoredAudioTrack = slot
+        commit(p)
+    }
+
+    /// Points a clip's audio slot at an external file (audio-only or another video):
+    /// probes all of its audio streams — for the per-stream picker, naming, formats,
+    /// and the length-mismatch notice (ADR-0014) — then commits the selection on the
+    /// file's first audio stream. The settings sheet switches streams from there.
+    func setExternalAudio(id: Clip.ID, slot: Int, url: URL) async {
+        let probe = try? await MediaProbe.probe(url: url)
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        var selections = project.clips[i].resolvedAudioSelections
+        guard slot < selections.count else { return }
+        selections[slot] = .external(
+            bookmark: (try? url.bookmarkData()) ?? Data(),
+            name: url.lastPathComponent,
+            streamIndex: 0,
+            tracks: probe?.audioTracks,
+            duration: probe?.duration
+        )
+        setAudioSelections(id: id, selections: selections)
     }
 
     /// The frame the clip's cut-editor was last closed on this session, if any.
@@ -305,22 +349,44 @@ final class ProjectDocument: ReferenceFileDocument {
                 // conformed clip's video — runs to the file's start/end too.
                 let audioStart = clip.inPoint.map { index.pts[$0] }
                 let audioEnd = clip.outPoint.map { index.pts[$0] }
+                // The kept *video* span — every audio leg is forced to exactly this length
+                // so the output tracks stay sample-aligned at joins (ADR-0014). Open ends
+                // resolve to the video stream's first/last frame.
+                let frameDur = Self.frameDuration(clip.video?.frameRate) ?? 0
+                let spanStart = audioStart ?? index.pts.first ?? 0
+                let spanEnd = audioEnd ?? ((index.pts.last ?? 0) + frameDur)
+                let audioDuration = max(0, spanEnd - spanStart)
+                // Each output track's leg comes from the clip's selected source for it:
+                // one of its own streams, an external file, or silence (ADR-0014).
+                let audioSources: [ExportEngine.AudioSource?] = try clip.resolvedAudioSelections.enumerated().map { slot, selection in
+                    switch selection {
+                    case .stream(let s):
+                        return s < clip.allAudioTracks.count ? .stream(s) : nil
+                    case .external(let bookmark, let name, let streamIndex, _, _):
+                        var stale = false
+                        guard let extURL = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale),
+                              FileManager.default.fileExists(atPath: extURL.path) else {
+                            throw ExportError.cutFailed("External audio file “\(name)” (track \(slot + 1) of “\(clip.displayName)”) was not found.")
+                        }
+                        // Pad/trim is by design; a gap of 1 s or more gets a notice (ADR-0014).
+                        if let gap = clip.externalAudioMismatch(slot: slot), abs(gap) >= 1.0 {
+                            let direction = gap < 0 ? "shorter — silence fills the rest" : "longer — the extra is unused"
+                            warnings.append("“\(name)” is \(String(format: "%.1f", abs(gap))) s \(direction) (track \(slot + 1) of “\(clip.displayName)”).")
+                        }
+                        return .external(extURL, stream: streamIndex)
+                    }
+                }
 
                 // A clip that doesn't match the target is conformed: a full re-encode of its
                 // kept range to the target spec (ADR-0011). A matching clip is smart-rendered.
+                // Audio never enters the verdict — every leg is conformed to its output
+                // track's format inside the rebuild chain (ADR-0014).
                 let target = project.targetClip
                 if let target, let tv = target.video, let cv = clip.video,
                    !MatchEvaluator.matches(clip, target: target) {
-                    // Resample/remix the audio to the target only when it actually differs, so
-                    // a video-only mismatch keeps the plain audio concat (ADR-0011).
-                    var audioConform: ExportEngine.AudioConform? = nil
-                    if let ca = clip.audio, let ta = target.audio,
-                       ca.sampleRate != ta.sampleRate || ca.channels != ta.channels {
-                        audioConform = ExportEngine.AudioConform(sampleRate: ta.sampleRate, channels: ta.channels)
-                    }
                     items.append(ExportItem(source: url, codec: tv.codec,
                                             audioStart: audioStart, audioEnd: audioEnd,
-                                            audioConform: audioConform,
+                                            audioSources: audioSources, audioDuration: audioDuration,
                                             conform: ConformEngine.VideoConform(sourceVideo: cv, targetVideo: tv)))
                 } else {
                     let copySafe = CopySafeBoundaryDetector.copySafeFlags(
@@ -338,7 +404,8 @@ final class ProjectDocument: ReferenceFileDocument {
                         fieldOrder: clip.video?.fieldOrder)
                     items.append(ExportItem(source: url, codec: clip.video?.codec,
                                             segments: segments, index: index, encoder: encoder,
-                                            audioStart: audioStart, audioEnd: audioEnd))
+                                            audioStart: audioStart, audioEnd: audioEnd,
+                                            audioSources: audioSources, audioDuration: audioDuration))
                 }
             }
             // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins
@@ -358,8 +425,13 @@ final class ProjectDocument: ReferenceFileDocument {
                     ? "an audio file" : "the \(project.output.container.fileExtension.uppercased()) container"
                 warnings.append("\(wanted.uppercased()) audio can’t go in \(dest) — exporting AAC audio instead.")
             }
+            // Output track count = the richest clip's; formats/tags target-first
+            // (ADR-0014). An audio-only export goes to a single elementary stream, which
+            // can only carry one track — keep track 1.
+            var tracks = ExportEngine.resolveOutputTracks(target: project.targetClip, clips: project.clips)
+            if project.output.type == .audioOnly { tracks = Array(tracks.prefix(1)) }
             try await ExportEngine.export(items: items, settings: project.output,
-                                          audioCodec: audio.encoder, to: destination) { p in
+                                          audioCodec: audio.encoder, tracks: tracks, to: destination) { p in
                 Task { @MainActor in
                     if case .running = self.exportStatus { self.exportStatus = .running(p) }
                 }
@@ -374,6 +446,15 @@ final class ProjectDocument: ReferenceFileDocument {
     /// broadcast video belongs in TS; H.264/HEVC default to MP4 (ADR-0008).
     static func defaultContainer(forCodec codec: String) -> Container {
         codec == "mpeg2video" ? .ts : .mp4
+    }
+
+    /// One frame's duration in seconds from an ffprobe rational rate ("25/1" → 0.04);
+    /// nil when the rate is missing or malformed.
+    static func frameDuration(_ frameRate: String?) -> Double? {
+        let parts = (frameRate ?? "").split(separator: "/")
+        guard parts.count == 2, let num = Double(parts[0]), let den = Double(parts[1]),
+              num > 0, den > 0 else { return nil }
+        return den / num
     }
 
     // MARK: - Import pipeline
@@ -392,6 +473,7 @@ final class ProjectDocument: ReferenceFileDocument {
                 var p = project
                 p.clips[i].video = probe.video
                 p.clips[i].audio = probe.audio
+                p.clips[i].audioTracks = probe.audioTracks
                 p.clips[i].duration = probe.duration
                 // Default the container to suit the first clip's codec (broadcast MPEG-2
                 // belongs in TS, not MP4). Only on the first clip, so it never overrides a

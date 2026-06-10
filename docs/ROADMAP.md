@@ -38,7 +38,7 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
      maximum of 5 seconds. **↑ — previous scene change**, same rule over the previous
      5 seconds. De-risk the scan rate in the shell first (ffmpeg scene-change detection) —
      a too-slow scan kills the feature.
-9. **Multi-track audio.** Sources can carry several audio tracks; today the engine uses one.
+9. **Multi-track audio.** ✅ Sources can carry several audio tracks; today the engine uses one.
    - **Output track count = the input with the most** (inputs with 1, 3 and 4 tracks → the
      output has 4), with **silence filling** a track wherever a source has no corresponding
      one.

@@ -84,6 +84,10 @@ struct ClipRowView: View {
         }
         if let a = clip.audio {
             parts.append("\(a.codec.uppercased()) \(a.channels)ch \(a.sampleRate / 1000)kHz")
+            let trackCount = clip.allAudioTracks.count
+            if trackCount > 1 {
+                parts.append("\(trackCount) audio tracks")
+            }
         }
         return parts.joined(separator: " · ")
     }

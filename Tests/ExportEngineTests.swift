@@ -98,57 +98,166 @@ struct ExportEngineTests {
         #expect(a == ["-ss", "10", "-i", "/tmp/clip.mp4"])
     }
 
+    private let stereoTrack = ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2)
+
     @Test func audioMuxConcatenatesItemAudioOverCopiedVideo() {
         let video = URL(fileURLWithPath: "/tmp/joined.ts")
         let items = [
             ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0),
             ExportItem(source: src, codec: "mpeg2video", audioStart: 5.0, audioEnd: 7.0),
         ]
-        let args = ExportEngine.audioMuxArguments(videoInput: video, items: items,
+        let args = ExportEngine.audioMuxArguments(videoInput: video, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.ts"))
         // video copied, audio re-encoded
         #expect(args.contains("0:v:0") && args.contains("-c:v") && args.contains("copy"))
         #expect(args.contains("-c:a") && args.contains("aac"))
-        // two audio inputs (indices 1 and 2 after the video input), concatenated
+        // two audio inputs (indices 1 and 2 after the video input), each leg conformed to
+        // the track's format and forced to its exact kept length (1 s / 2 s at 48 kHz —
+        // ADR-0014), then concatenated.
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc == "[1:a:0][2:a:0]concat=n=2:v=0:a=1[a]")
+        #expect(fc == "[1:a:0]aresample=48000,aformat=channel_layouts=stereo,atrim=end_sample=48000,apad=whole_len=48000[c0t0];"
+                    + "[2:a:0]aresample=48000,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c1t0];"
+                    + "[c0t0][c1t0]concat=n=2:v=0:a=1[a0]")
+        #expect(args.contains("[a0]"))
         #expect(args.last == "/tmp/out.ts")
     }
 
-    @Test func audioMuxConformsAMismatchedLegBeforeConcat() {
-        // A conforming clip's audio is resampled/remixed to the target before the concat, so
-        // the sample-level concat stays valid; a matching leg is referenced directly. The
-        // all-matching command shape (above) is unchanged when no leg conforms.
-        let video = URL(fileURLWithPath: "/tmp/joined.ts")
+    @Test func audioMuxSilenceFillsAClipWithoutTheTrack(){
+        // Two output tracks, but the second clip only carries one source: its leg on
+        // track 2 is anullsrc silence in the track's format, trimmed to the same exact
+        // sample count as its real legs (ADR-0014).
+        let video = URL(fileURLWithPath: "/tmp/joined.mkv")
+        let monoTrack = ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 1)
         let items = [
-            ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2),
             ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
-                       audioConform: ExportEngine.AudioConform(sampleRate: 48000, channels: 2)),
+                       audioSources: [.stream(0), .stream(1)]),
+            ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
+                       audioSources: [.stream(0)]),
         ]
-        let args = ExportEngine.audioMuxArguments(videoInput: video, items: items,
-                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.ts"))
+        let args = ExportEngine.audioMuxArguments(videoInput: video, items: items, tracks: [stereoTrack, monoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc == "[2:a:0]aresample=48000,aformat=channel_layouts=stereo[ca1];"
-                    + "[1:a:0][ca1]concat=n=2:v=0:a=1[a]")
+        #expect(fc.contains("[2:a:0]aresample=48000,aformat=channel_layouts=mono,atrim=end_sample=96000,apad=whole_len=96000[c1t1]")
+                == false) // the second clip has no second source…
+        #expect(fc.contains("anullsrc=r=48000:cl=mono,atrim=end_sample=96000[c1t1]")) // …so it is silence
+        #expect(fc.contains("[c0t0][c1t0]concat=n=2:v=0:a=1[a0]"))
+        #expect(fc.contains("[c0t1][c1t1]concat=n=2:v=0:a=1[a1]"))
+        // both rebuilt tracks mapped
+        #expect(args.contains("[a0]") && args.contains("[a1]"))
+    }
+
+    @Test func audioMuxReadsAnExternalFileAsItsOwnInput() {
+        // A track re-pointed at an external file: the file gets its own input with the
+        // SAME seek window as the clip (file start = video start — ADR-0014) and feeds
+        // the leg via the chosen audio stream of that file.
+        let external = URL(fileURLWithPath: "/tmp/demo.mkv")
+        let items = [ExportItem(source: src, codec: "h264", audioStart: 10.0, audioEnd: 12.0,
+                                audioSources: [.stream(0), .external(external, stream: 1)])]
+        let args = ExportEngine.audioMuxArguments(videoInput: URL(fileURLWithPath: "/tmp/joined.mp4"),
+                                                  items: items, tracks: [stereoTrack, stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mp4"))
+        // inputs: 0 video, 1 the clip, 2 the external file — both with -ss 10 -t 2
+        #expect(args.contains("/tmp/demo.mkv"))
+        #expect(args.filter { $0 == "10" }.count == 2 && args.filter { $0 == "2" }.count == 2)
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(fc.contains("[2:a:1]aresample=48000,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c0t1]"))
+    }
+
+    @Test func audioMuxSharesOneInputAcrossTwoStreamsOfTheSameExternalFile() {
+        // Two slots fed by different streams of the same external file: one -i for the
+        // file, two leg references into it.
+        let external = URL(fileURLWithPath: "/tmp/demo.mkv")
+        let items = [ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
+                                audioSources: [.external(external, stream: 0), .external(external, stream: 1)])]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
+                                                  tracks: [stereoTrack, stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mka"))
+        #expect(args.filter { $0 == "/tmp/demo.mkv" }.count == 1)
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(fc.contains("[1:a:0]") && fc.contains("[1:a:1]"))
+    }
+
+    @Test func audioMuxWritesPerTrackMetadata() {
+        let tracks = [
+            ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "eng", title: "World Feed"),
+            ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2, title: "Natural Sounds"),
+        ]
+        let items = [ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
+                                audioSources: [.stream(0), .stream(1)])]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: tracks,
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
+        let joined = args.joined(separator: " ")
+        #expect(joined.contains("-metadata:s:a:0 language=eng"))
+        #expect(joined.contains("-metadata:s:a:0 title=World Feed"))
+        #expect(joined.contains("-metadata:s:a:1 title=Natural Sounds"))
+        #expect(!joined.contains("-metadata:s:a:1 language"))
+    }
+
+    @Test func audioMuxPrefersTheExplicitKeptDuration() {
+        // The app passes the kept *video* span explicitly; the window fallback only
+        // covers builder calls without it.
+        let items = [ExportItem(source: src, codec: "h264", audioStart: 1.0, audioEnd: 2.0,
+                                audioSources: [.stream(0)], audioDuration: 1.5)]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/a.m4a"))
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(fc.contains("atrim=end_sample=72000,apad=whole_len=72000"))
     }
 
     @Test func audioMuxWithoutVideoStartsAudioInputsAtZero() {
         // audio-only export: no video input, so the first audio source is input 0.
         let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]
-        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/a.m4a"))
         #expect(!args.contains("0:v:0"))
         #expect(!args.contains("-c:v"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc == "[0:a:0]concat=n=1:v=0:a=1[a]")
+        #expect(fc.hasPrefix("[0:a:0]"))
+        #expect(fc.hasSuffix("concat=n=1:v=0:a=1[a0]"))
     }
 
     @Test func audioMuxEncodesToTheGivenCodec() {
         let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]
-        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "mp2", output: URL(fileURLWithPath: "/tmp/a.ts"))
         let ca = args[args.firstIndex(of: "-c:a")! + 1]
         #expect(ca == "mp2")
+    }
+
+    // MARK: output track resolution (ADR-0014)
+
+    private func clipWithTracks(_ tracks: [AudioProperties]) -> Clip {
+        var c = Clip(bookmark: Data(), displayName: "c")
+        c.audio = tracks.first
+        c.audioTracks = tracks
+        return c
+    }
+
+    @Test func outputTrackCountIsTheRichestClips() {
+        let a = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2)
+        let clips = [clipWithTracks([a]), clipWithTracks([a, a, a]), clipWithTracks([a, a])]
+        let tracks = ExportEngine.resolveOutputTracks(target: clips[0], clips: clips)
+        #expect(tracks.count == 3)
+    }
+
+    @Test func trackFormatComesFromTheTargetFirstThenTimelineOrder() {
+        let mono = AudioProperties(codec: "mp2", sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport")
+        let stereo = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2, language: "spa", title: "TVE")
+        let other = AudioProperties(codec: "ac3", sampleRate: 32000, channels: 2)
+        // target carries one track; the second output track's spec falls to the first
+        // clip in timeline order that has one.
+        let target = clipWithTracks([mono])
+        let clips = [clipWithTracks([other]), clipWithTracks([other, stereo])]
+        let tracks = ExportEngine.resolveOutputTracks(target: target, clips: clips)
+        #expect(tracks == [
+            ExportEngine.OutputAudioTrack(sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport"),
+            ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "spa", title: "TVE"),
+        ])
+    }
+
+    @Test func noAudioAnywhereResolvesToNoTracks() {
+        let clips = [clipWithTracks([]), clipWithTracks([])]
+        #expect(ExportEngine.resolveOutputTracks(target: nil, clips: clips).isEmpty)
     }
 
     // MARK: audio codec resolution (ADR-0010)

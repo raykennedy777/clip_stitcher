@@ -7,23 +7,10 @@ enum MatchEvaluator {
     static func matches(_ clip: Clip, target: Clip) -> Bool {
         guard let cv = clip.video, let tv = target.video else { return false }
 
-        let videoMatches = self.videoMatches(cv, tv)
-
-        // Audio codec is deliberately not compared: the track is always rebuilt and
-        // re-encoded to the target's codec (ADR-0010), so a source codec mismatch never
-        // forces a video re-encode. Sample rate and channels stay — the rebuild preserves
-        // them rather than resampling, so the sample-level concat needs them to match.
-        let audioMatches: Bool
-        switch (clip.audio, target.audio) {
-        case let (a?, b?):
-            audioMatches = a.sampleRate == b.sampleRate && a.channels == b.channels
-        case (nil, nil):
-            audioMatches = true
-        default:
-            audioMatches = false
-        }
-
-        return videoMatches && audioMatches
+        // Audio is deliberately not compared at all (ADR-0014): every audio leg is
+        // rebuilt and conformed to its output track's codec/rate/layout inside the
+        // rebuild chain, so no audio property of a source can force a video re-encode.
+        return videoMatches(cv, tv)
     }
 
     /// Compares the video properties alone on the strict dimensions (ADR-0005). Exposed so a

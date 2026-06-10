@@ -19,7 +19,7 @@ final class CutEditorPresenter: NSObject, ObservableObject, NSWindowDelegate {
         }
 
         let model = CutEditorModel(clip: clip, url: url, document: document)
-        let hosting = NSHostingController(rootView: CutEditorView(model: model))
+        let hosting = NSHostingController(rootView: CutEditorView(model: model, document: document))
         let window = NSWindow(contentViewController: hosting)
         window.title = clip.displayName
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
