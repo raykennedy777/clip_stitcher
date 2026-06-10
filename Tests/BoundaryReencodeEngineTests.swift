@@ -73,20 +73,27 @@ struct BoundaryReencodeEngineTests {
     /// RELATIVE to that keyframe — which the decoder emits as n=0 after the seek. The
     /// seek is start_time-relative (the stream starts at 0.24 here), so the first
     /// presentation PTS is subtracted.
+    ///
+    /// `-frames:v <range.count>` is the run's stop condition: `select` alone keeps
+    /// ffmpeg decoding from the range's end to the file's end, emitting nothing — a
+    /// 72-minute source pinned the CPU for minutes after a 28 s cut and froze the
+    /// progress bar (test_sprint diagnosis). The frame budget ends the run at the last
+    /// kept frame (1 s instead of ≥25 s on the real footage, identical output).
     @Test func reencodeSegmentSeeksToKeyframeAndSelectsRelativeFrames() {
         // 8 frames starting at 0.24; keyframes at 0 and 4.
         let index = FrameIndex(
             pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
             keyframeFlags: [true, false, false, false, true, false, false, false])
         // Tail range [6,8): frames 6,7. Keyframe at/before 6 is 4; seek = 0.40-0.24 = 0.16;
-        // relative select between 6-4=2 and 7-4=3.
+        // relative select between 6-4=2 and 7-4=3; stop after the 2 kept frames.
         let args = BoundaryReencodeEngine.reencodeSegmentArguments(
             source: src, range: 6..<8, index: index,
             encoder: ["-c:v", "libx264", "-pix_fmt", "yuv420p"], output: out)
         #expect(args == [
             "-v", "error", "-ss", "0.16", "-i", src.path,
             "-vf", "select='between(n\\,2\\,3)',setpts=PTS-STARTPTS",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", out.path,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-frames:v", "2", "-an", out.path,
         ])
     }
 

@@ -24,6 +24,12 @@ straight into Swift and hope.
   ffprobe's *default* output and its *selective* `-show_entries` can differ from the full JSON
   dump (e.g. omitting vs. emitting an "unknown" field). Reproduce with the same flags the code
   uses, or the de-risk and the runtime can disagree.
+- **De-risk perf on a long source, not just the short fixtures.** A recipe can be *correct* but
+  *unbounded*: `select=between(...)` without `-frames:v` keeps decoding from the range's end to
+  EOF, emitting nothing. On the 8-second fixtures that tail was invisible; on a 72-minute source
+  it pinned the CPU for tens of minutes after a 28 s cut and froze the export at 68 %
+  (test_sprint diagnosis). Check the run *stops* when its work is done — wall-time on a long
+  file, or an explicit frame/read budget in the args.
 
 ## Verifying a change in the running app
 

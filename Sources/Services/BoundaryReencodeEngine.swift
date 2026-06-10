@@ -80,6 +80,13 @@ enum BoundaryReencodeEngine {
     /// then selects frames RELATIVE to that keyframe. The seek is start_time-relative
     /// (ffmpeg subtracts the stream start_time from `-ss`), so the first presentation PTS
     /// is removed. Audio is dropped here; the rebuilt track is muxed in later.
+    ///
+    /// `-frames:v <range.count>` ends the run at the last kept frame: `select` only
+    /// *drops* frames, so without a frame budget ffmpeg keeps decoding from the range's
+    /// end to the file's end emitting nothing — on a 72-minute HEVC source that pinned
+    /// the CPU for many extra minutes after a 28 s cut, with the encoder's lookahead
+    /// not even flushing until that pointless decode hit EOF (test_sprint diagnosis).
+    /// De-risked on all three formats: identical frames, the run just stops on time.
     static func reencodeSegmentArguments(
         source: URL, range: Range<Int>, index: FrameIndex, encoder: [String], output: URL
     ) -> [String] {
@@ -91,7 +98,7 @@ enum BoundaryReencodeEngine {
         var args = ["-v", "error", "-ss", ExportEngine.timeString(seek), "-i", source.path]
         args += ["-vf", "select='between(n\\,\(relStart)\\,\(relEnd))',setpts=PTS-STARTPTS"]
         args += encoder
-        args += ["-an", output.path]
+        args += ["-frames:v", String(range.count), "-an", output.path]
         return args
     }
 
