@@ -74,12 +74,14 @@ enum ExportPlanner {
             containerStart: input.containerStart)
         switch try videoTreatment(for: clip, target: target, index: index) {
         case .conform(let conform):
-            return ExportItem(source: input.url, codec: conform.targetVideo.codec,
+            return ExportItem(source: input.url, displayName: clip.displayName,
+                              codec: conform.targetVideo.codec,
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources, audioDuration: window.duration,
                               conform: conform)
         case .smartRender(let segments, let encoder):
-            return ExportItem(source: input.url, codec: clip.video?.codec,
+            return ExportItem(source: input.url, displayName: clip.displayName,
+                              codec: clip.video?.codec,
                               segments: segments, index: index, encoder: encoder,
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources, audioDuration: window.duration)

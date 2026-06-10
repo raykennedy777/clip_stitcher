@@ -418,7 +418,8 @@ final class ProjectDocument: ReferenceFileDocument {
 
     // MARK: - Export (Milestone 2: frame-exact boundary re-encode)
 
-    /// Runs a Milestone 2 export to `destination`: each clip is cut at the **exact** in/out
+    /// Runs a Milestone 2 export to `destination` — the chosen file in `.connect` mode,
+    /// the chosen folder in `.separate` mode (issue #30): each clip is cut at the **exact** in/out
     /// frame the user chose (ADR-0009) — the keyframe-bounded middle is stream-copied and
     /// only the partial-GOP head/tail edges are re-encoded — with the audio rebuilt so it
     /// stays aligned at the joins. Progress and outcome are published in `exportStatus` for

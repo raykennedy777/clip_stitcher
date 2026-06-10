@@ -13,6 +13,9 @@ import Foundation
 /// cut there).
 struct ExportItem {
     var source: URL
+    /// The clip's display name, used to name this clip's file in `.separate` mode
+    /// (`NN <clip name>.<ext>`, issue #30).
+    var displayName: String = ""
     var codec: String? = nil
     var segments: [PlannedSegment] = []
     var index: FrameIndex = FrameIndex(pts: [], keyframeFlags: [])
@@ -276,7 +279,10 @@ enum ExportEngine {
     /// track's format. `videoInput` is `nil` for an audio-only export.
     static func audioMuxArguments(videoInput: URL?, items: [ExportItem], tracks: [AudioCodecPolicy.OutputAudioTrack],
                                   audioCodec: String, output: URL) -> [String] {
-        var args = ["-v", "error"]
+        // -y: an existing file at the destination is overwritten silently — the
+        // save panel's "Replace" already said yes, and `.separate` mode promises
+        // re-exports land in place (issue #30).
+        var args = ["-y", "-v", "error"]
         var nextInput = 0
         if let videoInput {
             args += ["-i", videoInput.path]
@@ -356,9 +362,11 @@ enum ExportEngine {
     // MARK: - Orchestration
 
     /// Runs the full export: cut every clip's video, then connect or separate per
-    /// `settings`, rebuilding the audio track when the output includes audio. `destination`
-    /// is the file the user chose; in `.separate` mode each clip is written alongside it as
-    /// `name-1.ext`, `name-2.ext`, … `progress` reports 0…1, smoothed within each ffmpeg
+    /// `settings`, rebuilding the audio track when the output includes audio. In
+    /// `.connect` mode `destination` is the file the user chose; in `.separate` mode it
+    /// is the **folder** they chose, and each clip is written into it as
+    /// `NN <clip name>.<ext>` in timeline order (issue #30), silently overwriting any
+    /// existing file of the same name. `progress` reports 0…1, smoothed within each ffmpeg
     /// run from its `-progress` out_time (issue #9) and keeping the established 70 % video
     /// / 30 % audio phase split; it can be called from a background queue mid-run.
     static func export(
@@ -450,8 +458,9 @@ enum ExportEngine {
             }
 
         case .separate:
+            let names = separateFileNames(clipNames: items.map(\.displayName), ext: ext)
             for (i, item) in items.enumerated() {
-                let out = separateURL(destination: destination, index: i, count: items.count, ext: ext)
+                let out = destination.appendingPathComponent(names[i])
                 let videoInput = wantsVideo ? videoPieces[i] : nil
                 if wantsAudio {
                     try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], tracks: tracks, audioCodec: audioCodec, output: out),
@@ -476,13 +485,40 @@ enum ExportEngine {
         try await runFFmpeg(ffmpeg, concatArguments(listFile: listFile, output: output), failure: ExportError.concatFailed)
     }
 
-    /// Destination for one clip in `.separate` mode: the chosen name for a single clip,
-    /// else `name-1.ext`, `name-2.ext`, …
-    private static func separateURL(destination: URL, index i: Int, count: Int, ext: String) -> URL {
-        let dir = destination.deletingLastPathComponent()
-        let stem = destination.deletingPathExtension().lastPathComponent
-        let name = count == 1 ? "\(stem).\(ext)" : "\(stem)-\(i + 1).\(ext)"
-        return dir.appendingPathComponent(name)
+    /// File names for `.separate` mode, one per clip in timeline order (issue #30):
+    /// `NN <clip name>.<ext>` — `NN` is the 1-based position zero-padded to the digit
+    /// count of the clip total (minimum two, so Finder's alphabetical sort is the
+    /// timeline order even as clips are added later).
+    static func separateFileNames(clipNames: [String], ext: String) -> [String] {
+        var taken = Set<String>()
+        return clipNames.enumerated().map { i, name in
+            separateFileName(clipName: name, position: i + 1, count: clipNames.count,
+                             ext: ext, taken: &taken)
+        }
+    }
+
+    /// One `.separate`-mode file name: the clip's display name loses its source
+    /// extension, `/` and `:` become `-` (the two characters the filesystem and Finder
+    /// fight over), and the padded position is prefixed — always, even for a single
+    /// clip, so the names sort predictably. Distinct prefixes make collisions
+    /// impossible, but if one happens anyway a `-2`, `-3`, … suffix keeps the names
+    /// unique rather than silently merging two clips into one file.
+    static func separateFileName(clipName: String, position: Int, count: Int,
+                                 ext: String, taken: inout Set<String>) -> String {
+        var stem = (clipName as NSString).deletingPathExtension
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        if stem.isEmpty { stem = "Clip" }
+        let width = max(2, String(count).count)
+        let prefix = String(format: "%0\(width)d", position)
+        var name = "\(prefix) \(stem).\(ext)"
+        var n = 2
+        while taken.contains(name) {
+            name = "\(prefix) \(stem)-\(n).\(ext)"
+            n += 1
+        }
+        taken.insert(name)
+        return name
     }
 
     /// Moves a produced file to its destination, replacing any existing file.

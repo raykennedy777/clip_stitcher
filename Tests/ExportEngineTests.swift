@@ -377,3 +377,58 @@ struct ExportEngineTests {
         #expect(ExportEngine.timestampDefect(pts: [0.0, 0.04]) == nil)
     }
 }
+
+/// Pins the `.separate`-mode file naming contract (issue #30): `NN <clip name>.<ext>`
+/// in timeline order, zero-padded to the clip total (minimum two digits), source
+/// extension dropped, filesystem-hostile characters replaced, and a collision suffix
+/// as a guard even though distinct prefixes should make collisions impossible.
+struct SeparateFileNamingTests {
+    @Test func threeClipsGetTwoDigitPrefixesInTimelineOrder() {
+        let names = ExportEngine.separateFileNames(
+            clipNames: ["alpha.mkv", "bravo.mkv", "charlie.mkv"], ext: "ts")
+        #expect(names == ["01 alpha.ts", "02 bravo.ts", "03 charlie.ts"])
+    }
+
+    @Test func aSingleClipIsStillPrefixed() {
+        let names = ExportEngine.separateFileNames(clipNames: ["only.mp4"], ext: "mp4")
+        #expect(names == ["01 only.mp4"])
+    }
+
+    @Test func aHundredClipsWidenThePrefixToThreeDigits() {
+        let names = ExportEngine.separateFileNames(
+            clipNames: (1...100).map { "clip\($0).mpg" }, ext: "ts")
+        #expect(names.first == "001 clip1.ts")
+        #expect(names.last == "100 clip100.ts")
+    }
+
+    @Test func ninetyNineClipsKeepTwoDigits() {
+        let names = ExportEngine.separateFileNames(
+            clipNames: (1...99).map { "c\($0).ts" }, ext: "ts")
+        #expect(names.first == "01 c1.ts")
+        #expect(names.last == "99 c99.ts")
+    }
+
+    @Test func slashesAndColonsAreReplaced() {
+        let names = ExportEngine.separateFileNames(clipNames: ["AM/PM: late.mkv"], ext: "mp4")
+        #expect(names == ["01 AM-PM- late.mp4"])
+    }
+
+    @Test func duplicateClipNamesStayDistinctViaThePrefix() {
+        let names = ExportEngine.separateFileNames(clipNames: ["same.ts", "same.ts"], ext: "ts")
+        #expect(names == ["01 same.ts", "02 same.ts"])
+        #expect(Set(names).count == names.count)
+    }
+
+    @Test func aForgedCollisionGetsASuffix() {
+        var taken: Set<String> = ["01 same.ts"]
+        let name = ExportEngine.separateFileName(
+            clipName: "same.mkv", position: 1, count: 1, ext: "ts", taken: &taken)
+        #expect(name == "01 same-2.ts")
+        #expect(taken.contains("01 same-2.ts"))
+    }
+
+    @Test func anEmptyStemFallsBackToClip() {
+        let names = ExportEngine.separateFileNames(clipNames: [""], ext: "mp4")
+        #expect(names == ["01 Clip.mp4"])
+    }
+}

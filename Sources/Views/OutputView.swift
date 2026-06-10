@@ -101,6 +101,23 @@ struct OutputView: View {
     }
 
     private func chooseDestinationAndExport() {
+        // Separate mode writes one file per clip, named `NN <clip name>.<ext>` in
+        // timeline order — so the user picks the folder they all land in, not a
+        // filename (issue #30). Connect mode keeps the filename save panel.
+        if document.project.output.mode == .separate {
+            let panel = NSOpenPanel()
+            panel.title = "Export"
+            panel.prompt = "Export"
+            panel.message = "Choose a folder for the exported clips."
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.allowsMultipleSelection = false
+
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            Task { await document.export(to: url) }
+            return
+        }
         // An audio-only export is an audio-elementary file named for the (target-derived)
         // audio codec, not the video container (#1 / ADR-0010).
         let out = document.project.output
