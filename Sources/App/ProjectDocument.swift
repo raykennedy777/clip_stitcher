@@ -513,8 +513,8 @@ final class ProjectDocument: ReferenceFileDocument {
             // video container to fit; otherwise it must fit the chosen container (AAC fallback).
             let targetAudioCodec = project.targetClip?.audio?.codec
             let audio = project.output.type == .audioOnly
-                ? ExportEngine.resolveAudioOnlyCodec(targetCodec: targetAudioCodec)
-                : ExportEngine.resolveAudioCodec(targetCodec: targetAudioCodec, container: project.output.container)
+                ? AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: targetAudioCodec)
+                : AudioCodecPolicy.resolveAudioCodec(targetCodec: targetAudioCodec, container: project.output.container)
             if audio.fellBack, let wanted = targetAudioCodec {
                 let dest = project.output.type == .audioOnly
                     ? "an audio file" : "the \(project.output.container.fileExtension.uppercased()) container"
@@ -523,7 +523,7 @@ final class ProjectDocument: ReferenceFileDocument {
             // Output track count = the richest clip's; formats/tags target-first
             // (ADR-0014). An audio-only export goes to a single elementary stream, which
             // can only carry one track — keep track 1.
-            var tracks = ExportEngine.resolveOutputTracks(target: project.targetClip, clips: project.clips)
+            var tracks = AudioCodecPolicy.resolveOutputTracks(target: project.targetClip, clips: project.clips)
             if project.output.type == .audioOnly { tracks = Array(tracks.prefix(1)) }
             try await ExportEngine.export(items: items, settings: project.output,
                                           audioCodec: audio.encoder, tracks: tracks, to: destination) { p in

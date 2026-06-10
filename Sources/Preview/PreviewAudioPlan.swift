@@ -41,15 +41,15 @@ struct PreviewAudioPlan {
         let sources: [ExportEngine.AudioSource?]
     }
 
-    /// The output tracks the export would carry (`ExportEngine.resolveOutputTracks`)
+    /// The output tracks the export would carry (`AudioCodecPolicy.resolveOutputTracks`)
     /// — the picker's rows, and each leg's conform target.
-    let tracks: [ExportEngine.OutputAudioTrack]
+    let tracks: [AudioCodecPolicy.OutputAudioTrack]
     /// `legs[track][segment]`, matching the timeline's segment order.
     let legs: [[Leg]]
 
     static func build(segments: [PreviewTimeline.Segment], targetFps: Double,
                       clips: [UUID: ClipAudio],
-                      tracks: [ExportEngine.OutputAudioTrack]) -> PreviewAudioPlan {
+                      tracks: [AudioCodecPolicy.OutputAudioTrack]) -> PreviewAudioPlan {
         let fps = max(1.0, targetFps)
         let legs = tracks.indices.map { t in
             segments.map { segment -> Leg in

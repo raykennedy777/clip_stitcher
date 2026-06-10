@@ -28,9 +28,9 @@ struct PreviewAudioPlanTests {
     }
 
     private let tracks = [
-        ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2,
-                                      language: "eng", title: "World Feed"),
-        ExportEngine.OutputAudioTrack(sampleRate: 44100, channels: 1),
+        AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2,
+                                          language: "eng", title: "World Feed"),
+        AudioCodecPolicy.OutputAudioTrack(sampleRate: 44100, channels: 1),
     ]
 
     private func plan(sourcesA: [ExportEngine.AudioSource?],

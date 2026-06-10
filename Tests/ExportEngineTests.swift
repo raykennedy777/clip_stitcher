@@ -140,7 +140,7 @@ struct ExportEngineTests {
         #expect(abs(w.duration - 10.04) < 1e-9)
     }
 
-    private let stereoTrack = ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2)
+    private let stereoTrack = AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2)
 
     @Test func audioMuxConcatenatesItemAudioOverCopiedVideo() {
         let video = URL(fileURLWithPath: "/tmp/joined.ts")
@@ -169,7 +169,7 @@ struct ExportEngineTests {
         // track 2 is anullsrc silence in the track's format, trimmed to the same exact
         // sample count as its real legs (ADR-0014).
         let video = URL(fileURLWithPath: "/tmp/joined.mkv")
-        let monoTrack = ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 1)
+        let monoTrack = AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 1)
         let items = [
             ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
                        audioSources: [.stream(0), .stream(1)]),
@@ -221,8 +221,8 @@ struct ExportEngineTests {
 
     @Test func audioMuxWritesPerTrackMetadata() {
         let tracks = [
-            ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "eng", title: "World Feed"),
-            ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2, title: "Natural Sounds"),
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "eng", title: "World Feed"),
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2, title: "Natural Sounds"),
         ]
         let items = [ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
                                 audioSources: [.stream(0), .stream(1)])]
@@ -264,103 +264,6 @@ struct ExportEngineTests {
                                                   audioCodec: "mp2", output: URL(fileURLWithPath: "/tmp/a.ts"))
         let ca = args[args.firstIndex(of: "-c:a")! + 1]
         #expect(ca == "mp2")
-    }
-
-    // MARK: output track resolution (ADR-0014)
-
-    private func clipWithTracks(_ tracks: [AudioProperties]) -> Clip {
-        var c = Clip(bookmark: Data(), displayName: "c")
-        c.audio = tracks.first
-        c.audioTracks = tracks
-        return c
-    }
-
-    @Test func outputTrackCountIsTheRichestClips() {
-        let a = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2)
-        let clips = [clipWithTracks([a]), clipWithTracks([a, a, a]), clipWithTracks([a, a])]
-        let tracks = ExportEngine.resolveOutputTracks(target: clips[0], clips: clips)
-        #expect(tracks.count == 3)
-    }
-
-    @Test func trackFormatComesFromTheTargetFirstThenTimelineOrder() {
-        let mono = AudioProperties(codec: "mp2", sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport")
-        let stereo = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2, language: "spa", title: "TVE")
-        let other = AudioProperties(codec: "ac3", sampleRate: 32000, channels: 2)
-        // target carries one track; the second output track's spec falls to the first
-        // clip in timeline order that has one.
-        let target = clipWithTracks([mono])
-        let clips = [clipWithTracks([other]), clipWithTracks([other, stereo])]
-        let tracks = ExportEngine.resolveOutputTracks(target: target, clips: clips)
-        #expect(tracks == [
-            ExportEngine.OutputAudioTrack(sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport"),
-            ExportEngine.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "spa", title: "TVE"),
-        ])
-    }
-
-    @Test func noAudioAnywhereResolvesToNoTracks() {
-        let clips = [clipWithTracks([]), clipWithTracks([])]
-        #expect(ExportEngine.resolveOutputTracks(target: nil, clips: clips).isEmpty)
-    }
-
-    // MARK: audio codec resolution (ADR-0010)
-
-    @Test func resolvesToTargetCodecWhenContainerAllowsIt() {
-        // mp2 source -> TS: keep mp2, map to its encoder, no fallback warning.
-        let choice = ExportEngine.resolveAudioCodec(targetCodec: "mp2", container: .ts)
-        #expect(choice == ExportEngine.AudioEncodeChoice(codec: "mp2", encoder: "mp2", fellBack: false))
-        // mp3 maps to libmp3lame.
-        #expect(ExportEngine.resolveAudioCodec(targetCodec: "mp3", container: .mkv).encoder == "libmp3lame")
-    }
-
-    @Test func fallsBackToAACForMp2InMp4() {
-        // The one awkward combo: mp2 can't sit cleanly in MP4, so fall back + flag a warning.
-        let choice = ExportEngine.resolveAudioCodec(targetCodec: "mp2", container: .mp4)
-        #expect(choice == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: true))
-    }
-
-    @Test func fallsBackToAACForAnUnmappableCodec() {
-        let choice = ExportEngine.resolveAudioCodec(targetCodec: "dts", container: .mkv)
-        #expect(choice.encoder == "aac" && choice.fellBack)
-    }
-
-    @Test func anAACTargetUsesAACWithoutFlaggingAFallback() {
-        // No codec was declined, so no warning.
-        #expect(ExportEngine.resolveAudioCodec(targetCodec: "aac", container: .mp4)
-                == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
-    }
-
-    @Test func noTargetAudioDefaultsToAACWithoutAWarning() {
-        #expect(ExportEngine.resolveAudioCodec(targetCodec: nil, container: .ts)
-                == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
-    }
-
-    // MARK: audio-only output (#1)
-
-    @Test func audioOnlyKeepsTheTargetCodecRegardlessOfContainer() {
-        // No video container to fit — mp2 stays mp2 even though it wouldn't fit MP4 video.
-        #expect(ExportEngine.resolveAudioOnlyCodec(targetCodec: "mp2")
-                == ExportEngine.AudioEncodeChoice(codec: "mp2", encoder: "mp2", fellBack: false))
-        // An unmappable codec still falls back to AAC and flags it.
-        let dts = ExportEngine.resolveAudioOnlyCodec(targetCodec: "dts")
-        #expect(dts.encoder == "aac" && dts.fellBack)
-        // No target audio -> AAC, no warning.
-        #expect(ExportEngine.resolveAudioOnlyCodec(targetCodec: nil)
-                == ExportEngine.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
-    }
-
-    @Test func audioOnlyExtensionFollowsTheEncoder() {
-        #expect(ExportEngine.audioFileExtension(forEncoder: "aac") == "m4a")
-        #expect(ExportEngine.audioFileExtension(forEncoder: "mp2") == "mp2")
-        #expect(ExportEngine.audioFileExtension(forEncoder: "ac3") == "ac3")
-        #expect(ExportEngine.audioFileExtension(forEncoder: "libmp3lame") == "mp3")
-    }
-
-    @Test func outputExtensionUsesAudioExtForAudioOnlyElseContainer() {
-        // audio-only ignores the video container and follows the codec.
-        #expect(ExportEngine.outputExtension(type: .audioOnly, container: .mp4, audioEncoder: "mp2") == "mp2")
-        // video outputs keep the container extension.
-        #expect(ExportEngine.outputExtension(type: .videoAndAudio, container: .ts, audioEncoder: "mp2") == "ts")
-        #expect(ExportEngine.outputExtension(type: .videoOnly, container: .mkv, audioEncoder: "aac") == "mkv")
     }
 
     // MARK: concat duration directives (the start_time seam gap, ADR-0008)

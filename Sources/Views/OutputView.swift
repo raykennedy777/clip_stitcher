@@ -106,8 +106,8 @@ struct OutputView: View {
         let out = document.project.output
         let ext: String
         if out.type == .audioOnly {
-            let choice = ExportEngine.resolveAudioOnlyCodec(targetCodec: document.project.targetClip?.audio?.codec)
-            ext = ExportEngine.audioFileExtension(forEncoder: choice.encoder)
+            let choice = AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: document.project.targetClip?.audio?.codec)
+            ext = AudioCodecPolicy.audioFileExtension(forEncoder: choice.encoder)
         } else {
             ext = out.container.fileExtension
         }

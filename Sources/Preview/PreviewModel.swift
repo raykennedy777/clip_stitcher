@@ -73,7 +73,7 @@ final class PreviewModel: ObservableObject {
     private var audioPrimeDeadline = Date.distantPast
 
     /// The output tracks the export would carry — the audio picker's rows.
-    var outputTracks: [ExportEngine.OutputAudioTrack] { audioPlan?.tracks ?? [] }
+    var outputTracks: [AudioCodecPolicy.OutputAudioTrack] { audioPlan?.tracks ?? [] }
 
     func trackName(_ t: Int) -> String { audioPlan?.trackName(t) ?? "Track \(t + 1)" }
 
@@ -179,7 +179,7 @@ final class PreviewModel: ObservableObject {
             // The same track list the export resolves (count from the richest clip,
             // formats target-first — ADR-0014), so the picker shows exactly the
             // output's tracks. The saved choice is clamped in case clips changed.
-            let tracks = ExportEngine.resolveOutputTracks(
+            let tracks = AudioCodecPolicy.resolveOutputTracks(
                 target: document.project.targetClip, clips: clips)
             audioPlan = PreviewAudioPlan.build(
                 segments: built.segments, targetFps: built.targetFps,
