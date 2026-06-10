@@ -65,6 +65,24 @@ enum MediaProbe {
     /// `-ss` from (the ADR-0013 trap; audio playback subtracts it to seek by source
     /// presentation time). 0 when the demuxer reports none ("N/A") or the probe fails;
     /// that's also the correct value for such files.
+    /// The first video stream's timebase as ffprobe reports it (e.g. "1/16000"), or nil
+    /// when the file has none or the probe fails. Read off the issue-#18 timescale probe
+    /// piece to learn the MP4 track timescale stream-copied pieces of a source inherit.
+    static func videoTimeBase(url: URL) async -> String? {
+        guard let ffprobe = try? FFTools.ffprobeURL(),
+              let output = try? await ProcessRunner.run(ffprobe, [
+                  "-v", "error",
+                  "-select_streams", "v:0",
+                  "-show_entries", "stream=time_base",
+                  "-of", "csv=p=0",
+                  url.path,
+              ]),
+              output.status == 0,
+              let text = String(data: output.stdout, encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     static func containerStartTime(url: URL) async -> Double {
         guard let ffprobe = try? FFTools.ffprobeURL(),
               let output = try? await ProcessRunner.run(ffprobe, [

@@ -26,6 +26,23 @@ The minimal-re-encode, libav-level approach (smartcut-style) is deferred to a **
 > the amendment: open-GOP **tail** edges now re-encode only the leading-picture slots plus
 > the partial out-GOP; head edges keep the clean-point cost until #17.
 
+> **Amended (#18): an MP4 plan mixing copy and re-encode pieces pins one video track
+> timescale.** MP4 has a *per-track* timescale: a stream-copied piece inherits one from the
+> source via the mp4 muxer, while a re-encoded piece gets the encoder default (1/12800 at
+> 25 fps) — and the concat demuxer reads every listed file in the first piece's timebase, so
+> the mismatch collapses (or stretches) the second piece's timestamps when the muxer "repairs"
+> the resulting DTS. The inherited value is **measured, never derived**: one source video
+> packet is stream-copied into a throwaway MP4 (the *timescale probe*) and its `time_base`
+> read back — the source's own probed timebase is not the answer (the muxer auto-raises an
+> MKV's coarse 1/1000 to 1/16000 on copy, but honors an explicit flag of 1000, so deriving
+> from the source would still mismatch). Re-encoded pieces then carry
+> `-video_track_timescale <N>`. MP4-only: MKV (1/1000) and TS (1/90000) impose one timebase
+> per container and are immune; an unreadable probe omits the flag (pre-#18 behavior, still
+> caught by the verify gates). Verified in the shell on all three codecs in MP4 — synthetics,
+> the real Jerez H.264 (long-source command shape), and the real open-GOP HEVC window at
+> `n_leading = 3`. The same mismatch at **cross-clip** MP4 joins (different-timescale sources;
+> conform pieces next to smart-render pieces) is real but unfixed by this — tracked separately.
+
 ## Context: why CLI-only forces clean-boundary copying
 
 A stream-copied middle that begins on an **open-GOP** keyframe (HEVC CRA, MPEG-2 open GOP)

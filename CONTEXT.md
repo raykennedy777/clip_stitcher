@@ -36,6 +36,14 @@ keyframe sends its leading pictures into the discarded segment, so the copy ends
 at presentation index `keyframe − count` (#16, ADR-0009).
 _Avoid_: open-GOP frames, RASL (except when HEVC-specific)
 
+**Timescale probe**:
+One source video packet stream-copied into a throwaway MP4 to *measure* the track
+timescale the clip's real copy pieces will inherit from the mp4 muxer. Re-encoded pieces
+in the same MP4 plan are pinned to that value (`-video_track_timescale`) so the concat
+demuxer reads every piece in one timebase (#18, ADR-0009). MP4-only — MKV and TS impose
+one timebase per container.
+_Avoid_: timebase probe (a stream has a timebase; an MP4 *track* has a timescale)
+
 **Conform**:
 Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)

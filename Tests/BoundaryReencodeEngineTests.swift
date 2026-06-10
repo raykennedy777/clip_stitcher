@@ -97,6 +97,76 @@ struct BoundaryReencodeEngineTests {
         ])
     }
 
+    /// #18: an MP4 piece must carry the same video track timescale as the stream-copied
+    /// pieces it concats with — the concat demuxer reads every listed file in one timebase,
+    /// and the encoder-default 1/12800 track otherwise lands mis-scaled next to a
+    /// source-inherited 1/25000 copy piece, collapsing the re-encode's frames when the mp4
+    /// muxer "repairs" the resulting non-monotonic DTS (verified in the shell, all 3 codecs).
+    @Test func anMp4ReencodePieceCarriesTheSourceTrackTimescale() {
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let mp4Piece = URL(fileURLWithPath: "/tmp/seg.mp4")
+        let args = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 6..<8, index: index,
+            encoder: ["-c:v", "libx264", "-pix_fmt", "yuv420p"], output: mp4Piece,
+            trackTimescale: 25000)
+        #expect(args == [
+            "-v", "error", "-ss", "0.16", "-i", src.path,
+            "-vf", "select='between(n\\,2\\,3)',setpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-video_track_timescale", "25000",
+            "-frames:v", "2", "-an", mp4Piece.path,
+        ])
+    }
+
+    /// The timescale pin is mp4-only and never guessed: MKV/TS impose a fixed
+    /// per-container timebase (1/1000, 1/90000) so every piece already matches there,
+    /// and an unknown source timescale omits the flag rather than inventing one.
+    @Test func trackTimescaleIsOmittedOffMp4AndWhenUnknown() {
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let mkvArgs = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 6..<8, index: index,
+            encoder: ["-c:v", "libx264"], output: URL(fileURLWithPath: "/tmp/seg.mkv"),
+            trackTimescale: 25000)
+        #expect(!mkvArgs.contains("-video_track_timescale"))
+        let unknownArgs = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 6..<8, index: index,
+            encoder: ["-c:v", "libx264"], output: URL(fileURLWithPath: "/tmp/seg.mp4"),
+            trackTimescale: nil)
+        #expect(!unknownArgs.contains("-video_track_timescale"))
+    }
+
+    /// The timescale is measured, never derived from the source container: a one-packet
+    /// stream-copy probe piece is muxed to MP4 and its track timescale read back. Source
+    /// timebases don't map 1:1 — the mp4 muxer auto-raises an MKV's coarse 1/1000 stream
+    /// timebase to 1/16000 on copy (verified in the shell), so only the muxer's own
+    /// output answers what the copy pieces will carry.
+    @Test func timescaleProbeCopiesOnePacketToMp4() {
+        let probe = URL(fileURLWithPath: "/tmp/c0_tsprobe.mp4")
+        #expect(BoundaryReencodeEngine.timescaleProbeArguments(source: src, output: probe) == [
+            "-v", "error", "-i", src.path, "-map", "0:v:0",
+            "-c", "copy", "-frames:v", "1", probe.path,
+        ])
+    }
+
+    /// The flag's value comes from the probe piece's `time_base` ("1/16000" ⇒ 16000).
+    /// Only a unit-numerator timebase maps to an MP4 track timescale; anything else
+    /// (or an unparsable/absent probe) yields nil so the flag is omitted rather than
+    /// guessed.
+    @Test func trackTimescaleParsesTheProbedTimeBaseDenominator() {
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: "1/25000") == 25000)
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: "1/90000") == 90000)
+        // ffprobe's csv writer emits a trailing comma on MPEG-2 streams ("1/90000,").
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: "1/90000,") == 90000)
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: nil) == nil)
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: "1001/30000") == nil)
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: "1/0") == nil)
+        #expect(BoundaryReencodeEngine.trackTimescale(timeBase: "garbage") == nil)
+    }
+
     // MARK: middle stream-copy
 
     /// A copy segment is executed by mapping it onto M1's validated segment-muxer cut: an
