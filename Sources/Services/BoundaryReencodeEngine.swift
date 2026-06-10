@@ -24,54 +24,18 @@ enum BoundaryReencodeEngine {
         codec: String?, profile: String? = nil, pixelFormat: String?, fieldOrder: String?
     ) -> [String] {
         let pixFmt = pixelFormat ?? "yuv420p"
-        switch codec {
-        case "hevc":
-            var args = ["-c:v", "libx265", "-pix_fmt", pixFmt]
-            if let p = encoderProfile(profile, codec: "hevc") { args += ["-profile:v", p] }
-            return args
-        case "mpeg2video":
-            var args = ["-c:v", "mpeg2video", "-pix_fmt", pixFmt]
-            if let p = encoderProfile(profile, codec: "mpeg2video") { args += ["-profile:v", p] }
+        var args = ["-c:v", EncoderSelection.encoder(for: codec), "-pix_fmt", pixFmt]
+        if let p = EncoderSelection.encoderProfile(profile, codec: EncoderSelection.profileCodec(for: codec)) {
+            args += ["-profile:v", p]
+        }
+        if codec == "mpeg2video" {
             switch fieldOrder {
             case "tt", "tb": args += ["-flags", "+ildct+ilme", "-top", "1"]
             case "bb", "bt": args += ["-flags", "+ildct+ilme", "-top", "0"]
             default: break   // progressive / unknown — no interlace flags
             }
-            return args
-        default:   // h264 and anything else -> libx264
-            var args = ["-c:v", "libx264", "-pix_fmt", pixFmt]
-            if let p = encoderProfile(profile, codec: "h264") { args += ["-profile:v", p] }
-            return args
         }
-    }
-
-    /// Maps an ffprobe `profile` string to the `-profile:v` token its re-encode encoder
-    /// expects, for the profiles seen in this domain (broadcast/sports H.264, HEVC, and
-    /// MPEG-2). Returns `nil` for an unrecognised profile — the caller then omits
-    /// `-profile:v` and lets the encoder infer one from the pixel format, which matches
-    /// the source for every common case (verified). Never guesses: a wrong token would
-    /// abort the encode.
-    static func encoderProfile(_ profile: String?, codec: String) -> String? {
-        guard let profile else { return nil }
-        switch codec {
-        case "h264":
-            return [
-                "Constrained Baseline": "baseline", "Baseline": "baseline", "Main": "main",
-                "High": "high", "High 10": "high10", "High 4:2:2": "high422",
-                "High 4:4:4 Predictive": "high444",
-            ][profile]
-        case "hevc":
-            return [
-                "Main": "main", "Main 10": "main10", "Main 12": "main12",
-                "Main Still Picture": "mainstillpicture",
-            ][profile]
-        case "mpeg2video":
-            return [
-                "Simple": "simple", "Main": "main", "High": "high", "4:2:2": "422",
-            ][profile]
-        default:
-            return nil
-        }
+        return args
     }
 
     /// ffmpeg args to re-encode the partial-GOP presentation range `[range.lowerBound,

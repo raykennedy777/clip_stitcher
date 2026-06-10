@@ -62,8 +62,8 @@ struct BoundaryReencodeEngineTests {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "h264", profile: "Some Exotic Profile", pixelFormat: "yuv420p", fieldOrder: "progressive")
             == ["-c:v", "libx264", "-pix_fmt", "yuv420p"])
-        #expect(BoundaryReencodeEngine.encoderProfile(nil, codec: "h264") == nil)
-        #expect(BoundaryReencodeEngine.encoderProfile("Main 10", codec: "mpeg2video") == nil)
+        #expect(EncoderSelection.encoderProfile(nil, codec: "h264") == nil)
+        #expect(EncoderSelection.encoderProfile("Main 10", codec: "mpeg2video") == nil)
     }
 
     // MARK: head/tail re-encode

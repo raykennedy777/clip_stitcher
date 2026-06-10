@@ -260,26 +260,23 @@ enum ConformEngine {
 
     // MARK: - Encoder
 
-    // TODO(consolidate): the codec switch, profile mapping (via BoundaryReencodeEngine.encoderProfile),
-    // and level tokens here mirror BoundaryReencodeEngine.reencodeVideoArgs (ADR-0011 consequences).
-    // Conform additionally pins level + color range; M2 carries them through by copy. Fold the shared
-    // encoder/profile/level selection into one place in a later refactor rather than letting the two drift.
+    // The encoder, profile token, and level tokens come from EncoderSelection — the one
+    // table both re-encode paths share (ADR-0011 consequences). Conform additionally pins
+    // level + color range; M2 carries them through by copy.
     private static func encoderArgs(target: VideoProperties) -> [String] {
-        var args: [String]
+        var args = ["-c:v", EncoderSelection.encoder(for: target.codec),
+                    "-profile:v", profile(target)]
         switch target.codec {
         case "hevc":
-            args = ["-c:v", "libx265", "-profile:v", profile(target),
-                    "-x265-params", x265Params(target)]
+            args += ["-x265-params", x265Params(target)]
         case "mpeg2video":
             // MPEG-2 has no B-pyramid (its B-frames never reference other B-frames), so its
             // decode-order timestamps are already monotonic — no monotonic-DTS workaround needed.
-            args = ["-c:v", "mpeg2video", "-profile:v", profile(target)]
             if isInterlaced(target.fieldOrder) {
                 args += ["-flags", "+ildct+ilme", "-top", topFieldFirst(target.fieldOrder) ? "1" : "0"]
             }
         default:   // h264
-            args = ["-c:v", "libx264", "-profile:v", profile(target)]
-            if let lvl = h264Level(target.level) { args += ["-level", lvl] }
+            if let lvl = EncoderSelection.h264Level(target.level) { args += ["-level", lvl] }
             // Disable B-pyramid (verified in the shell): libx264's default B-pyramid lets B-frames
             // reference other B-frames, producing a decode order whose DTS is non-monotonic. After
             // the concat that reordered DTS reaches the final stream-copy mux, and Matroska enforces
@@ -298,27 +295,21 @@ enum ConformEngine {
     }
 
     private static func profile(_ target: VideoProperties) -> String {
-        BoundaryReencodeEngine.encoderProfile(target.profile, codec: target.codec) ?? ""
+        EncoderSelection.encoderProfile(target.profile, codec: target.codec) ?? ""
     }
 
     /// libx265 params: quiet logging plus the target's level as `level-idc` (HEVC's probed
     /// `level` is `general_level_idc` = level × 30, e.g. 123 → 4.1).
     private static func x265Params(_ target: VideoProperties) -> String {
         var p = "log-level=error"
-        if let n = target.level.flatMap(Int.init) {
-            p += ":level-idc=\(n / 30).\((n % 30) / 3)"
+        if let lvl = EncoderSelection.hevcLevel(target.level) {
+            p += ":level-idc=\(lvl)"
         }
         // Disable B-pyramid for the same monotonic-DTS reason as the libx264 path (see encoderArgs):
         // keep the conformed HEVC clip's decode-order timestamps monotonic so the final MKV
         // stream-copy mux can't collapse frames onto duplicate PTS.
         p += ":b-pyramid=0"
         return p
-    }
-
-    /// libx264 `-level` token from the probed integer level (e.g. 40 → "4.0", 41 → "4.1").
-    private static func h264Level(_ level: String?) -> String? {
-        guard let n = level.flatMap(Int.init) else { return nil }
-        return "\(n / 10).\(n % 10)"
     }
 
     // MARK: - Field order / aspect / rate helpers
