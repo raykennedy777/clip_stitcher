@@ -22,6 +22,13 @@ struct OutputView: View {
                 Picker("Mode", selection: output.mode) {
                     ForEach(OutputMode.allCases) { Text($0.title).tag($0) }
                 }
+                // Cut-only is a separate-mode rendering choice (ADR-0018) — connect
+                // mode always conforms, so the picker only appears here.
+                if document.project.output.mode == .separate {
+                    Picker("Rendering", selection: output.rendering) {
+                        ForEach(SeparateRendering.allCases) { Text($0.title).tag($0) }
+                    }
+                }
                 Picker("Type", selection: output.type) {
                     ForEach(OutputType.allCases) { Text($0.title).tag($0) }
                 }

@@ -5,7 +5,20 @@ enum ClipRole {
     case target
     case smartRender
     case reEncode
+    case cutOnly
     case unknown
+
+    /// The badge a source row shows. The target row always keeps its Target badge —
+    /// the designation survives cut-only untouched (ADR-0018). Separate + cut-only
+    /// marks every other row "Cut only": the verdict is unconditional, no target
+    /// comparison, so no probed video is needed. Every other mode×rendering
+    /// combination is the match verdict against the target.
+    nonisolated static func role(for clip: Clip, target: Clip?, output: OutputSettings) -> ClipRole {
+        if clip.id == target?.id { return .target }
+        if output.mode == .separate && output.rendering == .cutOnly { return .cutOnly }
+        guard let target, clip.video != nil else { return .unknown }
+        return MatchEvaluator.matches(clip, target: target) ? .smartRender : .reEncode
+    }
 }
 
 struct ClipRowView: View {
@@ -57,6 +70,8 @@ struct ClipRowView: View {
             badge("Smart render", systemImage: "bolt", color: .green)
         case .reEncode:
             badge("Re-encode", systemImage: "arrow.triangle.2.circlepath", color: .orange)
+        case .cutOnly:
+            badge("Cut only", systemImage: "scissors", color: .blue)
         case .unknown:
             EmptyView()
         }

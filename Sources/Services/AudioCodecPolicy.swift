@@ -19,6 +19,10 @@ enum AudioCodecPolicy {
         var channels: Int
         var language: String? = nil
         var title: String? = nil
+        /// Cut-only (ADR-0018): this track's own ffmpeg encoder — each track encodes to
+        /// its own source's codec, so tracks of one output can differ. `nil` (every
+        /// other mode) means the export-wide codec applies.
+        var encoder: String? = nil
     }
 
     /// The audio codec the export will actually encode to, and whether it had to fall back.

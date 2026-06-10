@@ -133,13 +133,8 @@ struct SourceView: View {
     }
 
     private func role(for clip: Clip) -> ClipRole {
-        if clip.id == document.project.targetClipID { return .target }
-        guard let targetID = document.project.targetClipID,
-              let target = document.project.clips.first(where: { $0.id == targetID }),
-              clip.video != nil else {
-            return .unknown
-        }
-        return MatchEvaluator.matches(clip, target: target) ? .smartRender : .reEncode
+        ClipRole.role(for: clip, target: document.project.targetClip,
+                      output: document.project.output)
     }
 
     // MARK: - Action panel

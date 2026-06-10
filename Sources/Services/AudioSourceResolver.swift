@@ -58,6 +58,35 @@ enum AudioSourceResolver {
     /// clip's selected sources, each track's format/tags taken from the target clip's
     /// corresponding track when it has one, else from the first clip in timeline order
     /// that does.
+    /// Cut-only's per-clip variant of output-track derivation (ADR-0018): the clip's
+    /// output carries exactly its **own** selected slots — no silence-fill to the
+    /// richest clip's count, parallel tracks exist for joining and cut-only never joins.
+    /// Each track's format/tags come from the track feeding it, and each track encodes
+    /// to its own source codec where the container (or, for an audio-only output, the
+    /// encoder table) allows — else AAC at the source rate/layout. An audio-only output
+    /// keeps only track 1: one elementary stream. `fallbacks` lists the kept slots that
+    /// were declined (0-based, with the codec wanted) so the export can warn.
+    static func resolveOwnTracks(clip: Clip, type: OutputType, container: Container)
+        -> (tracks: [AudioCodecPolicy.OutputAudioTrack], fallbacks: [(slot: Int, codec: String)]) {
+        var fallbacks: [(slot: Int, codec: String)] = []
+        var tracks = clip.effectiveAudioTracks.enumerated().map { t, props -> AudioCodecPolicy.OutputAudioTrack in
+            let choice = type == .audioOnly
+                ? AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: props?.codec)
+                : AudioCodecPolicy.resolveAudioCodec(targetCodec: props?.codec, container: container)
+            if choice.fellBack, let wanted = props?.codec {
+                fallbacks.append((slot: t, codec: wanted))
+            }
+            return AudioCodecPolicy.OutputAudioTrack(
+                sampleRate: props?.sampleRate ?? 48000, channels: props?.channels ?? 2,
+                language: props?.language, title: props?.title, encoder: choice.encoder)
+        }
+        if type == .audioOnly {
+            tracks = Array(tracks.prefix(1))
+            fallbacks = fallbacks.filter { $0.slot == 0 }
+        }
+        return (tracks, fallbacks)
+    }
+
     static func resolveOutputTracks(target: Clip?, clips: [Clip]) -> [AudioCodecPolicy.OutputAudioTrack] {
         let count = clips.map { $0.resolvedAudioSelections.count }.max() ?? 0
         let donors = (target.map { [$0] } ?? []) + clips

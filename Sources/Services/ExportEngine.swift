@@ -34,6 +34,10 @@ struct ExportItem {
     /// the target spec (ADR-0011). When present the clip is conformed instead of smart-rendered,
     /// and `segments` is unused; `nil` for a matching clip (the M2 smart-render path).
     var conform: ConformEngine.VideoConform? = nil
+    /// Cut-only (ADR-0018): this clip's own output tracks — exactly its selected slots,
+    /// each possibly carrying its own encoder — overriding the export-wide track list in
+    /// `.separate` mode. `nil` (every other mode) means the export-wide tracks apply.
+    var ownTracks: [AudioCodecPolicy.OutputAudioTrack]? = nil
 }
 
 enum ExportError: LocalizedError {
@@ -330,7 +334,20 @@ enum ExportEngine {
         if !chains.isEmpty { args += ["-filter_complex", chains.joined(separator: ";")] }
         if videoInput != nil { args += ["-map", "0:v:0", "-c:v", "copy"] }
         for t in tracks.indices { args += ["-map", "[a\(t)]"] }
-        if !tracks.isEmpty { args += ["-c:a", audioCodec, "-b:a", audioBitrate] }
+        if !tracks.isEmpty {
+            if tracks.contains(where: { $0.encoder != nil }) {
+                // Cut-only (ADR-0018): tracks of one output can encode to different
+                // codecs, so each gets its own `-c:a:N` (de-risked in the shell on all
+                // three formats in TS/MKV/MP4). A track without its own encoder takes
+                // the export-wide codec.
+                for (t, track) in tracks.enumerated() {
+                    args += ["-c:a:\(t)", track.encoder ?? audioCodec]
+                }
+                args += ["-b:a", audioBitrate]
+            } else {
+                args += ["-c:a", audioCodec, "-b:a", audioBitrate]
+            }
+        }
         for (t, track) in tracks.enumerated() {
             if let language = track.language { args += ["-metadata:s:a:\(t)", "language=\(language)"] }
             if let title = track.title { args += ["-metadata:s:a:\(t)", "title=\(title)"] }
@@ -458,12 +475,21 @@ enum ExportEngine {
             }
 
         case .separate:
-            let names = separateFileNames(clipNames: items.map(\.displayName), ext: ext)
+            // Cut-only's audio-only outputs can differ per clip (each clip's own codec,
+            // each codec its natural elementary extension); video outputs all take the
+            // global container's extension.
+            let exts = items.map { item in
+                settings.type == .audioOnly
+                    ? AudioCodecPolicy.audioFileExtension(forEncoder: item.ownTracks?.first?.encoder ?? audioCodec)
+                    : ext
+            }
+            let names = separateFileNames(clipNames: items.map(\.displayName), exts: exts)
             for (i, item) in items.enumerated() {
                 let out = destination.appendingPathComponent(names[i])
                 let videoInput = wantsVideo ? videoPieces[i] : nil
+                let itemTracks = item.ownTracks ?? tracks
                 if wantsAudio {
-                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], tracks: tracks, audioCodec: audioCodec, output: out),
+                    try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], tracks: itemTracks, audioCodec: audioCodec, output: out),
                                         failure: ExportError.cutFailed) { t in
                         progress(ExportProgress.separateFraction(
                             clipIndex: i, clipCount: items.count,
@@ -490,10 +516,16 @@ enum ExportEngine {
     /// count of the clip total (minimum two, so Finder's alphabetical sort is the
     /// timeline order even as clips are added later).
     static func separateFileNames(clipNames: [String], ext: String) -> [String] {
+        separateFileNames(clipNames: clipNames, exts: Array(repeating: ext, count: clipNames.count))
+    }
+
+    /// Per-clip-extension variant: cut-only audio-only outputs follow each clip's own
+    /// codec, so their extensions can differ within one export (ADR-0018).
+    static func separateFileNames(clipNames: [String], exts: [String]) -> [String] {
         var taken = Set<String>()
         return clipNames.enumerated().map { i, name in
             separateFileName(clipName: name, position: i + 1, count: clipNames.count,
-                             ext: ext, taken: &taken)
+                             ext: exts[i], taken: &taken)
         }
     }
 

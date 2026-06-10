@@ -56,6 +56,15 @@ enum ExportPlanner {
         return .smartRender(segments: segments, encoder: encoder)
     }
 
+    /// The target the verdict consults. Cut-only severs it (ADR-0018): in separate mode
+    /// with the cut-only rendering choice every clip smart-renders against itself —
+    /// `videoTreatment` with no target never constructs `.conform`, and the boundary
+    /// re-encode args already derive from the clip's own probed properties (ADR-0009).
+    /// Every other mode×rendering combination consults the project's target unchanged.
+    static func effectiveTarget(_ target: Clip?, settings: OutputSettings) -> Clip? {
+        settings.mode == .separate && settings.rendering == .cutOnly ? nil : target
+    }
+
     /// Plans one clip's export item: the video treatment plus the kept range as a seek
     /// window. A `nil` in/out point means that end is the clip boundary (no cut there),
     /// so audio — and a conformed clip's video — runs to the file's start/end too. The
@@ -63,7 +72,9 @@ enum ExportPlanner {
     /// from it, not absolute pts — passing pts cut every leg 0.24 s late on the MPEG-PS
     /// clip), and its duration is the kept *video* span every audio leg is forced to,
     /// so the output tracks stay sample-aligned at joins (ADR-0014).
-    static func planItem(for input: ClipInput, target: Clip?) throws -> ExportItem {
+    static func planItem(for input: ClipInput, target: Clip?,
+                         settings: OutputSettings = OutputSettings()) throws -> ExportItem {
+        let target = effectiveTarget(target, settings: settings)
         let clip = input.clip
         let index = input.index
         let window = ExportEngine.keptWindow(

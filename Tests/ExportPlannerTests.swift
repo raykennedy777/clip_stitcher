@@ -116,6 +116,49 @@ struct ExportPlannerTests {
         #expect(item.audioEnd == nil)
     }
 
+    // MARK: cut-only (issue #31 / ADR-0018)
+
+    private func settings(mode: OutputMode, rendering: SeparateRendering) -> OutputSettings {
+        var s = OutputSettings()
+        s.mode = mode
+        s.rendering = rendering
+        return s
+    }
+
+    @Test func effectiveTargetSurvivesEveryCombinationExceptSeparateCutOnly() {
+        let target = clip(video: video())
+        #expect(ExportPlanner.effectiveTarget(target, settings: settings(mode: .connect, rendering: .conformToTarget)) == target)
+        #expect(ExportPlanner.effectiveTarget(target, settings: settings(mode: .connect, rendering: .cutOnly)) == target)
+        #expect(ExportPlanner.effectiveTarget(target, settings: settings(mode: .separate, rendering: .conformToTarget)) == target)
+        #expect(ExportPlanner.effectiveTarget(target, settings: settings(mode: .separate, rendering: .cutOnly)) == nil)
+    }
+
+    @Test func cutOnlyNeverConformsAMismatchingClip() throws {
+        // The same mismatch that conforms under conform-to-target smart-renders against
+        // itself under cut-only — encoder args from the clip's own codec (ADR-0018).
+        let input = ExportPlanner.ClipInput(
+            clip: clip(video: video(codec: "mpeg2video")),
+            url: URL(fileURLWithPath: "/tmp/b.mpg"), index: index,
+            containerStart: 0, audioSources: [.stream(0)])
+        let target = clip(video: video(codec: "h264"))
+        let item = try ExportPlanner.planItem(for: input, target: target,
+                                              settings: settings(mode: .separate, rendering: .cutOnly))
+        #expect(item.conform == nil)
+        #expect(!item.segments.isEmpty)
+        #expect(item.codec == "mpeg2video")
+        #expect(item.encoder.contains("mpeg2video"))
+    }
+
+    @Test func separateConformToTargetStillConforms() throws {
+        let input = ExportPlanner.ClipInput(
+            clip: clip(video: video(codec: "mpeg2video")),
+            url: URL(fileURLWithPath: "/tmp/b.mpg"), index: index,
+            containerStart: 0, audioSources: [.stream(0)])
+        let item = try ExportPlanner.planItem(for: input, target: clip(video: video(codec: "h264")),
+                                              settings: settings(mode: .separate, rendering: .conformToTarget))
+        #expect(item.conform != nil)
+    }
+
     // MARK: frame duration (moved from the document with the planning)
 
     @Test func frameDurationParsesARationalRate() {

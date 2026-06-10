@@ -378,6 +378,54 @@ struct ExportEngineTests {
     }
 }
 
+/// Pins the per-track own-codec mux shape (issue #31 / ADR-0018): cut-only tracks each
+/// carry their own encoder via `-c:a:N` (de-risked in the shell on MPEG-2/H.264/HEVC in
+/// TS/MKV/MP4); without per-track encoders the long-validated single `-c:a` shape is
+/// emitted unchanged.
+struct PerTrackAudioCodecTests {
+    private let src = URL(fileURLWithPath: "/tmp/clip.mkv")
+    private let out = URL(fileURLWithPath: "/tmp/out.mkv")
+
+    private func item() -> ExportItem {
+        ExportItem(source: src, audioStart: 0, audioEnd: 10, audioSources: [.stream(0), .stream(1)])
+    }
+
+    @Test func tracksWithOwnEncodersEmitPerStreamCodecFlags() {
+        let tracks = [
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 1, encoder: "mp2"),
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2, encoder: "ac3"),
+        ]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: [item()], tracks: tracks,
+                                                  audioCodec: "aac", output: out)
+        #expect(args.contains("-c:a:0") && args[args.firstIndex(of: "-c:a:0")! + 1] == "mp2")
+        #expect(args.contains("-c:a:1") && args[args.firstIndex(of: "-c:a:1")! + 1] == "ac3")
+        #expect(!args.contains("-c:a"))
+        #expect(args.contains("-b:a"))
+    }
+
+    @Test func aTrackWithoutItsOwnEncoderTakesTheExportWideCodec() {
+        let tracks = [
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2, encoder: "mp2"),
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2),
+        ]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: [item()], tracks: tracks,
+                                                  audioCodec: "aac", output: out)
+        #expect(args[args.firstIndex(of: "-c:a:1")! + 1] == "aac")
+    }
+
+    @Test func withoutPerTrackEncodersTheValidatedSingleCodecShapeIsUnchanged() {
+        let tracks = [
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2),
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2),
+        ]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: [item()], tracks: tracks,
+                                                  audioCodec: "mp2", output: out)
+        let i = args.firstIndex(of: "-c:a")
+        #expect(i != nil && args[i! + 1] == "mp2")
+        #expect(!args.contains("-c:a:0"))
+    }
+}
+
 /// Pins the `.separate`-mode file naming contract (issue #30): `NN <clip name>.<ext>`
 /// in timeline order, zero-padded to the clip total (minimum two digits), source
 /// extension dropped, filesystem-hostile characters replaced, and a collision suffix

@@ -432,6 +432,11 @@ final class ProjectDocument: ReferenceFileDocument {
         do {
             var items: [ExportItem] = []
             var warnings: [String] = []
+            // Cut-only (ADR-0018): separate mode's "just accurately cut" rendering
+            // choice — the verdict ignores the target (planner severs it) and each
+            // clip's audio is its own tracks at their own codecs (per-item below).
+            let cutOnly = project.output.mode == .separate
+                && project.output.rendering == .cutOnly
             for clip in project.clips {
                 guard let url = url(for: clip) else {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
@@ -462,12 +467,27 @@ final class ProjectDocument: ReferenceFileDocument {
 
                 // The planning itself — the smart-render-vs-conform verdict, the
                 // boundary re-encode segment plan, and the kept window — is pure and
-                // lives in ExportPlanner (ADR-0009 / ADR-0011).
-                items.append(try ExportPlanner.planItem(
+                // lives in ExportPlanner (ADR-0009 / ADR-0011). The output settings
+                // carry the rendering choice into the verdict (ADR-0018).
+                var item = try ExportPlanner.planItem(
                     for: ExportPlanner.ClipInput(clip: clip, url: url, index: index,
                                                  containerStart: containerStart,
                                                  audioSources: audioSources),
-                    target: project.targetClip))
+                    target: project.targetClip, settings: project.output)
+                if cutOnly {
+                    // Each clip's output carries exactly its own tracks, each encoded
+                    // to its own source codec — AAC where the container declines one,
+                    // with a warning naming the clip and track (ADR-0018).
+                    let own = AudioSourceResolver.resolveOwnTracks(
+                        clip: clip, type: project.output.type, container: project.output.container)
+                    item.ownTracks = own.tracks
+                    for fb in own.fallbacks {
+                        let dest = project.output.type == .audioOnly
+                            ? "an audio file" : "the \(project.output.container.fileExtension.uppercased()) container"
+                        warnings.append("\(fb.codec.uppercased()) audio can’t go in \(dest) — track \(fb.slot + 1) of “\(clip.displayName)” exports AAC instead.")
+                    }
+                }
+                items.append(item)
             }
             // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins
             // and mislabels the audio; TS is the right container for this footage (ADR-0008).
@@ -477,7 +497,10 @@ final class ProjectDocument: ReferenceFileDocument {
             // The rebuilt audio conforms to the target clip's codec (ADR-0010). For an
             // audio-only output the codec goes in its own elementary file, so there is no
             // video container to fit; otherwise it must fit the chosen container (AAC fallback).
-            let targetAudioCodec = project.targetClip?.audio?.codec
+            // In cut-only the target's codec governs nothing — every track carries its
+            // own encoder (above); the export-wide codec is only the AAC default for
+            // a track with none (a silence slot).
+            let targetAudioCodec = cutOnly ? nil : project.targetClip?.audio?.codec
             let audio = project.output.type == .audioOnly
                 ? AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: targetAudioCodec)
                 : AudioCodecPolicy.resolveAudioCodec(targetCodec: targetAudioCodec, container: project.output.container)

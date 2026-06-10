@@ -47,8 +47,36 @@ enum Container: String, Codable, CaseIterable, Identifiable {
     var fileExtension: String { rawValue }
 }
 
+/// How separate mode renders each clip (ADR-0018). A sub-setting of `.separate` —
+/// connect mode always conforms, because joining requires uniform properties.
+enum SeparateRendering: String, Codable, CaseIterable, Identifiable {
+    case conformToTarget   // today's verdict: matching clips smart-render, others conform
+    case cutOnly           // every clip smart-renders against itself; the target plays no role
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .conformToTarget: return "Conform to target"
+        case .cutOnly: return "Cut only"
+        }
+    }
+}
+
 struct OutputSettings: Codable, Equatable {
     var mode: OutputMode = .connect
     var type: OutputType = .videoAndAudio
     var container: Container = .mp4
+    var rendering: SeparateRendering = .conformToTarget
+
+    init() {}
+
+    /// Saves made before a field existed decode to its default instead of failing
+    /// the whole project file (`rendering` arrived with ADR-0018).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decodeIfPresent(OutputMode.self, forKey: .mode) ?? .connect
+        type = try c.decodeIfPresent(OutputType.self, forKey: .type) ?? .videoAndAudio
+        container = try c.decodeIfPresent(Container.self, forKey: .container) ?? .mp4
+        rendering = try c.decodeIfPresent(SeparateRendering.self, forKey: .rendering) ?? .conformToTarget
+    }
 }
