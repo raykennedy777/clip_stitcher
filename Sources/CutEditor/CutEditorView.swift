@@ -13,7 +13,7 @@ struct CutEditorView: View {
         }
         .frame(minWidth: 640, minHeight: 480)
         .sheet(isPresented: $showingAudioSettings) {
-            AudioSettingsView(document: document, clipID: model.clip.id)
+            AudioSettingsView(document: document, clipIDs: [model.clip.id])
         }
     }
 

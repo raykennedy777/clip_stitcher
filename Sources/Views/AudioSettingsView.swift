@@ -4,9 +4,15 @@ import UniformTypeIdentifiers
 /// Per-clip audio stream settings (ADR-0014), reachable from the Source view and the
 /// cut-editor: an ordered list of the clip's audio track slots, each re-pointable at
 /// another stream of the clip's own file or an external audio file, plus add/remove.
+///
+/// Opened on a multi-selection (issue #12 — the same-source gate guarantees every
+/// clip reads from the same file), the first clip's slots are shown and a write
+/// replaces every selected clip's slot list with the displayed one — clips whose
+/// lists had diverged converge on it. Monitored-track choices stay per-clip.
 struct AudioSettingsView: View {
     @ObservedObject var document: ProjectDocument
-    let clipID: Clip.ID
+    /// The edited clips in timeline order; the first is the one displayed.
+    let clipIDs: [Clip.ID]
     @Environment(\.dismiss) private var dismiss
     /// The slot a presented "choose external file" panel is for. Kept separate from
     /// `isBrowsing` — the importer clears its presentation binding *before* calling
@@ -16,13 +22,19 @@ struct AudioSettingsView: View {
     @State private var isBrowsing = false
 
     private var clip: Clip? {
-        document.project.clips.first { $0.id == clipID }
+        document.project.clips.first { $0.id == clipIDs.first }
+    }
+
+    private var selectedClips: [Clip] {
+        document.project.clips.filter { clipIDs.contains($0.id) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let clip {
-                Text("Audio Tracks — \(clip.displayName)")
+                Text(clipIDs.count > 1
+                     ? "Audio Tracks — \(clip.displayName) (\(clipIDs.count) clips)"
+                     : "Audio Tracks — \(clip.displayName)")
                     .font(.headline)
                     .padding()
 
@@ -49,9 +61,9 @@ struct AudioSettingsView: View {
                         Label("Add Track", systemImage: "plus")
                     }
                     Button("Restore Clip's Own Tracks") {
-                        document.setAudioSelections(id: clipID, selections: nil)
+                        document.setAudioSelections(ids: Set(clipIDs), selections: nil)
                     }
-                    .disabled(clip.audioSelections == nil)
+                    .disabled(selectedClips.allSatisfy { $0.audioSelections == nil })
                     Spacer()
                     Button("Done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
@@ -65,8 +77,12 @@ struct AudioSettingsView: View {
             allowedContentTypes: Self.audioContentTypes
         ) { result in
             defer { browsingSlot = nil }
-            guard let slot = browsingSlot, case .success(let url) = result else { return }
-            Task { await document.setExternalAudio(id: clipID, slot: slot, url: url) }
+            guard let slot = browsingSlot, case .success(let url) = result,
+                  let template = clipIDs.first else { return }
+            Task {
+                await document.setExternalAudio(ids: Set(clipIDs), template: template,
+                                                slot: slot, url: url)
+            }
         }
     }
 
@@ -182,7 +198,7 @@ struct AudioSettingsView: View {
         var selections = clip.resolvedAudioSelections
         guard slot < selections.count else { return }
         selections[slot] = selection
-        document.setAudioSelections(id: clipID, selections: selections)
+        document.setAudioSelections(ids: Set(clipIDs), selections: selections)
     }
 
     /// A new slot starts on the clip's own next unused stream, wrapping to the first.
@@ -191,14 +207,14 @@ struct AudioSettingsView: View {
         let streamCount = clip.allAudioTracks.count
         let next = streamCount > 0 ? min(selections.count, streamCount - 1) : 0
         selections.append(.stream(next))
-        document.setAudioSelections(id: clipID, selections: selections)
+        document.setAudioSelections(ids: Set(clipIDs), selections: selections)
     }
 
     private func removeSlot(clip: Clip, slot: Int) {
         var selections = clip.resolvedAudioSelections
         guard slot < selections.count else { return }
         selections.remove(at: slot)
-        document.setAudioSelections(id: clipID, selections: selections)
+        document.setAudioSelections(ids: Set(clipIDs), selections: selections)
     }
 
     private static func gapText(_ gap: Double) -> String {

@@ -117,18 +117,43 @@ final class ProjectDocument: ReferenceFileDocument {
     /// Returns the new clip's id so the UI can select it.
     @discardableResult
     func duplicateClip(id: Clip.ID) -> Clip.ID? {
-        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return nil }
-        var copy = project.clips[i]
-        copy.id = UUID()
+        duplicateClips(ids: [id]).first
+    }
+
+    /// Copies every selected clip, inserting the copies as one contiguous run
+    /// directly below the bottommost selected clip, copies in timeline order
+    /// (issue #12). One undo step reverses the whole batch. Returns the new ids in
+    /// timeline order so the UI can select them.
+    @discardableResult
+    func duplicateClips(ids: Set<Clip.ID>) -> [Clip.ID] {
+        let selected = Set(project.clips.enumerated()
+            .filter { ids.contains($0.element.id) }.map(\.offset))
+        guard let insertAt = BatchSelection.duplicateInsertionIndex(selected: selected) else {
+            return []
+        }
+        let originals = selected.sorted().map { project.clips[$0] }
+        let copies: [Clip] = originals.map { original in
+            var copy = original
+            copy.id = UUID()
+            return copy
+        }
         var p = project
-        p.clips.insert(copy, at: i + 1)
+        p.clips.insert(contentsOf: copies, at: insertAt)
         commit(p)
-        // The copy points at the same file, so it shares the original's resolved URL
-        // and frame index instead of re-resolving and re-indexing.
-        urlCache[copy.id] = urlCache[id]
-        frameIndexCache[copy.id] = frameIndexCache[id]
-        lastViewedFrames[copy.id] = lastViewedFrames[id]
-        switch importStates[id] {
+        for (original, copy) in zip(originals, copies) {
+            adoptRuntimeState(of: original.id, for: copy)
+        }
+        return copies.map(\.id)
+    }
+
+    /// Hands a fresh copy the original's runtime state: they point at the same file,
+    /// so the copy shares the resolved URL and frame index instead of re-resolving
+    /// and re-indexing.
+    private func adoptRuntimeState(of originalID: Clip.ID, for copy: Clip) {
+        urlCache[copy.id] = urlCache[originalID]
+        frameIndexCache[copy.id] = frameIndexCache[originalID]
+        lastViewedFrames[copy.id] = lastViewedFrames[originalID]
+        switch importStates[originalID] {
         case .probing, .indexing, nil:
             // The original's in-flight import only fills the original's row — give
             // the copy its own pass.
@@ -141,20 +166,23 @@ final class ProjectDocument: ReferenceFileDocument {
         case let state?:
             importStates[copy.id] = state
         }
-        return copy.id
     }
 
-    func deleteClip(id: Clip.ID) {
+    /// Deletes every selected clip in one undo step (issue #12).
+    func deleteClips(ids: Set<Clip.ID>) {
         var p = project
-        p.clips.removeAll { $0.id == id }
-        if p.targetClipID == id {
+        p.clips.removeAll { ids.contains($0.id) }
+        guard p.clips.count != project.clips.count else { return }
+        if let target = p.targetClipID, ids.contains(target) {
             p.targetClipID = p.clips.first?.id
         }
         commit(p)
-        importStates[id] = nil
-        urlCache[id] = nil
-        frameIndexCache[id] = nil
-        lastViewedFrames[id] = nil
+        for id in ids {
+            importStates[id] = nil
+            urlCache[id] = nil
+            frameIndexCache[id] = nil
+            lastViewedFrames[id] = nil
+        }
     }
 
     func clearAll() {
@@ -168,24 +196,34 @@ final class ProjectDocument: ReferenceFileDocument {
         lastViewedFrames.removeAll()
     }
 
-    /// Rebinds a clip to a new source file (after its original went missing), clears
-    /// stale metadata + cached index, and re-imports.
-    func relink(id: Clip.ID, to newURL: URL) {
-        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+    /// Rebinds every selected clip to a new source file in one undo step (issue #12 —
+    /// the gate guarantees they all pointed at the same missing file), clears stale
+    /// metadata + cached indexes, and re-imports each.
+    func relink(ids: Set<Clip.ID>, to newURL: URL) {
+        let bookmark = (try? newURL.bookmarkData()) ?? Data()
         var p = project
-        p.clips[i].bookmark = (try? newURL.bookmarkData()) ?? Data()
-        p.clips[i].displayName = newURL.lastPathComponent
-        p.clips[i].video = nil
-        p.clips[i].audio = nil
-        p.clips[i].audioTracks = nil
-        p.clips[i].duration = nil
-        p.clips[i].frameCount = nil
-        urlCache[id] = newURL
-        frameIndexCache[id] = nil
-        lastViewedFrames[id] = nil
-        importStates[id] = .probing
+        var touched: [Clip.ID] = []
+        for i in p.clips.indices where ids.contains(p.clips[i].id) {
+            p.clips[i].bookmark = bookmark
+            p.clips[i].displayName = newURL.lastPathComponent
+            p.clips[i].video = nil
+            p.clips[i].audio = nil
+            p.clips[i].audioTracks = nil
+            p.clips[i].duration = nil
+            p.clips[i].frameCount = nil
+            touched.append(p.clips[i].id)
+        }
+        guard !touched.isEmpty else { return }
+        for id in touched {
+            urlCache[id] = newURL
+            frameIndexCache[id] = nil
+            lastViewedFrames[id] = nil
+            importStates[id] = .probing
+        }
         commit(p)
-        Task { await importClip(id: id, url: newURL) }
+        for id in touched {
+            Task { await importClip(id: id, url: newURL) }
+        }
     }
 
     func setTarget(id: Clip.ID) {
@@ -194,12 +232,16 @@ final class ProjectDocument: ReferenceFileDocument {
         commit(p)
     }
 
-    func move(id: Clip.ID, by delta: Int) {
-        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
-        let j = i + delta
-        guard project.clips.indices.contains(j) else { return }
+    /// Moves the selected clips one step up (-1) or down (+1) as one contiguous
+    /// block, relative order preserved (issue #12) — for a single clip this is the
+    /// familiar adjacent swap. One undo step.
+    func move(ids: Set<Clip.ID>, by delta: Int) {
+        let selected = Set(project.clips.enumerated()
+            .filter { ids.contains($0.element.id) }.map(\.offset))
+        guard let order = BatchSelection.movedOrder(
+            count: project.clips.count, selected: selected, delta: delta) else { return }
         var p = project
-        p.clips.swapAt(i, j)
+        p.clips = order.map { project.clips[$0] }
         commit(p)
     }
 
@@ -219,17 +261,24 @@ final class ProjectDocument: ReferenceFileDocument {
 
     // MARK: - Audio tracks (ADR-0014)
 
-    /// Replaces a clip's audio track slots; `nil` restores the default (all of the
-    /// clip's own streams in container order).
-    func setAudioSelections(id: Clip.ID, selections: [AudioTrackSelection]?) {
-        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+    /// Replaces the audio track slots of every clip in `ids` in one undo step;
+    /// `nil` restores the default (all of the clip's own streams in container
+    /// order). This is the Audio Settings sheet's same-source fan-out (issue #12) —
+    /// it covers the slot assignments only: each clip's monitored-track choice is
+    /// untouched beyond clamping it into the new list.
+    func setAudioSelections(ids: Set<Clip.ID>, selections: [AudioTrackSelection]?) {
         var p = project
-        p.clips[i].audioSelections = selections
-        // Keep the monitored slot inside the new list.
-        if let monitored = p.clips[i].monitoredAudioTrack {
-            let count = p.clips[i].resolvedAudioSelections.count
-            p.clips[i].monitoredAudioTrack = count == 0 ? nil : min(monitored, count - 1)
+        var changed = false
+        for i in p.clips.indices where ids.contains(p.clips[i].id) {
+            p.clips[i].audioSelections = selections
+            // Keep the monitored slot inside the new list.
+            if let monitored = p.clips[i].monitoredAudioTrack {
+                let count = p.clips[i].resolvedAudioSelections.count
+                p.clips[i].monitoredAudioTrack = count == 0 ? nil : min(monitored, count - 1)
+            }
+            changed = true
         }
+        guard changed else { return }
         commit(p)
     }
 
@@ -249,13 +298,16 @@ final class ProjectDocument: ReferenceFileDocument {
         commit(p)
     }
 
-    /// Points a clip's audio slot at an external file (audio-only or another video):
-    /// probes all of its audio streams — for the per-stream picker, naming, formats,
-    /// and the length-mismatch notice (ADR-0014) — then commits the selection on the
-    /// file's first audio stream. The settings sheet switches streams from there.
-    func setExternalAudio(id: Clip.ID, slot: Int, url: URL) async {
+    /// Points an audio slot at an external file (audio-only or another video) for
+    /// every clip in `ids`, in one undo step: probes all of the file's audio
+    /// streams — for the per-stream picker, naming, formats, and the
+    /// length-mismatch notice (ADR-0014) — then commits the selection on its first
+    /// audio stream. The settings sheet switches streams from there. The slot list
+    /// is read from `template` — the sheet's displayed clip — and the updated list
+    /// lands on all of them (issue #12).
+    func setExternalAudio(ids: Set<Clip.ID>, template: Clip.ID, slot: Int, url: URL) async {
         let probe = try? await MediaProbe.probe(url: url)
-        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = project.clips.firstIndex(where: { $0.id == template }) else { return }
         var selections = project.clips[i].resolvedAudioSelections
         guard slot < selections.count else { return }
         selections[slot] = .external(
@@ -265,7 +317,7 @@ final class ProjectDocument: ReferenceFileDocument {
             tracks: probe?.audioTracks,
             duration: probe?.duration
         )
-        setAudioSelections(id: id, selections: selections)
+        setAudioSelections(ids: ids, selections: selections)
     }
 
     /// The frame the clip's cut-editor was last closed on this session, if any.

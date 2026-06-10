@@ -4,18 +4,20 @@ import UniformTypeIdentifiers
 struct SourceView: View {
     @ObservedObject var document: ProjectDocument
     @EnvironmentObject private var cutEditor: CutEditorPresenter
-    @State private var selection: Clip.ID?
+    @State private var selection: Set<Clip.ID> = []
     @State private var importing = false
     @State private var importPurpose: ImportPurpose = .add
     @State private var isDropTargeted = false
-    @State private var audioSettingsClip: Clip.ID?
+    /// The clips an open Audio Settings sheet edits, in timeline order; empty when
+    /// the sheet is closed. More than one only under the same-source gate.
+    @State private var audioSettingsClips: [Clip.ID] = []
 
     /// What a presented file picker is for. A single `.fileImporter` serves both jobs —
     /// stacking two of the same presentation modifier on one view silently breaks all but
     /// the last, which once left "Add File" doing nothing.
     private enum ImportPurpose {
         case add
-        case relink(Clip.ID)
+        case relink(Set<Clip.ID>)
     }
 
     var body: some View {
@@ -36,11 +38,11 @@ struct SourceView: View {
             }
         }
         .sheet(isPresented: Binding(
-            get: { audioSettingsClip != nil },
-            set: { if !$0 { audioSettingsClip = nil } }
+            get: { !audioSettingsClips.isEmpty },
+            set: { if !$0 { audioSettingsClips = [] } }
         )) {
-            if let id = audioSettingsClip {
-                AudioSettingsView(document: document, clipID: id)
+            if !audioSettingsClips.isEmpty {
+                AudioSettingsView(document: document, clipIDs: audioSettingsClips)
             }
         }
         .fileImporter(
@@ -52,8 +54,8 @@ struct SourceView: View {
             switch importPurpose {
             case .add:
                 document.addFiles(urls)
-            case .relink(let id):
-                if let url = urls.first { document.relink(id: id, to: url) }
+            case .relink(let ids):
+                if let url = urls.first { document.relink(ids: ids, to: url) }
             }
         }
     }
@@ -85,20 +87,22 @@ struct SourceView: View {
                         let clips = document.project.clips
                         guard clips.indices.contains(row) else { return }
                         let clip = clips[row]
-                        selection = clip.id
+                        selection = [clip.id]
                         openCutEditor(for: clip)
                     })
-                    // Acts on the row under the pointer (macOS convention), which
-                    // needn't be the selected row.
+                    // Acts on the whole selection when the row under the pointer is
+                    // part of it, else on just that row (macOS convention).
                     .contextMenu {
+                        let targets = contextTargets(for: clip)
                         Button("Open in Cut-Editor") {
-                            selection = clip.id
+                            selection = [clip.id]
                             openCutEditor(for: clip)
                         }
-                        Button("Duplicate") { duplicate(clip.id) }
-                        Button("Audio Settings…") { audioSettingsClip = clip.id }
+                        Button("Duplicate") { duplicate(targets) }
+                        Button("Audio Settings…") { presentAudioSettings(for: targets) }
+                            .disabled(!allSameSource(targets))
                         Divider()
-                        Button("Delete", role: .destructive) { delete(clip.id) }
+                        Button("Delete", role: .destructive) { delete(targets) }
                     }
                 }
                 .onInsert(of: [.fileURL]) { index, providers in
@@ -109,7 +113,9 @@ struct SourceView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onKeyPress(.return) {
-                if let id = selection, let clip = document.project.clips.first(where: { $0.id == id }) {
+                // The cut-editor opens one clip — only an unambiguous selection.
+                if selection.count == 1, let id = selection.first,
+                   let clip = document.project.clips.first(where: { $0.id == id }) {
                     openCutEditor(for: clip)
                     return .handled
                 }
@@ -145,25 +151,26 @@ struct SourceView: View {
 
             action("Move Up", systemImage: "arrow.up", enabled: canMove(by: -1)) { move(by: -1) }
             action("Move Down", systemImage: "arrow.down", enabled: canMove(by: 1)) { move(by: 1) }
-            action("Duplicate", systemImage: "plus.square.on.square", enabled: selection != nil) {
-                if let id = selection { duplicate(id) }
+            action("Duplicate", systemImage: "plus.square.on.square", enabled: !selection.isEmpty) {
+                duplicate(selection)
             }
-            action("Delete", systemImage: "trash", enabled: selection != nil) { deleteSelected() }
+            action("Delete", systemImage: "trash", enabled: !selection.isEmpty) { delete(selection) }
             action("Clear", systemImage: "xmark.bin", enabled: !document.project.clips.isEmpty) {
                 document.clearAll()
-                selection = nil
+                selection = []
             }
 
             Divider().padding(.vertical, 6)
 
-            action("Audio Settings…", systemImage: "waveform", enabled: selection != nil) {
-                audioSettingsClip = selection
+            action("Audio Settings…", systemImage: "waveform", enabled: canOpenAudioSettings) {
+                presentAudioSettings(for: selection)
             }
             action("Set as Target Clip", systemImage: "target", enabled: canSetTarget) {
-                if let id = selection { document.setTarget(id: id) }
+                if let id = selection.first { document.setTarget(id: id) }
             }
             action("Relink…", systemImage: "link", enabled: canRelink) {
-                if let id = selection { importPurpose = .relink(id); importing = true }
+                importPurpose = .relink(selection)
+                importing = true
             }
 
             Spacer()
@@ -181,43 +188,80 @@ struct SourceView: View {
         .disabled(!enabled)
     }
 
+    // MARK: - Selection helpers (issue #12)
+
+    /// The selected rows' positions in timeline order — the selection set itself
+    /// carries no order.
+    private func indices(of ids: Set<Clip.ID>) -> Set<Int> {
+        Set(document.project.clips.enumerated()
+            .filter { ids.contains($0.element.id) }.map(\.offset))
+    }
+
+    /// What a context-menu item acts on: the whole selection when the right-clicked
+    /// row is part of it, else just that row.
+    private func contextTargets(for clip: Clip) -> Set<Clip.ID> {
+        selection.contains(clip.id) ? selection : [clip.id]
+    }
+
+    /// A clip's identity for the same-source gate: its resolved URL when the file is
+    /// reachable, else its raw bookmark — so duplicated rows of a now-missing file
+    /// (byte-identical bookmarks) still count as one source for Relink.
+    private func sourceKey(for clip: Clip) -> String? {
+        if let url = document.url(for: clip) { return "url:\(url.standardizedFileURL.path)" }
+        return clip.bookmark.isEmpty ? nil : "bookmark:\(clip.bookmark.base64EncodedString())"
+    }
+
+    private func allSameSource(_ ids: Set<Clip.ID>) -> Bool {
+        let keys = document.project.clips
+            .filter { ids.contains($0.id) }
+            .map { sourceKey(for: $0) }
+        return BatchSelection.allSameSource(keys)
+    }
+
     // MARK: - Actions
 
     private func canMove(by delta: Int) -> Bool {
-        guard let id = selection,
-              let i = document.project.clips.firstIndex(where: { $0.id == id }) else { return false }
-        return document.project.clips.indices.contains(i + delta)
+        BatchSelection.canMove(count: document.project.clips.count,
+                               selected: indices(of: selection), delta: delta)
     }
 
+    /// The target is a single role — only an unambiguous selection can assign it.
     private var canSetTarget: Bool {
-        guard let id = selection else { return false }
-        return id != document.project.targetClipID
+        selection.count == 1 && selection.first != document.project.targetClipID
     }
 
+    /// Relink rebinds the selection to one picked file, so every selected clip must
+    /// be source-missing and they must all have pointed at the same file.
     private var canRelink: Bool {
-        guard let id = selection else { return false }
-        return document.importStates[id] == .sourceMissing
+        !selection.isEmpty
+            && selection.allSatisfy { document.importStates[$0] == .sourceMissing }
+            && allSameSource(selection)
+    }
+
+    /// The sheet's track list must hold for every clip it writes to, so all
+    /// selected clips must share the same source file.
+    private var canOpenAudioSettings: Bool {
+        !selection.isEmpty && allSameSource(selection)
+    }
+
+    private func presentAudioSettings(for ids: Set<Clip.ID>) {
+        audioSettingsClips = document.project.clips.map(\.id).filter { ids.contains($0) }
     }
 
     private func move(by delta: Int) {
-        guard let id = selection else { return }
-        document.move(id: id, by: delta)
+        document.move(ids: selection, by: delta)
     }
 
-    private func deleteSelected() {
-        guard let id = selection else { return }
-        delete(id)
+    private func delete(_ ids: Set<Clip.ID>) {
+        document.deleteClips(ids: ids)
+        selection.subtract(ids)
     }
 
-    private func delete(_ id: Clip.ID) {
-        document.deleteClip(id: id)
-        if selection == id { selection = nil }
-    }
-
-    /// Duplicates the clip and selects the copy, Finder-style.
-    private func duplicate(_ id: Clip.ID) {
-        if let newID = document.duplicateClip(id: id) {
-            selection = newID
+    /// Duplicates the clips and selects the copies, Finder-style.
+    private func duplicate(_ ids: Set<Clip.ID>) {
+        let newIDs = document.duplicateClips(ids: ids)
+        if !newIDs.isEmpty {
+            selection = Set(newIDs)
         }
     }
 
