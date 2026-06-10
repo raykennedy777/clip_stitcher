@@ -7,6 +7,25 @@ A frame-exact cut between keyframes is produced by re-encoding from the cut to t
 re-encoding from the last leading-picture-free keyframe to the out-point — then concatenating.
 The minimal-re-encode, libav-level approach (smartcut-style) is deferred to a **future milestone**.
 
+> **Amended (#16): copy boundaries are now asymmetric — only the *start* needs a
+> leading-picture-free keyframe.** A copy span may **end** at *any* keyframe `K`, at
+> presentation index `K − n_leading`: the segment-muxer out-cut lands just before `K`'s DTS,
+> which sends `K`'s leading pictures into the discarded segment with no bitstream surgery —
+> the kept piece is exactly "everything presented before `K` minus its leading pictures"
+> (verified in the shell: frame count + bit-identical content + the three verify gates, on
+> the real open-GOP HEVC at `n_leading` 1–4 including the full 72-min source, the real
+> open-GOP MPEG-2 at 1–2 with its 0.24 s `start_time`, and the closed-GOP H.264 degrade
+> case, whose commands come out byte-identical to the pre-#16 model). The tail re-encode
+> then starts at `K − n_leading`, covering the leading-picture slots and the rest from
+> decoded source — frame-exactness is preserved by construction. Plan-wise,
+> `PlannedSegment.outCutKeyframe` carries the cut anchor `K` separately from the copy
+> range's upper bound (`K − n_leading`), because the muxer cut time derives from the
+> *keyframe's* DTS midpoint, not the range end. The strict rule stays on the start side:
+> copying *from* an open keyframe would orphan its leading pictures at the seam — that is
+> #17's territory (RASL packet surgery, or Milestone 2b). The measurements below predate
+> the amendment: open-GOP **tail** edges now re-encode only the leading-picture slots plus
+> the partial out-GOP; head edges keep the clean-point cost until #17.
+
 ## Context: why CLI-only forces clean-boundary copying
 
 A stream-copied middle that begins on an **open-GOP** keyframe (HEVC CRA, MPEG-2 open GOP)

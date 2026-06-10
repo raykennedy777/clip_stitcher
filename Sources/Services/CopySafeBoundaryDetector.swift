@@ -16,19 +16,44 @@ import Foundation
 /// leading-picture structure is recoverable from the same DTS.
 enum CopySafeBoundaryDetector {
     /// A presentation-order flag (parallel to `FrameIndex`) marking the keyframes a
-    /// stream copy may start/end on. A keyframe is copy-safe when nothing presented
-    /// before it decodes later than it does — i.e. it has no leading pictures.
+    /// stream copy may START on. A keyframe is copy-safe when nothing presented
+    /// before it decodes later than it does — i.e. it has no leading pictures
+    /// (`leadingPictureCounts` of 0). Copy ENDS are looser (#16): any counted keyframe
+    /// may end a span — see `leadingPictureCounts`.
     static func copySafeFlags(keyframeFlags: [Bool], dts: [Double]) -> [Bool] {
-        var flags = Array(repeating: false, count: keyframeFlags.count)
-        // Running max of every earlier-presented frame's DTS. A keyframe is copy-safe
-        // when nothing presented before it decodes later than it does.
-        var maxEarlierDTS = -Double.greatestFiniteMagnitude
-        for i in keyframeFlags.indices {
-            if keyframeFlags[i] && maxEarlierDTS < dts[i] {
-                flags[i] = true
-            }
-            if dts[i] > maxEarlierDTS { maxEarlierDTS = dts[i] }
+        leadingPictureCounts(keyframeFlags: keyframeFlags, dts: dts).map { $0 == 0 }
+    }
+
+    /// Per-frame leading-picture counts (parallel to `FrameIndex`): for a keyframe, how
+    /// many frames present just before it but decode after it — its leading pictures
+    /// (HEVC RASL frames, the B-frames before an open-GOP MPEG-2 I-frame). `nil` for
+    /// non-keyframes.
+    ///
+    /// The counts drive the planner's asymmetric boundary rules (#16): a copy may START
+    /// only at a count-0 keyframe (the strict rule above — starting at an open keyframe
+    /// would orphan its leading pictures at the seam), but may END at *any* counted
+    /// keyframe `K`, at presentation index `K − count`: the segment-muxer cut just
+    /// before `K`'s DTS sends exactly those leading pictures into the discarded segment
+    /// (verified in the shell against the real open-GOP HEVC and MPEG-2 footage).
+    ///
+    /// A keyframe whose late-decoding predecessors are *not* the contiguous run just
+    /// before it also gets `nil`: the `K − count` arithmetic would not match what the
+    /// muxer keeps, so it is no boundary at all (never seen in a real stream — leading
+    /// pictures sit between their keyframe and the previous GOP by construction).
+    static func leadingPictureCounts(keyframeFlags: [Bool], dts: [Double]) -> [Int?] {
+        // prefixMaxDTS[i] = the largest DTS among frames presented at/before i.
+        var prefixMaxDTS = dts
+        for i in dts.indices.dropFirst() {
+            prefixMaxDTS[i] = max(prefixMaxDTS[i - 1], dts[i])
         }
-        return flags
+        var counts = Array<Int?>(repeating: nil, count: keyframeFlags.count)
+        for i in keyframeFlags.indices where keyframeFlags[i] {
+            var j = i - 1
+            while j >= 0, dts[j] > dts[i] { j -= 1 }
+            // Everything before the contiguous run must decode before the keyframe,
+            // or the cut would strand more frames than the count claims.
+            if j < 0 || prefixMaxDTS[j] < dts[i] { counts[i] = i - 1 - j }
+        }
+        return counts
     }
 }

@@ -30,6 +30,11 @@ straight into Swift and hope.
   it pinned the CPU for tens of minutes after a 28 s cut and froze the export at 68 %
   (test_sprint diagnosis). Check the run *stops* when its work is done — wall-time on a long
   file, or an explicit frame/read budget in the args.
+- **When a concat misbehaves, probe the *list* directly:** `ffprobe -f concat -safe 0 -i list.txt
+  -show_entries packet=pts_time,dts_time`. That shows the demuxer's placement *before* the output
+  muxer "repairs" non-monotonic DTS (single-tick bumping that masquerades as a different bug).
+  This separated demuxer math from muxer fixups in one step on both #18 (MP4 track-timescale
+  mismatch between copied and re-encoded pieces) and the #17 Path-1 de-risk.
 
 ## Verifying a change in the running app
 

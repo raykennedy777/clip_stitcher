@@ -459,10 +459,10 @@ final class ProjectDocument: ReferenceFileDocument {
                                             audioSources: audioSources, audioDuration: audioDuration,
                                             conform: ConformEngine.VideoConform(sourceVideo: cv, targetVideo: tv)))
                 } else {
-                    let copySafe = CopySafeBoundaryDetector.copySafeFlags(
+                    let leadingCounts = CopySafeBoundaryDetector.leadingPictureCounts(
                         keyframeFlags: index.keyframeFlags, dts: index.dts)
                     let segments = BoundaryReencodePlanner.plan(
-                        copySafeFlags: copySafe, frameCount: index.count,
+                        leadingCounts: leadingCounts, frameCount: index.count,
                         inFrame: clip.inPoint, outFrame: clip.outPoint)
                     guard !segments.isEmpty else { throw ExportError.invalidPlan }
                     // Re-encode args matched to the source so the edges concat cleanly with the

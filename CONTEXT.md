@@ -27,6 +27,15 @@ An in/out point that lands exactly on a keyframe, allowing a pure stream-copy wi
 boundary re-encode.
 _Avoid_: I-frame cut, clean cut
 
+**Leading pictures**:
+Frames that present *before* their keyframe but decode *after* it (HEVC RASL frames; the
+B-frames before an open-GOP MPEG-2 I-frame). They make copy boundaries asymmetric: a copy
+span may *start* only at a keyframe with none (they would be orphaned at the
+re-encode→copy seam), but may *end* at any keyframe — the segment-muxer cut before the
+keyframe sends its leading pictures into the discarded segment, so the copy ends exactly
+at presentation index `keyframe − count` (#16, ADR-0009).
+_Avoid_: open-GOP frames, RASL (except when HEVC-specific)
+
 **Conform**:
 Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)

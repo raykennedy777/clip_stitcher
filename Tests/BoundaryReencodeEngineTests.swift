@@ -107,11 +107,31 @@ struct BoundaryReencodeEngineTests {
             pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
             keyframeFlags: [true, false, false, false, true, false, false, true])
         // copy 4..<7 with 8 frames total: both ends interior -> cut at 4 and 7.
-        let plan = BoundaryReencodeEngine.copySegmentPlan(copyRange: 4..<7, index: index)
+        let plan = BoundaryReencodeEngine.copySegmentPlan(
+            copyRange: 4..<7, outCutKeyframe: 7, index: index)
         #expect(abs((plan.inSegmentTime ?? -1) - 0.14) < 1e-9)   // (0.36+0.40)/2 - 0.24
         #expect(abs((plan.outSegmentTime ?? -1) - 0.26) < 1e-9)  // (0.48+0.52)/2 - 0.24
         #expect(ExportEngine.wantedSegmentIndex(plan: plan) == 1)
         #expect(ExportEngine.needsCut(plan))
+    }
+
+    /// #16: the out-cut anchors at the plan's cut *keyframe*, not the copy range's end.
+    /// On an open-GOP end the range stops `n_leading` frames early (those slots re-encode),
+    /// but the muxer cut time still derives from the keyframe's DTS midpoint — the cut
+    /// before the keyframe is what sends its leading pictures to the discarded segment.
+    @Test func outCutTimeComesFromTheCutKeyframeNotTheRangeEnd() {
+        // Presentation: 0..3 previous GOP, 4..5 leading pictures (decode after 6), 6 the
+        // open keyframe (CRA), 7 a trailing frame.
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            dts: [0.20, 0.24, 0.28, 0.32, 0.48, 0.52, 0.44, 0.56],
+            keyframeFlags: [true, false, false, false, false, false, true, false])
+        let plan = BoundaryReencodeEngine.copySegmentPlan(
+            copyRange: 0..<4, outCutKeyframe: 6, index: index)
+        // Midpoint of the keyframe's DTS (0.44) and its decode predecessor (0.32),
+        // start_time-corrected: (0.32+0.44)/2 - 0.24 = 0.14.
+        #expect(plan.inSegmentTime == nil)
+        #expect(abs((plan.outSegmentTime ?? -1) - 0.14) < 1e-9)
     }
 
     /// A copy that runs to the file end needs no out-cut, and one from the file start
@@ -120,11 +140,13 @@ struct BoundaryReencodeEngineTests {
         let index = FrameIndex(
             pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
             keyframeFlags: [true, false, false, false, true, false, false, true])
-        let whole = BoundaryReencodeEngine.copySegmentPlan(copyRange: 0..<8, index: index)
+        let whole = BoundaryReencodeEngine.copySegmentPlan(
+            copyRange: 0..<8, outCutKeyframe: nil, index: index)
         #expect(whole.inSegmentTime == nil && whole.outSegmentTime == nil)
         #expect(!ExportEngine.needsCut(whole))
 
-        let toEnd = BoundaryReencodeEngine.copySegmentPlan(copyRange: 4..<8, index: index)
+        let toEnd = BoundaryReencodeEngine.copySegmentPlan(
+            copyRange: 4..<8, outCutKeyframe: nil, index: index)
         #expect(toEnd.inSegmentTime != nil && toEnd.outSegmentTime == nil)
         #expect(ExportEngine.wantedSegmentIndex(plan: toEnd) == 1)
     }

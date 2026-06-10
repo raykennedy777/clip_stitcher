@@ -104,18 +104,24 @@ enum BoundaryReencodeEngine {
 
     /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
     /// `SegmentPlan` so its validated segment-muxer cut/remux can stream-copy the span
-    /// bit-exact. A bound that is a clip boundary (frame 0 / the last frame) gets no cut
-    /// at that end — copy from the file start / to the file end — and a span touching
+    /// bit-exact. A bound that is a clip boundary (frame 0 / no out-cut keyframe) gets no
+    /// cut at that end — copy from the file start / to the file end — and a span touching
     /// neither boundary becomes a two-cut plan whose wanted piece is the middle. The cut
     /// times are start_time-corrected DTS midpoints (ADR-0008).
-    static func copySegmentPlan(copyRange: Range<Int>, index: FrameIndex) -> SegmentPlan {
+    ///
+    /// The out-cut anchors at the plan's `outCutKeyframe`, not the range's upper bound:
+    /// on an open-GOP end the range stops `n_leading` frames before the keyframe (#16),
+    /// but it is still the cut before the *keyframe's* DTS that produces it — the
+    /// keyframe's leading pictures land in the discarded segment.
+    static func copySegmentPlan(
+        copyRange: Range<Int>, outCutKeyframe: Int?, index: FrameIndex
+    ) -> SegmentPlan {
         let needsInCut = copyRange.lowerBound > 0
-        let needsOutCut = copyRange.upperBound < index.count
         return SegmentPlan(
             inFrame: copyRange.lowerBound,
             outFrame: copyRange.upperBound,
             inSegmentTime: needsInCut ? index.segmentTime(forCutAt: copyRange.lowerBound) : nil,
-            outSegmentTime: needsOutCut ? index.segmentTime(forCutAt: copyRange.upperBound) : nil
+            outSegmentTime: outCutKeyframe.map { index.segmentTime(forCutAt: $0) }
         )
     }
 
@@ -165,7 +171,8 @@ enum BoundaryReencodeEngine {
                     source: source, range: segment.range, index: index,
                     encoder: encoder, output: piece), onOutTime: onOutTime)
             case .copy:
-                let copyPlan = copySegmentPlan(copyRange: segment.range, index: index)
+                let copyPlan = copySegmentPlan(
+                    copyRange: segment.range, outCutKeyframe: segment.outCutKeyframe, index: index)
                 if ExportEngine.needsCut(copyPlan) {
                     let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
                     try await run(ffmpeg, ExportEngine.cutArguments(
