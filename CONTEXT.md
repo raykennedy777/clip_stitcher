@@ -48,6 +48,13 @@ _Avoid_: timebase probe (a stream has a timebase; an MP4 *track* has a timescale
 Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)
 
+**Cut-only**:
+The separate-mode rendering choice that cuts each clip in its own format with the minimum
+encoding: boundary re-encode in the clip's own codec at cut points, stream copy elsewhere,
+each audio track rebuilt to its own source's codec/rate/layout. The target clip plays no
+role. The alternative rendering choice is conform-to-target (see Conform).
+_Avoid_: accurate cut, lossless cut, passthrough, individual output
+
 **Audio rebuild**:
 Decoding every clip's audio over its kept range and re-encoding it as continuous,
 sample-level output tracks to the target clip's audio codec — done on every export, since
