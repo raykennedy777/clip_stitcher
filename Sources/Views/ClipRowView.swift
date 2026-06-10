@@ -34,7 +34,7 @@ struct ClipRowView: View {
                         .truncationMode(.middle)
                     roleBadge
                 }
-                Text(detailLine)
+                Text(Self.detailLine(for: clip))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 statusLine
@@ -73,7 +73,9 @@ struct ClipRowView: View {
 
     // MARK: - Detail / status
 
-    private var detailLine: String {
+    /// The one-line media summary under the clip name. Pure and nonisolated so the
+    /// audio rules (issue #11: edited track list, not probed streams) are unit-testable.
+    nonisolated static func detailLine(for clip: Clip) -> String {
         guard let v = clip.video else { return "Reading…" }
         var parts: [String] = ["\(v.codec.uppercased()) \(v.width)×\(v.height)"]
         if !v.frameRate.isEmpty, v.frameRate != "0/0" {
@@ -82,12 +84,17 @@ struct ClipRowView: View {
         if let order = v.fieldOrder {
             parts.append(order == "progressive" ? "progressive" : "interlaced (\(order))")
         }
-        if let a = clip.audio {
+        // The edited track list (ADR-0014 slots), not the file's probed streams.
+        let tracks = clip.effectiveAudioTracks
+        if let a = tracks.first ?? nil {
             parts.append("\(a.codec.uppercased()) \(a.channels)ch \(a.sampleRate / 1000)kHz")
-            let trackCount = clip.allAudioTracks.count
-            if trackCount > 1 {
-                parts.append("\(trackCount) audio tracks")
+            if tracks.count > 1 {
+                parts.append("\(tracks.count) audio tracks")
             }
+        } else if !tracks.isEmpty {
+            // First slot's properties are unknown (e.g. unprobed external): no codec
+            // to describe, but the audio must stay visible.
+            parts.append(tracks.count == 1 ? "1 audio track" : "\(tracks.count) audio tracks")
         }
         return parts.joined(separator: " · ")
     }
@@ -131,7 +138,7 @@ struct ClipRowView: View {
 
     // MARK: - Formatting
 
-    private func formattedFrameRate(_ raw: String) -> String {
+    private nonisolated static func formattedFrameRate(_ raw: String) -> String {
         let parts = raw.split(separator: "/")
         guard parts.count == 2, let num = Double(parts[0]), let den = Double(parts[1]), den != 0 else {
             return raw
