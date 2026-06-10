@@ -465,14 +465,16 @@ enum ExportEngine {
     /// Runs the full export: cut every clip's video, then connect or separate per
     /// `settings`, rebuilding the audio track when the output includes audio. `destination`
     /// is the file the user chose; in `.separate` mode each clip is written alongside it as
-    /// `name-1.ext`, `name-2.ext`, … `progress` reports 0…1.
+    /// `name-1.ext`, `name-2.ext`, … `progress` reports 0…1, smoothed within each ffmpeg
+    /// run from its `-progress` out_time (issue #9) and keeping the established 70 % video
+    /// / 30 % audio phase split; it can be called from a background queue mid-run.
     static func export(
         items: [ExportItem],
         settings: OutputSettings,
         audioCodec: String = fallbackAudioCodec,
         tracks: [OutputAudioTrack] = [OutputAudioTrack(sampleRate: 48000, channels: 2)],
         to destination: URL,
-        progress: @escaping (Double) -> Void = { _ in }
+        progress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws {
         guard !items.isEmpty else { throw ExportError.noClips }
         let wantsVideo = settings.type != .audioOnly
@@ -507,17 +509,28 @@ enum ExportEngine {
         var videoPieces: [URL] = []
         if wantsVideo {
             for (i, item) in items.enumerated() {
+                let withinClip: @Sendable (Double) -> Void = { w in
+                    progress(ExportProgress.clipFraction(clipIndex: i, clipCount: items.count, withinClip: w))
+                }
                 if let conform = item.conform {
                     videoPieces.append(try await ConformEngine.produceConformedPiece(
                         ffmpeg, source: item.source, conform: conform,
-                        start: item.audioStart, end: item.audioEnd, work: work, ext: ext, clipIndex: i))
+                        start: item.audioStart, end: item.audioEnd, work: work, ext: ext, clipIndex: i,
+                        onProgress: withinClip))
                 } else {
                     videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
                         ffmpeg, source: item.source, plan: item.segments, index: item.index,
-                        encoder: item.encoder, work: work, ext: ext, clipIndex: i))
+                        encoder: item.encoder, work: work, ext: ext, clipIndex: i,
+                        onProgress: withinClip))
                 }
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }
+        }
+        // The audio rebuild's expected output length: the clips' combined kept duration
+        // (unknown if any clip lacks one — the mux fraction then just holds at 70 %).
+        let totalSpan: Double? = items.reduce(0.0 as Double?) { acc, item in
+            guard let acc, let d = keptDuration(item) else { return nil }
+            return acc + d
         }
 
         // 2. Assemble the output(s).
@@ -535,7 +548,10 @@ enum ExportEngine {
             }
             if wantsAudio {
                 try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, tracks: tracks, audioCodec: audioCodec, output: destination),
-                                    failure: ExportError.concatFailed)
+                                    failure: ExportError.concatFailed) { t in
+                    progress(ExportProgress.muxFraction(
+                        withinMux: ExportProgress.runFraction(outTime: t, expectedSeconds: totalSpan)))
+                }
             } else {
                 try placeFile(videoInput!, at: destination)
             }
@@ -546,7 +562,11 @@ enum ExportEngine {
                 let videoInput = wantsVideo ? videoPieces[i] : nil
                 if wantsAudio {
                     try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], tracks: tracks, audioCodec: audioCodec, output: out),
-                                        failure: ExportError.cutFailed)
+                                        failure: ExportError.cutFailed) { t in
+                        progress(ExportProgress.separateFraction(
+                            clipIndex: i, clipCount: items.count,
+                            withinMux: ExportProgress.runFraction(outTime: t, expectedSeconds: keptDuration(item))))
+                    }
                 } else {
                     try placeFile(videoInput!, at: out)
                 }
@@ -579,9 +599,20 @@ enum ExportEngine {
         try fm.moveItem(at: src, to: dest)
     }
 
-    /// Runs ffmpeg and turns a non-zero exit into `failure(stderr)`.
-    private static func runFFmpeg(_ ffmpeg: URL, _ args: [String], failure: (String) -> ExportError) async throws {
-        let result = try await ProcessRunner.run(ffmpeg, args)
+    /// Runs ffmpeg and turns a non-zero exit into `failure(stderr)`. With `onOutTime` the
+    /// run also streams `-progress pipe:1` (issue #9), reporting each block's out_time
+    /// seconds as it arrives.
+    private static func runFFmpeg(_ ffmpeg: URL, _ args: [String], failure: (String) -> ExportError,
+                                  onOutTime: (@Sendable (Double) -> Void)? = nil) async throws {
+        let result: ProcessResult
+        if let onOutTime {
+            let parser = ProgressParser()
+            result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
+                if let t = parser.feed(chunk) { onOutTime(t) }
+            }
+        } else {
+            result = try await ProcessRunner.run(ffmpeg, args)
+        }
         guard result.status == 0 else {
             throw failure(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
         }

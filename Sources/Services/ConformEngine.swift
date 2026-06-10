@@ -67,42 +67,44 @@ enum ConformEngine {
     /// **self-verifies before it ships** (ADR-0011): re-probed it must match the target's
     /// video spec, and a full `-xerror` decode must pass — otherwise the export fails loudly
     /// naming the offending dimension, never shipping a near-miss. Audio is rebuilt separately.
+    /// `onProgress` reports 0…1 across the re-encode run (issue #9) — ffmpeg's out_time
+    /// against the kept window's duration, which a conform preserves (the fps change
+    /// trades frame count, not length). The closing verify isn't instrumented — the bar
+    /// holds at the clip's top edge while it runs.
     static func produceConformedPiece(
         _ ffmpeg: URL, source: URL, conform: VideoConform,
-        start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int
+        start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int,
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         let piece = work.appendingPathComponent("c\(clipIndex)_conform.\(ext)")
+        // The kept window's duration — an open end reads to the source's end, so it is
+        // probed up front. It drives both the within-run progress mapping and the
+        // frame-count verification target (`nil` skips both rather than guess blind).
+        let windowEnd: Double?
+        if let end {
+            windowEnd = end
+        } else {
+            windowEnd = try await MediaProbe.probe(url: source).duration
+        }
+        let windowDuration = windowEnd.map { $0 - (start ?? 0) }
         let args = conformArguments(source: source, start: start, end: end,
                                     sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
                                     output: piece)
-        let result = try await ProcessRunner.run(ffmpeg, args)
+        let parser = ProgressParser()
+        let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
+            if let t = parser.feed(chunk) {
+                onProgress(ExportProgress.runFraction(outTime: t, expectedSeconds: windowDuration))
+            }
+        }
         guard result.status == 0 else {
             throw ExportError.conformFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
         }
         guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
-        let expected = try await expectedFrames(
-            ffmpeg, source: source, start: start, end: end, target: conform.targetVideo)
+        let expected = windowDuration.flatMap {
+            expectedFrameCount(windowDuration: $0, targetFrameRate: conform.targetVideo.frameRate)
+        }
         try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected)
         return piece
-    }
-
-    /// The frame count a conformed piece should have: the kept window duration × the target
-    /// frame rate. An open end reads to the source's end, so its duration is probed; the
-    /// window is `(end ?? sourceDuration) - (start ?? 0)`. Returns `nil` when the duration
-    /// can't be determined, so `verifyConformed` skips the count check rather than fail blind.
-    private static func expectedFrames(
-        _ ffmpeg: URL, source: URL, start: Double?, end: Double?, target: VideoProperties
-    ) async throws -> Int? {
-        let windowEnd: Double
-        if let end {
-            windowEnd = end
-        } else if let dur = try await MediaProbe.probe(url: source).duration {
-            windowEnd = dur
-        } else {
-            return nil
-        }
-        return expectedFrameCount(windowDuration: windowEnd - (start ?? 0),
-                                  targetFrameRate: target.frameRate)
     }
 
     /// The frame count a conformed piece should have for a kept window of `windowDuration`

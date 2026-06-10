@@ -38,10 +38,24 @@ struct OutputView: View {
                 HStack {
                     Button("Export…") { chooseDestinationAndExport() }
                         .disabled(document.project.clips.isEmpty || isExporting)
-                    if isExporting {
-                        ProgressView(value: exportFraction).frame(maxWidth: 160)
-                    }
                     Spacer()
+                }
+                if isExporting {
+                    // Prominent progress (issue #9): a full-width determinate bar with
+                    // percent and a damped "About X remaining" readout beneath it.
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView(value: exportFraction)
+                        HStack {
+                            Text(exportFraction, format: .percent.precision(.fractionLength(0)))
+                                .monospacedDigit()
+                            Spacer()
+                            if let eta = exportETA {
+                                Text(eta)
+                            }
+                        }
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
                 }
                 exportOutcome
             } footer: {
@@ -55,8 +69,13 @@ struct OutputView: View {
     }
 
     private var exportFraction: Double {
-        if case .running(let p) = document.exportStatus { return p }
+        if case .running(let p, _) = document.exportStatus { return p }
         return 0
+    }
+
+    private var exportETA: String? {
+        if case .running(_, let eta) = document.exportStatus { return eta }
+        return nil
     }
 
     @ViewBuilder

@@ -118,39 +118,66 @@ enum BoundaryReencodeEngine {
     /// and returns it. Each re-encode segment is a frame-selected encode; each copy
     /// segment is M1's segment-muxer cut/remux; the pieces are concatenated in plan order
     /// (a single-segment plan needs no concat). Audio is rebuilt separately, as in M1.
+    ///
+    /// `onProgress` reports 0…1 across the clip's segment runs (issue #9), weighted by
+    /// frame count and smoothed within each run by ffmpeg's out_time against the run's
+    /// expected output: a re-encode produces its segment's span, while a segment-muxer
+    /// cut (and a whole-clip remux) reads/writes the whole source span regardless of the
+    /// wanted piece. The closing concat and verify aren't instrumented — the bar holds
+    /// at the clip's top edge while they run.
     static func produceVideoPiece(
         _ ffmpeg: URL, source: URL, plan: [PlannedSegment], index: FrameIndex,
-        encoder: [String], work: URL, ext: String, clipIndex: Int
+        encoder: [String], work: URL, ext: String, clipIndex: Int,
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
 
+        let segmentFrames = plan.map { $0.range.count }
+        let interval = meanFrameInterval(index)
+        let sourceSpan = interval.flatMap { i in
+            index.pts.last.map { $0 - index.pts[0] + i }
+        }
+
         var pieces: [URL] = []
         for (s, segment) in plan.enumerated() {
+            let expected: Double?
+            switch segment.kind {
+            case .reEncode: expected = interval.map { Double(segment.range.count) * $0 }
+            case .copy: expected = sourceSpan
+            }
+            let onOutTime: @Sendable (Double) -> Void = { t in
+                onProgress(ExportProgress.withinClip(
+                    segmentFrames: segmentFrames, completedSegments: s,
+                    currentRunFraction: ExportProgress.runFraction(outTime: t, expectedSeconds: expected)))
+            }
             let piece: URL
             switch segment.kind {
             case .reEncode:
                 piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_re.\(ext)")
                 try await run(ffmpeg, reencodeSegmentArguments(
                     source: source, range: segment.range, index: index,
-                    encoder: encoder, output: piece))
+                    encoder: encoder, output: piece), onOutTime: onOutTime)
             case .copy:
                 let copyPlan = copySegmentPlan(copyRange: segment.range, index: index)
                 if ExportEngine.needsCut(copyPlan) {
                     let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
                     try await run(ffmpeg, ExportEngine.cutArguments(
-                        source: source, plan: copyPlan, segmentPattern: pattern))
+                        source: source, plan: copyPlan, segmentPattern: pattern), onOutTime: onOutTime)
                     piece = work.appendingPathComponent(String(
                         format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)",
                         ExportEngine.wantedSegmentIndex(plan: copyPlan)))
                 } else {
                     piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp.\(ext)")
-                    try await run(ffmpeg, ExportEngine.remuxArguments(source: source, output: piece))
+                    try await run(ffmpeg, ExportEngine.remuxArguments(source: source, output: piece),
+                                  onOutTime: onOutTime)
                 }
             }
             guard FileManager.default.fileExists(atPath: piece.path) else {
                 throw ExportError.missingSegment
             }
             pieces.append(piece)
+            onProgress(ExportProgress.withinClip(
+                segmentFrames: segmentFrames, completedSegments: s + 1, currentRunFraction: 0))
         }
 
         let result: URL
@@ -225,9 +252,28 @@ enum BoundaryReencodeEngine {
         }
     }
 
-    /// Runs ffmpeg and turns a non-zero exit into a `cutFailed` with its stderr.
-    private static func run(_ ffmpeg: URL, _ args: [String]) async throws {
-        let result = try await ProcessRunner.run(ffmpeg, args)
+    /// The clip's mean frame interval in seconds — exact under the CFR every shipped
+    /// piece is held to (`ExportEngine.timestampDefect`). `nil` below two frames.
+    private static func meanFrameInterval(_ index: FrameIndex) -> Double? {
+        let pts = index.pts
+        guard pts.count >= 2 else { return nil }
+        return (pts[pts.count - 1] - pts[0]) / Double(pts.count - 1)
+    }
+
+    /// Runs ffmpeg and turns a non-zero exit into a `cutFailed` with its stderr. With
+    /// `onOutTime` the run also streams `-progress pipe:1` (issue #9), reporting each
+    /// block's out_time seconds as it arrives.
+    private static func run(_ ffmpeg: URL, _ args: [String],
+                            onOutTime: (@Sendable (Double) -> Void)? = nil) async throws {
+        let result: ProcessResult
+        if let onOutTime {
+            let parser = ProgressParser()
+            result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
+                if let t = parser.feed(chunk) { onOutTime(t) }
+            }
+        } else {
+            result = try await ProcessRunner.run(ffmpeg, args)
+        }
         guard result.status == 0 else {
             throw ExportError.cutFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
         }

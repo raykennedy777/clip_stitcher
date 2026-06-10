@@ -13,8 +13,15 @@ struct ProcessResult: Sendable {
 /// covers the ffprobe queries and frame-to-file extraction used here. For large
 /// output (the frame index dump), pass `stdoutTo` to stream it straight to a file
 /// and avoid filling the pipe.
+///
+/// `onStdout` streams stdout incrementally instead (ffmpeg `-progress pipe:1`,
+/// issue #9): each chunk arrives on a FileHandle queue as the subprocess writes —
+/// the callback must be thread-safe, and around termination chunk *order* isn't
+/// guaranteed either (the tail drain can race a last in-flight read) — and the
+/// result's `stdout` is then empty.
 enum ProcessRunner {
-    static func run(_ executable: URL, _ arguments: [String], stdoutTo fileURL: URL? = nil) async throws -> ProcessResult {
+    static func run(_ executable: URL, _ arguments: [String], stdoutTo fileURL: URL? = nil,
+                    onStdout: (@Sendable (Data) -> Void)? = nil) async throws -> ProcessResult {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -34,6 +41,16 @@ enum ProcessRunner {
             process.standardOutput = pipe
             outHandle = nil
             outPipe = pipe
+            if let onStdout {
+                pipe.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    if chunk.isEmpty {            // EOF — stop observing
+                        handle.readabilityHandler = nil
+                    } else {
+                        onStdout(chunk)
+                    }
+                }
+            }
         }
 
         // Terminate the subprocess if the awaiting task is cancelled (e.g. a newer
@@ -42,7 +59,17 @@ enum ProcessRunner {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProcessResult, Error>) in
                 process.terminationHandler = { proc in
                     let err = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let out = outPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+                    var out = Data()
+                    if let outPipe {
+                        if let onStdout {
+                            // Streaming mode: hand any unread tail to the callback.
+                            outPipe.fileHandleForReading.readabilityHandler = nil
+                            let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
+                            if !rest.isEmpty { onStdout(rest) }
+                        } else {
+                            out = outPipe.fileHandleForReading.readDataToEndOfFile()
+                        }
+                    }
                     try? outHandle?.close()
                     continuation.resume(returning: ProcessResult(stdout: out, stderr: err, status: proc.terminationStatus))
                 }

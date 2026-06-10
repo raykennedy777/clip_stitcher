@@ -10,10 +10,12 @@ enum ImportState: Equatable {
     case failed(String)
 }
 
-/// Export progress and outcome. Runtime-only — not persisted.
+/// Export progress and outcome. Runtime-only — not persisted. While running, `eta`
+/// is the damped "About X remaining" label (issue #9), `nil` until there's enough
+/// signal to estimate.
 enum ExportStatus: Equatable {
     case idle
-    case running(Double)
+    case running(fraction: Double, eta: String?)
     case done(warnings: [String])
     case failed(String)
 }
@@ -32,6 +34,9 @@ final class ProjectDocument: ReferenceFileDocument {
     @Published var importStates: [Clip.ID: ImportState] = [:]
     /// Runtime-only export progress/outcome, surfaced by the Output view.
     @Published var exportStatus: ExportStatus = .idle
+    /// ETA bookkeeping for the running export (issue #9), reset on each `export`.
+    private var exportStartedAt = Date()
+    private var exportETA = ExportProgress.ETAEstimator()
 
     /// Set by the UI from the environment so mutations register undo and mark the
     /// document dirty. May be nil very early in a window's lifetime.
@@ -395,7 +400,9 @@ final class ProjectDocument: ReferenceFileDocument {
     /// the Output view. No snapping, so there are no "cut snapped" warnings.
     @MainActor
     func export(to destination: URL) async {
-        exportStatus = .running(0)
+        exportStatus = .running(fraction: 0, eta: nil)
+        exportStartedAt = Date()
+        exportETA = ExportProgress.ETAEstimator()
         do {
             var items: [ExportItem] = []
             var warnings: [String] = []
@@ -495,8 +502,15 @@ final class ProjectDocument: ReferenceFileDocument {
             if project.output.type == .audioOnly { tracks = Array(tracks.prefix(1)) }
             try await ExportEngine.export(items: items, settings: project.output,
                                           audioCodec: audio.encoder, tracks: tracks, to: destination) { p in
+                // Progress arrives mid-run from a background queue; hop to the main
+                // actor and keep the bar monotonic (within-run smoothing and the
+                // per-phase steps can interleave a hair out of order).
                 Task { @MainActor in
-                    if case .running = self.exportStatus { self.exportStatus = .running(p) }
+                    guard case .running(let shown, _) = self.exportStatus, p >= shown else { return }
+                    let remaining = self.exportETA.update(
+                        fraction: p, elapsed: Date().timeIntervalSince(self.exportStartedAt))
+                    self.exportStatus = .running(
+                        fraction: p, eta: ExportProgress.etaLabel(remaining: remaining, fraction: p))
                 }
             }
             exportStatus = .done(warnings: warnings)
