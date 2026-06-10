@@ -87,8 +87,16 @@ enum BoundaryReencodeEngine {
     /// the CPU for many extra minutes after a 28 s cut, with the encoder's lookahead
     /// not even flushing until that pointless decode hit EOF (test_sprint diagnosis).
     /// De-risked on all three formats: identical frames, the run just stops on time.
+    ///
+    /// An MP4 piece also pins `-video_track_timescale` to the source's (issue #18): the
+    /// concat demuxer reads every listed file in one timebase, and the encoder-default
+    /// 1/12800 track otherwise lands mis-scaled next to the source-inherited copy piece,
+    /// collapsing the re-encode's frames when the mp4 muxer "repairs" the resulting
+    /// non-monotonic DTS. MKV/TS impose a fixed per-container timebase, so the flag is
+    /// only emitted for an mp4 output; an unknown timescale omits it rather than guessing.
     static func reencodeSegmentArguments(
-        source: URL, range: Range<Int>, index: FrameIndex, encoder: [String], output: URL
+        source: URL, range: Range<Int>, index: FrameIndex, encoder: [String], output: URL,
+        trackTimescale: Int? = nil
     ) -> [String] {
         let anchor = index.keyframeIndex(atOrBefore: range.lowerBound)
         let startOffset = index.pts.first ?? 0
@@ -98,8 +106,34 @@ enum BoundaryReencodeEngine {
         var args = ["-v", "error", "-ss", ExportEngine.timeString(seek), "-i", source.path]
         args += ["-vf", "select='between(n\\,\(relStart)\\,\(relEnd))',setpts=PTS-STARTPTS"]
         args += encoder
+        if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
+            args += ["-video_track_timescale", String(trackTimescale)]
+        }
         args += ["-frames:v", String(range.count), "-an", output.path]
         return args
+    }
+
+    /// ffmpeg args producing the **timescale probe piece** (issue #18): one stream-copied
+    /// video packet muxed into MP4, whose track timescale is then read back as the value
+    /// the clip's real copy pieces will carry. Measured, never derived from the source:
+    /// the mp4 muxer auto-raises an MKV's coarse 1/1000 stream timebase to 1/16000 on
+    /// copy (verified in the shell), so the source's own probed timebase is not the answer.
+    static func timescaleProbeArguments(source: URL, output: URL) -> [String] {
+        ["-v", "error", "-i", source.path, "-map", "0:v:0",
+         "-c", "copy", "-frames:v", "1", output.path]
+    }
+
+    /// The MP4 track timescale a re-encoded piece must pin (issue #18), from the timescale
+    /// probe piece's `time_base` ("1/16000" ⇒ 16000; ffprobe's csv writer leaves a trailing
+    /// comma on MPEG-2 streams, so commas are stripped). Only a unit-numerator timebase
+    /// maps to a track timescale; anything else returns `nil` and the flag is omitted
+    /// rather than guessed (the export then behaves exactly as before #18).
+    static func trackTimescale(timeBase: String?) -> Int? {
+        let cleaned = (timeBase ?? "").trimmingCharacters(in: CharacterSet(charactersIn: ", \n"))
+        let parts = cleaned.split(separator: "/")
+        guard parts.count == 2, parts[0] == "1",
+              let den = Int(parts[1]), den > 0 else { return nil }
+        return den
     }
 
     /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
@@ -145,6 +179,19 @@ enum BoundaryReencodeEngine {
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
 
+        // An MP4 plan mixing copy and re-encode pieces must mux them in one track
+        // timescale (issue #18): measure what the copy pieces will inherit via the
+        // one-packet timescale probe, and pin the re-encodes to it. An unreadable
+        // probe leaves the pin off — the verify gates still backstop the seam.
+        var pieceTimescale: Int? = nil
+        if ext.lowercased() == "mp4",
+           plan.contains(where: { $0.kind == .copy }),
+           plan.contains(where: { $0.kind == .reEncode }) {
+            let probe = work.appendingPathComponent("c\(clipIndex)_tsprobe.mp4")
+            try await run(ffmpeg, timescaleProbeArguments(source: source, output: probe))
+            pieceTimescale = trackTimescale(timeBase: await MediaProbe.videoTimeBase(url: probe))
+        }
+
         let segmentFrames = plan.map { $0.range.count }
         let interval = meanFrameInterval(index)
         let sourceSpan = interval.flatMap { i in
@@ -169,7 +216,8 @@ enum BoundaryReencodeEngine {
                 piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_re.\(ext)")
                 try await run(ffmpeg, reencodeSegmentArguments(
                     source: source, range: segment.range, index: index,
-                    encoder: encoder, output: piece), onOutTime: onOutTime)
+                    encoder: encoder, output: piece, trackTimescale: pieceTimescale),
+                    onOutTime: onOutTime)
             case .copy:
                 let copyPlan = copySegmentPlan(
                     copyRange: segment.range, outCutKeyframe: segment.outCutKeyframe, index: index)
