@@ -27,6 +27,28 @@ final class CutEditorModel: ObservableObject {
     private var playTask: Task<Void, Never>?
     private var sceneScanTask: Task<Void, Never>?
 
+    /// Audio playback of the monitored track (issue #7). While the player runs it
+    /// is the master clock: the play loop derives the frame on screen from elapsed
+    /// audio time, so decode pacing can't drift into lip-sync error.
+    private var audioPlayer: AudioStreamPlayer?
+    /// Source presentation time at the audio clock's zero (where playback started
+    /// or last seeked); frame on screen = frame at `audioClockBase + elapsed`.
+    private var audioClockBase: Double = 0
+    /// True when this play session runs without an audio clock — no monitored
+    /// source, or the stream never produced samples (e.g. playing from beyond the
+    /// audio's end) — and the loop paces by sleep like the pre-audio editor.
+    private var audioFallback = false
+    /// How long the play loop waits for the first samples before falling back.
+    /// Priming measures ~50 ms; a stream with no data at all (EOF right away)
+    /// never primes, and playback shouldn't stall forever.
+    private var audioPrimeDeadline = Date.distantPast
+    /// The container's start_time — input `-ss` is measured from it (ADR-0013
+    /// trap), so audio seeks subtract it from the frame's pts.
+    private var containerStartTime: Double = 0
+    /// The frame this play session started (or last re-based) from, deciding
+    /// whether the out point stops it — see `playbackEnd`.
+    private var playbackOrigin = 0
+
     /// Display-corrected preview dimensions (SAR applied), resolved once at load and
     /// reused by the decoder and the fallback extractor so both render alike.
     private var previewW = 0
@@ -75,6 +97,7 @@ final class CutEditorModel: ObservableObject {
                 url: url, index: built, width: w, height: h,
                 useHardware: true, windowSize: cacheCap
             )
+            containerStartTime = await MediaProbe.containerStartTime(url: url)
             isIndexing = false
             // Resume where this clip's editor was last closed; a never-opened clip
             // starts at its in point (frame 0 when none is set).
@@ -92,6 +115,15 @@ final class CutEditorModel: ObservableObject {
         let previous = currentFrame
         let clamped = min(max(0, frame), max(0, index.count - 1))
         currentFrame = clamped
+
+        // A seek during playback moves the audio with it: restart the stream at
+        // the new playhead (the play loop re-derives frames from the new base)
+        // and re-base the session, so scrubbing past the out point mid-play
+        // continues to the clip end instead of stopping on the next tick.
+        if isPlaying {
+            playbackOrigin = clamped
+            startAudio(atFrame: clamped)
+        }
 
         // Instant path: a recently-decoded frame (e.g. stepping back over the cache).
         if let cached = cache[clamped] {
@@ -239,7 +271,8 @@ final class CutEditorModel: ObservableObject {
         onClose?()
     }
 
-    // MARK: - Playback (best-effort, no audio in v1 — ADR-0003)
+    // MARK: - Playback (audio-clocked when a monitored track plays — issue #7;
+    // silent open-loop pacing otherwise, as shipped under ADR-0003)
 
     func togglePlay() { isPlaying ? stopPlayback() : play() }
 
@@ -250,13 +283,44 @@ final class CutEditorModel: ObservableObject {
         decodeTask = nil
         pendingFrame = nil
         isPlaying = true
-        let frameDuration = UInt64(1_000_000_000 / max(1.0, fps))
+        playbackOrigin = currentFrame
+        startAudio(atFrame: currentFrame)
+        let fallbackFrameDuration = UInt64(1_000_000_000 / max(1.0, fps))
         playTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while self.isPlaying && !Task.isCancelled {
-                let end = self.outPoint ?? (index.count - 1)
-                if self.currentFrame >= end { self.isPlaying = false; break }
-                let next = self.currentFrame + 1
+                let end = Self.playbackEnd(
+                    outPoint: self.outPoint, origin: self.playbackOrigin,
+                    lastFrame: index.count - 1)
+                if self.currentFrame >= end { self.stopPlayback(); break }
+
+                // Pick the next frame to show. With an audio clock running, it is
+                // whatever frame the audio has reached — ahead of +1 when decode
+                // lagged (frames are skipped to hold sync), or not yet due (sleep
+                // until the next frame's presentation time).
+                var next = self.currentFrame + 1
+                if !self.audioFallback {
+                    if let elapsed = self.audioPlayer?.elapsedSeconds {
+                        let target = index.frameIndex(atOrBeforeTime: self.audioClockBase + elapsed)
+                        if target <= self.currentFrame {
+                            let nextPts = index.pts[min(self.currentFrame + 1, end)]
+                            let wait = (nextPts - self.audioClockBase) - elapsed
+                            try? await Task.sleep(nanoseconds: UInt64(max(0.002, wait) * 1_000_000_000))
+                            continue
+                        }
+                        next = min(target, end)
+                    } else if Date() < self.audioPrimeDeadline {
+                        // Audio spawned but hasn't produced its first samples yet.
+                        try? await Task.sleep(nanoseconds: 10_000_000)
+                        continue
+                    } else {
+                        // No samples in time (e.g. playing from beyond the audio's
+                        // end) — this session paces by sleep instead of stalling.
+                        self.audioFallback = true
+                        self.audioPlayer?.stop()
+                    }
+                }
+
                 self.currentFrame = next
                 let frame: NSImage?
                 if let cached = self.cache[next] {
@@ -271,7 +335,9 @@ final class CutEditorModel: ObservableObject {
                     self.image = frame
                     self.cacheInsert(next, frame)
                 }
-                try? await Task.sleep(nanoseconds: frameDuration)
+                if self.audioFallback {
+                    try? await Task.sleep(nanoseconds: fallbackFrameDuration)
+                }
             }
         }
     }
@@ -280,6 +346,69 @@ final class CutEditorModel: ObservableObject {
         isPlaying = false
         playTask?.cancel()
         playTask = nil
+        audioPlayer?.stop()
+    }
+
+    /// Where a play session stops: the out point when the session began before
+    /// it (playback "previews the selection"), else the clip's last frame — so
+    /// pressing Play with the playhead at or past the out point plays the rest
+    /// of the clip instead of stopping on the first tick (a dead-feeling button;
+    /// QA finding on issue #7's verification pass). Recomputed every tick because
+    /// the out point can be re-marked mid-play.
+    nonisolated static func playbackEnd(outPoint: Int?, origin: Int, lastFrame: Int) -> Int {
+        guard let outPoint, outPoint > origin else { return lastFrame }
+        return min(outPoint, lastFrame)
+    }
+
+    /// Called when the Audio dropdown changes: a switch mid-play restarts the
+    /// stream on the newly monitored source at the playhead.
+    func monitoredAudioTrackChanged() {
+        if isPlaying { startAudio(atFrame: currentFrame) }
+    }
+
+    /// Starts (or restarts) the monitored track's audio at `frame`, making the
+    /// audio the playback clock. With no playable source the session is marked
+    /// for sleep-paced fallback instead.
+    private func startAudio(atFrame frame: Int) {
+        guard let index, frame < index.count else { return }
+        guard let source = monitoredAudioSource() else {
+            audioFallback = true
+            audioPlayer?.stop()
+            return
+        }
+        let player = audioPlayer ?? AudioStreamPlayer()
+        audioPlayer = player
+        audioClockBase = index.pts[frame]
+        audioFallback = false
+        audioPrimeDeadline = Date().addingTimeInterval(0.3)
+        player.start(
+            url: source.url, streamIndex: source.streamIndex,
+            seekSeconds: AudioStreamPlayer.seekSeconds(
+                sourceTime: index.pts[frame], containerStartTime: containerStartTime))
+    }
+
+    /// The monitored audio slot resolved to a playable source: the clip's own file
+    /// and stream, or an external file's chosen stream (aligned file start =
+    /// video-file start, ADR-0014 — the same seek offset applies). Reads the live
+    /// clip — the dropdown and settings sheet write to the document, and this
+    /// model's `clip` is a snapshot from when the window opened. nil when there is
+    /// nothing playable: no slots, a slot past the clip's own streams (silence),
+    /// or an external bookmark that no longer resolves.
+    private func monitoredAudioSource() -> (url: URL, streamIndex: Int)? {
+        let live = document?.project.clips.first { $0.id == clip.id } ?? clip
+        let selections = live.resolvedAudioSelections
+        guard !selections.isEmpty else { return nil }
+        let slot = min(max(0, live.monitoredAudioTrack ?? 0), selections.count - 1)
+        switch selections[slot] {
+        case .stream(let i):
+            guard i < live.allAudioTracks.count else { return nil }
+            return (url, i)
+        case .external(let bookmark, _, let streamIndex, _, _):
+            var stale = false
+            guard let extURL = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale),
+                  FileManager.default.fileExists(atPath: extURL.path) else { return nil }
+            return (extURL, streamIndex)
+        }
     }
 
     /// Stop playback and tear down the decoder process. Called on OK/Cancel and on
@@ -299,6 +428,8 @@ final class CutEditorModel: ObservableObject {
         isSceneScanning = false
         decoder?.stop()
         decoder = nil
+        audioPlayer?.stop() // kills the audio ffmpeg process (same no-orphans rule)
+        audioPlayer = nil
     }
 
     // MARK: - Helpers

@@ -79,15 +79,19 @@ struct CutEditorView: View {
         }
     }
 
-    /// Which of the clip's audio tracks to monitor (ADR-0014). The choice is stored
-    /// now and becomes audible when the cut-editor gains audio playback; tracks are
-    /// named from container metadata with the "Track N" fallback.
+    /// Which of the clip's audio tracks to monitor (ADR-0014) — the track heard
+    /// during playback (issue #7; switching mid-play restarts the stream on the
+    /// new source). Tracks are named from container metadata with the "Track N"
+    /// fallback.
     @ViewBuilder
     private var audioTrackPicker: some View {
         if let clip = liveClip, !clip.resolvedAudioSelections.isEmpty {
             Picker("Audio:", selection: Binding(
                 get: { min(clip.monitoredAudioTrack ?? 0, clip.resolvedAudioSelections.count - 1) },
-                set: { document.setMonitoredAudioTrack(id: clip.id, slot: $0) }
+                set: {
+                    document.setMonitoredAudioTrack(id: clip.id, slot: $0)
+                    model.monitoredAudioTrackChanged()
+                }
             )) {
                 ForEach(clip.resolvedAudioSelections.indices, id: \.self) { slot in
                     Text(clip.audioTrackName(slot)).tag(slot)
@@ -95,7 +99,7 @@ struct CutEditorView: View {
             }
             .pickerStyle(.menu)
             .fixedSize()
-            .help("The track you'd hear in this editor — selection is saved, audio playback arrives later")
+            .help("The track heard during playback — the choice is saved with the project")
         }
     }
 

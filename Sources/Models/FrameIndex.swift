@@ -49,6 +49,21 @@ struct FrameIndex {
         return nil
     }
 
+    /// The frame on screen at source presentation time `t`: the last frame whose
+    /// pts is at or before `t`, clamped to the first frame for times before the
+    /// stream starts. Binary search — the audio-clocked playback loop calls this
+    /// every tick (issue #7).
+    func frameIndex(atOrBeforeTime t: Double) -> Int {
+        guard let first = pts.first, t >= first else { return 0 }
+        var low = 0
+        var high = pts.count - 1
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if pts[mid] <= t { low = mid } else { high = mid - 1 }
+        }
+        return low
+    }
+
     /// The `-segment_times` value that makes the ffmpeg segment muxer cut exactly at
     /// frame `n`. The muxer cuts at the first keyframe whose **decode** time is `>=` the
     /// requested time, so the value is the midpoint between frame `n`'s DTS and the DTS

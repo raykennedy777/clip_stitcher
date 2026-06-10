@@ -60,6 +60,23 @@ enum MediaProbe {
         let duration = decoded.format?.duration.flatMap(Double.init)
         return Result(video: video, audio: audioTracks.first, audioTracks: audioTracks, duration: duration)
     }
+
+    /// The container-level start_time in seconds — the offset ffmpeg measures input
+    /// `-ss` from (the ADR-0013 trap; audio playback subtracts it to seek by source
+    /// presentation time). 0 when the demuxer reports none ("N/A") or the probe fails;
+    /// that's also the correct value for such files.
+    static func containerStartTime(url: URL) async -> Double {
+        guard let ffprobe = try? FFTools.ffprobeURL(),
+              let output = try? await ProcessRunner.run(ffprobe, [
+                  "-v", "error",
+                  "-show_entries", "format=start_time",
+                  "-of", "csv=p=0",
+                  url.path,
+              ]),
+              output.status == 0,
+              let text = String(data: output.stdout, encoding: .utf8) else { return 0 }
+        return Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
 }
 
 // MARK: - ffprobe JSON shapes
