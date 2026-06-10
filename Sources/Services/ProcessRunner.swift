@@ -54,8 +54,9 @@ enum ProcessRunner {
         }
 
         // Terminate the subprocess if the awaiting task is cancelled (e.g. a newer
-        // frame seek supersedes this one) so ffmpeg processes don't pile up.
-        return try await withTaskCancellationHandler {
+        // frame seek supersedes this one, or the user cancels an export) so ffmpeg
+        // processes don't pile up.
+        let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProcessResult, Error>) in
                 process.terminationHandler = { proc in
                     let err = errPipe.fileHandleForReading.readDataToEndOfFile()
@@ -82,5 +83,10 @@ enum ProcessRunner {
         } onCancel: {
             if process.isRunning { process.terminate() }
         }
+        // A cancel-caused termination must surface as cancellation, not as the tool
+        // failing — the exit status after terminate() is indistinguishable from a real
+        // error, so the discrimination happens here (issue #32).
+        try Task.checkCancellation()
+        return result
     }
 }

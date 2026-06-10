@@ -3,6 +3,7 @@ import AppKit
 
 struct OutputView: View {
     @ObservedObject var document: ProjectDocument
+    @State private var showCancelAlert = false
 
     private var output: Binding<OutputSettings> {
         Binding(
@@ -50,8 +51,14 @@ struct OutputView: View {
                 if isExporting {
                     // Prominent progress (issue #9): a full-width determinate bar with
                     // percent and a damped "About X remaining" readout beneath it.
+                    // The ellipsis on Cancel Export… is deliberate — the command asks
+                    // for confirmation first (issue #32).
                     VStack(alignment: .leading, spacing: 4) {
-                        ProgressView(value: exportFraction)
+                        HStack(spacing: 12) {
+                            ProgressView(value: exportFraction)
+                            Button("Cancel Export…") { showCancelAlert = true }
+                                .disabled(document.exportCancelRequested)
+                        }
                         HStack {
                             Text(exportFraction, format: .percent.precision(.fractionLength(0)))
                                 .monospacedDigit()
@@ -73,6 +80,20 @@ struct OutputView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Output")
+        // The export keeps running while the alert is up; Continue Exporting is the
+        // default (Return), the destructive confirm actually cancels (issue #32).
+        .alert("Cancel the export?", isPresented: $showCancelAlert) {
+            Button("Cancel Export", role: .destructive) { document.cancelExport() }
+            Button("Continue Exporting", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+        } message: {
+            Text("Progress so far will be discarded.")
+        }
+        // If the export finishes (or fails) while the alert is still up, there is
+        // nothing left to cancel — dismiss it and let the outcome show.
+        .onChange(of: isExporting) { _, running in
+            if !running { showCancelAlert = false }
+        }
     }
 
     private var exportFraction: Double {
@@ -104,6 +125,11 @@ struct OutputView: View {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
+        case .cancelled(let detail):
+            // Neutral, not red — nothing went wrong (issue #32).
+            Label(detail.map { "Export cancelled — \($0)" } ?? "Export cancelled.",
+                  systemImage: "xmark.circle")
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -122,7 +148,7 @@ struct OutputView: View {
             panel.allowsMultipleSelection = false
 
             guard panel.runModal() == .OK, let url = panel.url else { return }
-            Task { await document.export(to: url) }
+            document.startExport(to: url)
             return
         }
         // An audio-only export is an audio-elementary file named for the (target-derived)
@@ -143,7 +169,7 @@ struct OutputView: View {
 
         guard panel.runModal() == .OK, var url = panel.url else { return }
         if url.pathExtension.lowercased() != ext { url.appendPathExtension(ext) }
-        Task { await document.export(to: url) }
+        document.startExport(to: url)
     }
 
     /// A starting filename: the first clip's name without its extension, else a default.

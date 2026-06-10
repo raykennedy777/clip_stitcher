@@ -18,6 +18,10 @@ enum ExportStatus: Equatable {
     case running(fraction: Double, eta: String?)
     case done(warnings: [String])
     case failed(String)
+    /// The user cancelled (issue #32) — neutral, nothing went wrong. `detail` reports
+    /// kept `.separate` files ("3 of 5 files were finished."), nil when there's
+    /// nothing to add.
+    case cancelled(detail: String?)
 }
 
 /// The document backing one VidConform project. A reference type so async import
@@ -34,6 +38,12 @@ final class ProjectDocument: ReferenceFileDocument {
     @Published var importStates: [Clip.ID: ImportState] = [:]
     /// Runtime-only export progress/outcome, surfaced by the Output view.
     @Published var exportStatus: ExportStatus = .idle
+    /// True once the user confirmed a cancel (issue #32) — disables the cancel button
+    /// while the asynchronous termination plays out. Reset when an export starts.
+    @Published var exportCancelRequested = false
+    /// The running export, kept so "Cancel Export…" can cancel it (issue #32) —
+    /// `ProcessRunner` terminates the live ffmpeg on Task cancellation.
+    private var exportTask: Task<Void, Never>? = nil
     /// ETA bookkeeping for the running export (issue #9), reset on each `export`.
     private var exportStartedAt = Date()
     private var exportETA = ExportProgress.ETAEstimator()
@@ -424,9 +434,34 @@ final class ProjectDocument: ReferenceFileDocument {
     /// only the partial-GOP head/tail edges are re-encoded — with the audio rebuilt so it
     /// stays aligned at the joins. Progress and outcome are published in `exportStatus` for
     /// the Output view. No snapping, so there are no "cut snapped" warnings.
+    /// Starts an export and keeps its Task so "Cancel Export…" can cancel it
+    /// (issue #32). The UI goes through this, not `export(to:)` directly.
+    @MainActor
+    func startExport(to destination: URL) {
+        exportTask = Task { await export(to: destination) }
+    }
+
+    /// Cancels the running export: `ProcessRunner` terminates the live ffmpeg, the
+    /// engine discards the partial file (keeping finished separate-mode files), and
+    /// the status lands on `.cancelled` — never `.failed` (issue #32).
+    @MainActor
+    func cancelExport() {
+        exportCancelRequested = true
+        exportTask?.cancel()
+    }
+
+    /// The cancelled-status detail line: in separate mode, files finished before the
+    /// cancel stay on disk and the user should know how many (issue #32). Nothing to
+    /// add when none were (or it's connect mode's single file: total 1).
+    nonisolated static func cancelDetail(finished: Int, total: Int) -> String? {
+        guard finished > 0, total > 1 else { return nil }
+        return "\(finished) of \(total) files were finished."
+    }
+
     @MainActor
     func export(to destination: URL) async {
         exportStatus = .running(fraction: 0, eta: nil)
+        exportCancelRequested = false
         exportStartedAt = Date()
         exportETA = ExportProgress.ETAEstimator()
         do {
@@ -528,6 +563,12 @@ final class ProjectDocument: ReferenceFileDocument {
                 }
             }
             exportStatus = .done(warnings: warnings)
+        } catch ExportError.cancelled(let finished, let total) {
+            exportStatus = .cancelled(detail: Self.cancelDetail(finished: finished, total: total))
+        } catch is CancellationError {
+            // Cancelled before the engine took over (probe/index phase) — same outcome,
+            // no files were being written yet.
+            exportStatus = .cancelled(detail: nil)
         } catch {
             exportStatus = .failed(error.localizedDescription)
         }

@@ -49,6 +49,9 @@ enum ExportError: LocalizedError {
     case concatFailed(String)
     case missingSegment
     case verificationFailed(String)
+    /// The user cancelled (issue #32) — not a failure. Carries how many `.separate`
+    /// files had already finished (and stay on disk) so the status line can say so.
+    case cancelled(finished: Int, total: Int)
 
     var errorDescription: String? {
         switch self {
@@ -61,6 +64,7 @@ enum ExportError: LocalizedError {
         case .concatFailed(let d): return "Could not join the clips.\n\(d)"
         case .missingSegment: return "The expected output segment was not produced."
         case .verificationFailed(let d): return "The cut did not verify and was not saved.\n\(d)"
+        case .cancelled: return "The export was cancelled."
         }
     }
 }
@@ -419,6 +423,13 @@ enum ExportEngine {
 
         let wantsAudio = settings.type != .videoOnly
 
+        // A cancel (issue #32) discards the file being written but keeps `.separate`
+        // files that already finished — they are valid exports. Both are tracked here
+        // so the catch below can act on them; the temp work dir is cleaned by the
+        // defer like on any exit.
+        var currentOutput: URL? = nil
+        var finishedFiles = 0
+        do {
         // 1. Produce each clip's video piece per its M2 plan — re-encode the head/tail
         //    edges, stream-copy the keyframe-bounded middle, concat (ADR-0009). The bulk
         //    of the work, and the only part that re-encodes.
@@ -464,6 +475,7 @@ enum ExportEngine {
                     videoInput = joined
                 }
             }
+            currentOutput = destination
             if wantsAudio {
                 try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, tracks: tracks, audioCodec: audioCodec, output: destination),
                                     failure: ExportError.concatFailed) { t in
@@ -488,6 +500,7 @@ enum ExportEngine {
                 let out = destination.appendingPathComponent(names[i])
                 let videoInput = wantsVideo ? videoPieces[i] : nil
                 let itemTracks = item.ownTracks ?? tracks
+                currentOutput = out
                 if wantsAudio {
                     try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: [item], tracks: itemTracks, audioCodec: audioCodec, output: out),
                                         failure: ExportError.cutFailed) { t in
@@ -498,8 +511,17 @@ enum ExportEngine {
                 } else {
                     try placeFile(videoInput!, at: out)
                 }
+                currentOutput = nil
+                finishedFiles = i + 1
                 progress(0.7 + 0.3 * Double(i + 1) / Double(items.count))
             }
+        }
+        } catch is CancellationError {
+            // The mid-write file is partial — discard it. Finished separate files stay.
+            if let currentOutput { try? FileManager.default.removeItem(at: currentOutput) }
+            throw ExportError.cancelled(
+                finished: finishedFiles,
+                total: settings.mode == .separate ? items.count : 1)
         }
         progress(1.0)
     }
