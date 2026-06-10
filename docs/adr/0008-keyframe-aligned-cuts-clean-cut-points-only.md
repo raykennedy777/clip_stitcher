@@ -83,5 +83,10 @@ on its own.
   presentation-time span — no frame-rate estimate, so the demuxer cannot truncate), which overrides
   the container duration and closes the gap. Container-agnostic: on a `start_time` ≈ 0 source the
   directive equals the real span and is a no-op (verified). See `ExportEngine.concatListContents` /
-  `BoundaryReencodeEngine.segmentSpans`. *(The cross-clip concat carries the same risk for a
-  single-segment whole-clip-keep piece; tracked separately as a follow-up — it is not yet fixed.)*
+  `BoundaryReencodeEngine.segmentSpans`. *(The cross-clip concat carried the same risk for a
+  single-copy-segment piece that keeps the source's `start_time`; fixed the same way via
+  `ExportEngine.clipSpans` — issue #6. The cross-clip de-risk narrowed the biting conditions: a
+  whole-clip plain remux normalises `start_time` to 0 in every container, so only the segment-muxer
+  piece with no head cut keeps it; and the inflated-duration gap showed in **MKV only** — the MP4
+  pieces' duration matched the true span and the directive was a verified no-op there, unlike the
+  within-clip observation above.)*

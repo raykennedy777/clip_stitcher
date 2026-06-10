@@ -243,6 +243,45 @@ enum ExportEngine {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    /// The timeline span (seconds) each clip's video piece should occupy in the **cross-clip**
+    /// concat — the `duration` directives fed to `concatListContents`, closing the same
+    /// start_time seam gap `BoundaryReencodeEngine.segmentSpans` closes inside a clip
+    /// (issue #6). The biting piece is a single-copy-segment clip trimmed only at its tail
+    /// (segment 0 of the muxer cut keeps the source's non-zero start_time; an MKV piece's
+    /// container duration then includes that leading offset and the next clip lands late).
+    /// De-risked in the shell on H.264/HEVC/MPEG-2: the cross-clip gap shows in MKV only
+    /// (unlike the within-clip case, the MP4 piece's duration matched its true span —
+    /// noted in ADR-0008), and the directive closes it; on MP4/TS pieces — and every
+    /// internally-normalized piece — the directive equals the real span and is a no-op.
+    ///
+    /// A smart-rendered clip's span comes from its plan: the segments tile the kept range
+    /// `[lo, hi)` contiguously, so the span is `pts[hi] - pts[lo]` — exact when the clip is
+    /// trimmed (`hi` is a real frame). When it runs to the clip end (`hi == count`,
+    /// `pts[hi]` out of bounds) the last frame's slot is estimated from the mean frame
+    /// interval — safe because no piece ships with non-uniform spacing anyway (the
+    /// `timestampDefect` self-check in `verifyPiece`). A conformed clip re-encodes its kept window
+    /// to the target spec preserving duration, so its span is the kept duration the app
+    /// supplies. The last clip offsets nothing → `nil`; an uncomputable span degrades to
+    /// `nil` (no directive — today's behavior) rather than guessing.
+    static func clipSpans(items: [ExportItem]) -> [Double?] {
+        items.enumerated().map { i, item in
+            i < items.count - 1 ? clipSpan(item) : nil
+        }
+    }
+
+    /// One clip's kept video span in seconds (see `clipSpans`).
+    static func clipSpan(_ item: ExportItem) -> Double? {
+        if item.conform != nil { return keptDuration(item) }
+        guard let first = item.segments.first, let last = item.segments.last else { return nil }
+        let pts = item.index.pts
+        let lo = first.range.lowerBound, hi = last.range.upperBound
+        guard lo < pts.count, hi <= pts.count else { return nil }
+        if hi < pts.count { return pts[hi] - pts[lo] }
+        guard pts.count >= 2 else { return nil }
+        let interval = (pts[pts.count - 1] - pts[0]) / Double(pts.count - 1)
+        return pts[pts.count - 1] - pts[lo] + interval
+    }
+
     /// Inspects a produced piece's presentation timestamps (sorted ascending) for the two
     /// timestamp defects this engine has shipped: a **duplicate** PTS (two frames sharing a
     /// timestamp — the B-pyramid/MKV stream-copy collapse, ADR-0011) and a **seam gap** (a
@@ -490,7 +529,7 @@ enum ExportEngine {
                     videoInput = videoPieces[0]
                 } else {
                     let joined = work.appendingPathComponent("joined_video.\(ext)")
-                    try await concatVideo(ffmpeg, pieces: videoPieces, to: joined, work: work)
+                    try await concatVideo(ffmpeg, pieces: videoPieces, items: items, to: joined, work: work)
                     videoInput = joined
                 }
             }
@@ -517,9 +556,10 @@ enum ExportEngine {
         progress(1.0)
     }
 
-    private static func concatVideo(_ ffmpeg: URL, pieces: [URL], to output: URL, work: URL) async throws {
+    private static func concatVideo(_ ffmpeg: URL, pieces: [URL], items: [ExportItem], to output: URL, work: URL) async throws {
         let listFile = work.appendingPathComponent("concat-\(UUID().uuidString).txt")
-        try concatListContents(pieces: pieces).write(to: listFile, atomically: true, encoding: .utf8)
+        try concatListContents(pieces: pieces, durations: clipSpans(items: items))
+            .write(to: listFile, atomically: true, encoding: .utf8)
         try await runFFmpeg(ffmpeg, concatArguments(listFile: listFile, output: output), failure: ExportError.concatFailed)
     }
 

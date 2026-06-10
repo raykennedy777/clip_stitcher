@@ -366,8 +366,7 @@ struct ExportEngineTests {
     // MARK: concat duration directives (the start_time seam gap, ADR-0008)
 
     @Test func concatListOmitsDurationsByDefault() {
-        // The bare two-arg call must reproduce the plain list (no `duration` lines), so the
-        // cross-clip concat and every existing caller are unaffected.
+        // The bare two-arg call must reproduce the plain list (no `duration` lines).
         let pieces = [URL(fileURLWithPath: "/tmp/a.mkv"), URL(fileURLWithPath: "/tmp/b.mkv")]
         let list = ExportEngine.concatListContents(pieces: pieces)
         #expect(!list.contains("duration"))
@@ -386,6 +385,64 @@ struct ExportEngineTests {
         let pieces = [URL(fileURLWithPath: "/tmp/a.mkv"), URL(fileURLWithPath: "/tmp/b.mkv")]
         let list = ExportEngine.concatListContents(pieces: pieces, durations: [0, nil])
         #expect(!list.contains("duration"))
+    }
+
+    // MARK: cross-clip spans (issue #6 — the same seam gap at the join between clips)
+
+    /// The biting case: a single-copy-segment clip trimmed only at its tail (segment 0 of
+    /// the muxer cut keeps the source's non-zero start_time). Its span is exact —
+    /// `pts[hi] - pts[lo]` of the kept range — because `hi` is a real, in-bounds frame.
+    @Test func clipSpanOfATrimmedSmartRenderedClipIsExact() {
+        // A source at start_time 0.24, 25fps; kept [0, 4) — trimmed on a copy-safe keyframe.
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mpg"),
+                              segments: [PlannedSegment(kind: .copy, range: 0..<4)], index: index)
+        #expect(abs((ExportEngine.clipSpan(item) ?? -1) - 0.16) < 1e-9)   // pts[4] - pts[0]
+    }
+
+    /// A clip kept to its end (`hi == count`, `pts[hi]` out of bounds) estimates the last
+    /// frame's slot from the mean frame interval — safe because a clip is CFR.
+    @Test func clipSpanOfARunToEndClipAddsOneFrameSlot() {
+        let index = FrameIndex(
+            pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mpg"),
+                              segments: [PlannedSegment(kind: .copy, range: 0..<4),
+                                         PlannedSegment(kind: .reEncode, range: 4..<8)], index: index)
+        // pts[7] - pts[0] + one 0.04 slot = the full 8-frame clip = 0.32.
+        #expect(abs((ExportEngine.clipSpan(item) ?? -1) - 0.32) < 1e-9)
+    }
+
+    /// A conformed clip re-encodes its kept window to the target spec preserving duration,
+    /// so its span is the kept duration the app supplies (closed-window fallback).
+    @Test func clipSpanOfAConformedClipIsTheKeptDuration() {
+        let vp = VideoProperties(codec: "h264", profile: nil, level: nil, width: 704, height: 528,
+                                 frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: nil,
+                                 sampleAspectRatio: nil, colorPrimaries: nil, colorTransfer: nil,
+                                 colorRange: nil)
+        var item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mp4"),
+                              audioStart: 2.0, audioEnd: 5.0, audioDuration: 12.5,
+                              conform: ConformEngine.VideoConform(sourceVideo: vp, targetVideo: vp))
+        #expect(ExportEngine.clipSpan(item) == 12.5)
+        item.audioDuration = nil
+        #expect(ExportEngine.clipSpan(item) == 3.0)
+    }
+
+    /// The last clip offsets nothing → `nil`; an uncomputable span (no segments, no
+    /// conform) degrades to `nil` — no directive, today's behavior — rather than a guess.
+    @Test func clipSpansLastClipAndUncomputableSpansAreNil() {
+        let index = FrameIndex(pts: [0.0, 0.04, 0.08, 0.12],
+                               keyframeFlags: [true, false, false, false])
+        let trimmed = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mp4"),
+                                 segments: [PlannedSegment(kind: .copy, range: 0..<2)], index: index)
+        let planless = ExportItem(source: URL(fileURLWithPath: "/tmp/b.mp4"))
+        let spans = ExportEngine.clipSpans(items: [trimmed, planless, trimmed])
+        #expect(spans.count == 3)
+        #expect(abs((spans[0] ?? -1) - 0.08) < 1e-9)
+        #expect(spans[1] == nil)   // uncomputable → no directive
+        #expect(spans[2] == nil)   // last clip → no directive
     }
 
     // MARK: timestamp self-check (catches both shipped defects)
