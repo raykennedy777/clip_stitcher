@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 enum ClipRole {
     case target
@@ -12,6 +13,9 @@ struct ClipRowView: View {
     let clip: Clip
     let role: ClipRole
     let state: ImportState
+    /// The clip's resolved source URL — nil while unresolved or source-missing,
+    /// which keeps the generic placeholder in the thumbnail box.
+    let url: URL?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -20,11 +24,7 @@ struct ClipRowView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 28, alignment: .trailing)
 
-            Image(systemName: "film")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-                .frame(width: 44, height: 32)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+            ClipThumbnailView(url: url, seconds: selectionStartSeconds)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
@@ -136,14 +136,29 @@ struct ClipRowView: View {
         }
     }
 
+    /// The selection's start as approximate media seconds (in point ÷ frame
+    /// rate) — where the thumbnail is taken. Nil (near-start default) when
+    /// there's no in point or the clip's properties aren't probed yet. An input
+    /// seek is keyframe-accurate at best, so frame-exactness isn't attempted.
+    private var selectionStartSeconds: Double? {
+        guard let inPoint = clip.inPoint, inPoint > 0,
+              let raw = clip.video?.frameRate,
+              let fps = Self.fps(raw), fps > 0 else { return nil }
+        return Double(inPoint) / fps
+    }
+
     // MARK: - Formatting
 
-    private nonisolated static func formattedFrameRate(_ raw: String) -> String {
+    private nonisolated static func fps(_ raw: String) -> Double? {
         let parts = raw.split(separator: "/")
         guard parts.count == 2, let num = Double(parts[0]), let den = Double(parts[1]), den != 0 else {
-            return raw
+            return nil
         }
-        let fps = num / den
+        return num / den
+    }
+
+    private nonisolated static func formattedFrameRate(_ raw: String) -> String {
+        guard let fps = fps(raw) else { return raw }
         return fps == fps.rounded() ? String(format: "%.0f", fps) : String(format: "%.3f", fps)
     }
 
@@ -151,5 +166,47 @@ struct ClipRowView: View {
         let total = Int(seconds.rounded())
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+}
+
+/// The row's 44×32 thumbnail box: a frame from the start of the clip's
+/// selection once extracted (issue #23), the generic film glyph while loading
+/// or when the source is unreachable.
+private struct ClipThumbnailView: View {
+    let url: URL?
+    /// Approximate media time to thumbnail; nil means near the file's start.
+    let seconds: Double?
+    @State private var image: NSImage?
+
+    /// Re-fires the loading task when either the source or the selection moves.
+    private struct Key: Equatable {
+        let url: URL?
+        let seconds: Double?
+    }
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                Image(systemName: "film")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 44, height: 32)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+        .task(id: Key(url: url, seconds: seconds)) {
+            guard let url else {
+                image = nil
+                return
+            }
+            if let data = await ClipThumbnailer.shared.pngData(for: url, atSeconds: seconds) {
+                image = NSImage(data: data)
+            }
+        }
     }
 }

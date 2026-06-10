@@ -78,7 +78,8 @@ struct SourceView: View {
                         position: index + 1,
                         clip: clip,
                         role: role(for: clip),
-                        state: document.importStates[clip.id] ?? .ready
+                        state: document.importStates[clip.id] ?? .ready,
+                        url: document.url(for: clip)
                     )
                     .tag(clip.id)
                     // Native NSTableView double-click → open the cut-editor, without
