@@ -65,7 +65,10 @@ enum SeparateRendering: String, Codable, CaseIterable, Identifiable {
 struct OutputSettings: Codable, Equatable {
     var mode: OutputMode = .connect
     var type: OutputType = .videoAndAudio
-    var container: Container = .mp4
+    /// MKV by default, unconditionally (issue #10): the only supported container that
+    /// round-trips audio track titles (ADR-0014), and it now carries all three codecs by
+    /// stream-copy — MPEG-2's missing-PTS packets are refilled on the way in (issue #2).
+    var container: Container = .mkv
     var rendering: SeparateRendering = .conformToTarget
 
     init() {}
@@ -76,7 +79,7 @@ struct OutputSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         mode = try c.decodeIfPresent(OutputMode.self, forKey: .mode) ?? .connect
         type = try c.decodeIfPresent(OutputType.self, forKey: .type) ?? .videoAndAudio
-        container = try c.decodeIfPresent(Container.self, forKey: .container) ?? .mp4
+        container = try c.decodeIfPresent(Container.self, forKey: .container) ?? .mkv
         rendering = try c.decodeIfPresent(SeparateRendering.self, forKey: .rendering) ?? .conformToTarget
     }
 }

@@ -574,12 +574,6 @@ final class ProjectDocument: ReferenceFileDocument {
         }
     }
 
-    /// The container that best fits a source codec for a stream-copy export: MPEG-2
-    /// broadcast video belongs in TS; H.264/HEVC default to MP4 (ADR-0008).
-    static func defaultContainer(forCodec codec: String) -> Container {
-        codec == "mpeg2video" ? .ts : .mp4
-    }
-
     // MARK: - Import pipeline
 
     @MainActor
@@ -598,12 +592,9 @@ final class ProjectDocument: ReferenceFileDocument {
                 p.clips[i].audio = probe.audio
                 p.clips[i].audioTracks = probe.audioTracks
                 p.clips[i].duration = probe.duration
-                // Default the container to suit the first clip's codec (broadcast MPEG-2
-                // belongs in TS, not MP4). Only on the first clip, so it never overrides a
-                // container the user later chose.
-                if p.clips.count == 1, let codec = probe.video?.codec {
-                    p.output.container = Self.defaultContainer(forCodec: codec)
-                }
+                // No per-codec container override anymore: MKV is the unconditional
+                // default (issue #10) and carries all three codecs by stream-copy, so
+                // the user's container choice — including the default — is never touched.
                 commit(p)
             }
             importStates[id] = .indexing

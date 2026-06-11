@@ -14,6 +14,25 @@ struct OutputSettingsTests {
         #expect(decoded.container == .ts)
     }
 
+    // MKV is the unconditional default container (issue #10): the only supported
+    // container that round-trips audio track titles (ADR-0014), and since issue #2 it
+    // carries MPEG-2 by stream-copy too — no per-codec override on first import.
+    @Test func freshSettingsDefaultToMkv() {
+        #expect(OutputSettings().container == .mkv)
+    }
+
+    @Test func anOldSaveWithoutContainerDecodesToTheMkvDefault() throws {
+        let old = #"{"mode":"connect","type":"videoAndAudio"}"#
+        let decoded = try JSONDecoder().decode(OutputSettings.self, from: Data(old.utf8))
+        #expect(decoded.container == .mkv)
+    }
+
+    @Test func anExplicitContainerChoiceSurvivesDecoding() throws {
+        let saved = #"{"mode":"connect","type":"videoAndAudio","container":"mp4"}"#
+        let decoded = try JSONDecoder().decode(OutputSettings.self, from: Data(saved.utf8))
+        #expect(decoded.container == .mp4)
+    }
+
     @Test func cutOnlySurvivesARoundTrip() throws {
         var settings = OutputSettings()
         settings.mode = .separate
