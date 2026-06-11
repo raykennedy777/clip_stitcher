@@ -82,6 +82,10 @@ struct SourceView: View {
                         url: document.url(for: clip)
                     )
                     .tag(clip.id)
+                    // A container, not a flattened element — so the badge keeps its
+                    // own `source.clip.<index>.role` identifier and value (issue #5).
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("source.clip.\(index)")
                     // Native NSTableView double-click → open the cut-editor, without
                     // disturbing the List's single-click selection + highlight.
                     .background(ListDoubleClickAction { row in
@@ -141,30 +145,40 @@ struct SourceView: View {
 
     private var actionPanel: some View {
         VStack(spacing: 8) {
-            action("Add File", systemImage: "plus") { importPurpose = .add; importing = true }
+            action("Add File", systemImage: "plus", id: "source.addFile") {
+                importPurpose = .add; importing = true
+            }
 
             Divider().padding(.vertical, 6)
 
-            action("Move Up", systemImage: "arrow.up", enabled: canMove(by: -1)) { move(by: -1) }
-            action("Move Down", systemImage: "arrow.down", enabled: canMove(by: 1)) { move(by: 1) }
-            action("Duplicate", systemImage: "plus.square.on.square", enabled: !selection.isEmpty) {
+            action("Move Up", systemImage: "arrow.up", id: "source.moveUp",
+                   enabled: canMove(by: -1)) { move(by: -1) }
+            action("Move Down", systemImage: "arrow.down", id: "source.moveDown",
+                   enabled: canMove(by: 1)) { move(by: 1) }
+            action("Duplicate", systemImage: "plus.square.on.square", id: "source.duplicate",
+                   enabled: !selection.isEmpty) {
                 duplicate(selection)
             }
-            action("Delete", systemImage: "trash", enabled: !selection.isEmpty) { delete(selection) }
-            action("Clear", systemImage: "xmark.bin", enabled: !document.project.clips.isEmpty) {
+            action("Delete", systemImage: "trash", id: "source.delete",
+                   enabled: !selection.isEmpty) { delete(selection) }
+            action("Clear", systemImage: "xmark.bin", id: "source.clear",
+                   enabled: !document.project.clips.isEmpty) {
                 document.clearAll()
                 selection = []
             }
 
             Divider().padding(.vertical, 6)
 
-            action("Audio Settings…", systemImage: "waveform", enabled: canOpenAudioSettings) {
+            action("Audio Settings…", systemImage: "waveform", id: "source.audioSettings",
+                   enabled: canOpenAudioSettings) {
                 presentAudioSettings(for: selection)
             }
-            action("Set as Target Clip", systemImage: "target", enabled: canSetTarget) {
+            action("Set as Target Clip", systemImage: "target", id: "source.setTarget",
+                   enabled: canSetTarget) {
                 if let id = selection.first { document.setTarget(id: id) }
             }
-            action("Relink…", systemImage: "link", enabled: canRelink) {
+            action("Relink…", systemImage: "link", id: "source.relink",
+                   enabled: canRelink) {
                 importPurpose = .relink(selection)
                 importing = true
             }
@@ -176,13 +190,14 @@ struct SourceView: View {
         .frame(width: 200)
     }
 
-    private func action(_ title: String, systemImage: String, enabled: Bool = true, perform: @escaping () -> Void) -> some View {
+    private func action(_ title: String, systemImage: String, id: String, enabled: Bool = true, perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
             Label(title, systemImage: systemImage)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(.bordered)
         .disabled(!enabled)
+        .accessibilityIdentifier(id)
     }
 
     // MARK: - Selection helpers (issue #12)

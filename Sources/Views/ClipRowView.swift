@@ -19,6 +19,18 @@ enum ClipRole {
         guard let target, clip.video != nil else { return .unknown }
         return MatchEvaluator.matches(clip, target: target) ? .smartRender : .reEncode
     }
+
+    /// The badge's visible text — also exposed as the badge's accessibility value
+    /// so external probes can assert the per-clip verdict (issue #5).
+    nonisolated var badgeText: String? {
+        switch self {
+        case .target: return "Target"
+        case .smartRender: return "Smart render"
+        case .reEncode: return "Re-encode"
+        case .cutOnly: return "Cut only"
+        case .unknown: return nil
+        }
+    }
 }
 
 struct ClipRowView: View {
@@ -84,6 +96,12 @@ struct ClipRowView: View {
             .padding(.vertical, 2)
             .background(color.opacity(0.18), in: Capsule())
             .foregroundStyle(color)
+            // Position is 1-based for display; AX identifiers are 0-based timeline
+            // indices to match `source.clip.<index>` on the row (issue #5).
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier("source.clip.\(position - 1).role")
+            .accessibilityLabel("Role")
+            .accessibilityValue(Text(text))
     }
 
     // MARK: - Detail / status

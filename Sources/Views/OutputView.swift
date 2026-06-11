@@ -23,22 +23,26 @@ struct OutputView: View {
                 Picker("Mode", selection: output.mode) {
                     ForEach(OutputMode.allCases) { Text($0.title).tag($0) }
                 }
+                .accessibilityIdentifier("output.mode")
                 // Cut-only is a separate-mode rendering choice (ADR-0018) — connect
                 // mode always conforms, so the picker only appears here.
                 if document.project.output.mode == .separate {
                     Picker("Rendering", selection: output.rendering) {
                         ForEach(SeparateRendering.allCases) { Text($0.title).tag($0) }
                     }
+                    .accessibilityIdentifier("output.rendering")
                 }
                 Picker("Type", selection: output.type) {
                     ForEach(OutputType.allCases) { Text($0.title).tag($0) }
                 }
+                .accessibilityIdentifier("output.type")
                 // The video container doesn't apply to an audio-only export — it's written as
                 // an audio-elementary file whose type follows the audio codec (#1).
                 if document.project.output.type != .audioOnly {
                     Picker("Container", selection: output.container) {
                         ForEach(Container.allCases) { Text($0.title).tag($0) }
                     }
+                    .accessibilityIdentifier("output.container")
                 }
             }
 
@@ -46,6 +50,7 @@ struct OutputView: View {
                 HStack {
                     Button("Export…") { chooseDestinationAndExport() }
                         .disabled(document.project.clips.isEmpty || isExporting)
+                        .accessibilityIdentifier("output.export")
                     Spacer()
                 }
                 if isExporting {
@@ -121,15 +126,20 @@ struct OutputView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityIdentifier("output.status")
+            .accessibilityValue(Text((["Export complete."] + warnings).joined(separator: " ")))
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
+                .accessibilityIdentifier("output.status")
+                .accessibilityValue(Text(message))
         case .cancelled(let detail):
             // Neutral, not red — nothing went wrong (issue #32).
             Label(detail.map { "Export cancelled — \($0)" } ?? "Export cancelled.",
                   systemImage: "xmark.circle")
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("output.status")
         }
     }
 

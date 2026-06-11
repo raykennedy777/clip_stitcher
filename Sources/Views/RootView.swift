@@ -33,6 +33,7 @@ struct RootView: View {
             List(AppSection.allCases, selection: $section) { item in
                 Label(item.title, systemImage: item.symbol)
                     .tag(item)
+                    .accessibilityIdentifier("nav.\(item.rawValue)")
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
         } detail: {

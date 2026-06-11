@@ -62,4 +62,14 @@ struct ClipRoleTests {
         let out = settings(mode: .separate, rendering: .conformToTarget)
         #expect(ClipRole.role(for: clip(), target: nil, output: out) == .unknown)
     }
+
+    // The badge text doubles as the badge's accessibility value (issue #5) — external
+    // probes assert these exact strings, so a rename here is a breaking change for them.
+    @Test func badgeTextMatchesTheVisibleStrings() {
+        #expect(ClipRole.target.badgeText == "Target")
+        #expect(ClipRole.smartRender.badgeText == "Smart render")
+        #expect(ClipRole.reEncode.badgeText == "Re-encode")
+        #expect(ClipRole.cutOnly.badgeText == "Cut only")
+        #expect(ClipRole.unknown.badgeText == nil)
+    }
 }
