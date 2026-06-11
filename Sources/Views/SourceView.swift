@@ -134,6 +134,18 @@ struct SourceView: View {
                 move(by: press.key == .upArrow ? -1 : 1)
                 return .handled
             }
+            // Backspace / forward delete remove the selected clips — the keyboard
+            // path to the Delete button and context-menu item (issue #42).
+            // Backspace reaches the list as DEL (U+007F), not `.delete` (BS, U+0008),
+            // so match both; forward delete arrives with the .function modifier, so
+            // only reject the modifiers that would make this a different chord.
+            .onKeyPress(keys: ["\u{7F}", .delete, .deleteForward]) { press in
+                let chordModifiers: EventModifiers = [.command, .option, .control, .shift]
+                guard press.modifiers.isDisjoint(with: chordModifiers),
+                      !selection.isEmpty else { return .ignored }
+                delete(selection)
+                return .handled
+            }
         }
     }
 

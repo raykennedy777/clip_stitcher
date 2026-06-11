@@ -111,6 +111,14 @@ open --env-keep-all /path/to/VidConform.app   # or launch the binary directly
 - **Direct binary launch shows the document Open panel** (no auto-untitled
   document) — press its `NewDocumentButton`. A relaunch may instead restore
   the previous document with its clips; don't assume a clean slate.
+- **Key presses reach a List's `onKeyPress` only when that list is the focused
+  element** — window focus is not enough (issue #42). Set `AXFocused = true` on
+  the list's `AXOutline`; the Source window has two outlines (sidebar nav and
+  clip list), so pick the one whose descendants carry `source.clip.*` ids.
+- **`kAXParentAttribute` reads back nil on the clip-row `AXGroup`s** over the raw
+  AX API, so the walk-up-to-`AXRow` trick (sidebar section) fails there. Find rows
+  top-down instead: collect elements with role `AXRow`, match by their static-text
+  contents, then set `AXSelected` on the row (issue #42).
 
 ## Probe recipe
 
