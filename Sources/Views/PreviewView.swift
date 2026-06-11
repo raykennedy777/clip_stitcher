@@ -23,6 +23,18 @@ struct PreviewView: View {
                     preview
                     controls
                 }
+                // Scroll anywhere over the detail pane scrubs (issue #40);
+                // Shift strides keyframe anchors, mirroring ⇧←/⇧→. The
+                // sidebar sits outside this view, so it keeps scrolling.
+                .scrollScrub { steps, keyframeStride in
+                    if keyframeStride {
+                        for _ in 0..<abs(steps) {
+                            steps < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe()
+                        }
+                    } else {
+                        model.step(by: steps)
+                    }
+                }
             }
         }
         .navigationTitle("Preview")

@@ -142,6 +142,17 @@ One span of a selection range between consecutive split points (or a split point
 range end). Confirming the cut-editor turns each split range into its own clip.
 _Avoid_: segment, section, sub-clip
 
+**Playhead**:
+The current frame position in the cut-editor or output preview — the frame shown on
+screen, marked by the vertical line on the scrubber.
+_Avoid_: cursor, position marker, needle
+
+**Scrub**:
+Moving the playhead by a pointing gesture — dragging the scrubber or scrolling
+(vertically; toward page-top is backward) over the preview content — as opposed to
+stepping by keys or jumping by typed value.
+_Avoid_: seek (that's the engine operation any input triggers), skim
+
 **Jump popover**:
 The cut-editor control for moving the playhead to a typed timecode or frame number, in
 either relative (offset from the playhead) or absolute (from the clip's first frame) mode.

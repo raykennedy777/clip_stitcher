@@ -42,12 +42,30 @@ struct JumpPopoverView: View {
                     TextField("00:00:00:00", text: $timeText)
                         .focused($focused, equals: .time)
                         .onSubmit(jump)
+                        // Scroll over the field rolls its staged timecode a
+                        // frame per step (issue #40) — never a live jump:
+                        // Return commits (onChange marks it edited), Esc still
+                        // bails. Absolute mode clamps at 0:00; Shift is
+                        // meaningless here, so the stride flag is ignored.
+                        .scrollScrub { steps, _ in
+                            if let stepped = JumpParser.steppedTimecode(
+                                timeText, by: steps, fps: model.fps, allowNegative: relative) {
+                                timeText = stepped
+                            }
+                        }
                 }
                 GridRow {
                     Text("Frame:")
                     TextField("0", text: $frameText)
                         .focused($focused, equals: .frame)
                         .onSubmit(jump)
+                        // Same rolling for the frame field, as a bare count.
+                        .scrollScrub { steps, _ in
+                            if let stepped = JumpParser.steppedFrames(
+                                frameText, by: steps, allowNegative: relative) {
+                                frameText = stepped
+                            }
+                        }
                 }
             }
             .textFieldStyle(.roundedBorder)

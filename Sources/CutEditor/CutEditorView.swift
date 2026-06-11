@@ -16,6 +16,17 @@ struct CutEditorView: View {
             controls
         }
         .frame(minWidth: 640, minHeight: 480)
+        // Scroll anywhere over the window scrubs (issue #40); Shift strides
+        // keyframes, mirroring ⇧←/⇧→.
+        .scrollScrub { steps, keyframeStride in
+            if keyframeStride {
+                for _ in 0..<abs(steps) {
+                    steps < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe()
+                }
+            } else {
+                model.step(by: steps)
+            }
+        }
         .sheet(isPresented: $showingAudioSettings) {
             AudioSettingsView(document: document, clipIDs: [model.clip.id])
         }

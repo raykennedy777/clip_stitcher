@@ -47,4 +47,40 @@ enum JumpParser {
     static func target(value: Int, relative: Bool, current: Int) -> Int {
         relative ? current + value : value
     }
+
+    // MARK: - Field stepping (scroll over a popover field, issue #40)
+
+    /// The frame field's staged text stepped by `delta` frames. Clamps at 0
+    /// unless negatives are allowed (relative mode); nil when the text doesn't
+    /// parse, so an in-progress edit is left alone to be corrected.
+    static func steppedFrames(_ text: String, by delta: Int, allowNegative: Bool) -> String? {
+        guard let value = frames(text) else { return nil }
+        let stepped = value + delta
+        return String(allowNegative ? stepped : max(0, stepped))
+    }
+
+    /// The time field's staged text stepped by `delta` frames and re-rendered
+    /// as rolled-over timecode (lenient input comes back in the full readout
+    /// shape). Same clamping rule as the frame field.
+    static func steppedTimecode(_ text: String, by delta: Int, fps: Double,
+                                allowNegative: Bool) -> String? {
+        guard let value = timecodeFrames(text, fps: fps) else { return nil }
+        let stepped = value + delta
+        return timecode(forFrames: allowNegative ? stepped : max(0, stepped), fps: fps)
+    }
+
+    /// Frames → HH:MM:SS:FF with the same rounded-fps arithmetic as the
+    /// readout (`CutEditorModel.timecode(forFrame:)`), plus a sign for
+    /// relative-mode negatives, so stepped values round-trip through
+    /// `timecodeFrames`.
+    static func timecode(forFrames frames: Int, fps: Double) -> String {
+        let fpsInt = max(1, Int(fps.rounded()))
+        let magnitude = abs(frames)
+        let totalSeconds = magnitude / fpsInt
+        let h = totalSeconds / 3600
+        let m = (totalSeconds % 3600) / 60
+        let s = totalSeconds % 60
+        let f = magnitude % fpsInt
+        return (frames < 0 ? "-" : "") + String(format: "%02d:%02d:%02d:%02d", h, m, s, f)
+    }
 }
