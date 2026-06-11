@@ -146,6 +146,12 @@ struct SourceView: View {
     private var actionPanel: some View {
         VStack(spacing: 8) {
             action("Add File", systemImage: "plus", id: "source.addFile") {
+                // Automation bypass (issue #37): sources come from the environment
+                // instead of an open panel; the import pipeline is unchanged.
+                if let sources = AutomationOverrides.current?.importSources, !sources.isEmpty {
+                    document.addFiles(sources)
+                    return
+                }
                 importPurpose = .add; importing = true
             }
 
@@ -179,6 +185,10 @@ struct SourceView: View {
             }
             action("Relink…", systemImage: "link", id: "source.relink",
                    enabled: canRelink) {
+                if let source = AutomationOverrides.current?.relinkSource {
+                    document.relink(ids: selection, to: source)
+                    return
+                }
                 importPurpose = .relink(selection)
                 importing = true
             }

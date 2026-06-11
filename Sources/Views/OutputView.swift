@@ -148,6 +148,12 @@ struct OutputView: View {
         // timeline order — so the user picks the folder they all land in, not a
         // filename (issue #30). Connect mode keeps the filename save panel.
         if document.project.output.mode == .separate {
+            // Automation bypass (issue #37): the destination folder comes from the
+            // environment instead of a panel; the export itself is unchanged.
+            if let dest = AutomationOverrides.current?.exportDestination {
+                document.startExport(to: dest)
+                return
+            }
             let panel = NSOpenPanel()
             panel.title = "Export"
             panel.prompt = "Export"
@@ -171,6 +177,12 @@ struct OutputView: View {
             ext = AudioCodecPolicy.audioFileExtension(forEncoder: choice.encoder)
         } else {
             ext = out.container.fileExtension
+        }
+        // Automation bypass (issue #37): same extension fix-up the panel path does.
+        if var url = AutomationOverrides.current?.exportDestination {
+            if url.pathExtension.lowercased() != ext { url.appendPathExtension(ext) }
+            document.startExport(to: url)
+            return
         }
         let panel = NSSavePanel()
         panel.title = "Export"
