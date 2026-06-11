@@ -79,7 +79,8 @@ struct SourceView: View {
                         clip: clip,
                         role: role(for: clip),
                         state: document.importStates[clip.id] ?? .ready,
-                        url: document.url(for: clip)
+                        url: document.url(for: clip),
+                        share: document.copyShares[clip.id]
                     )
                     .tag(clip.id)
                     // A container, not a flattened element — so the badge keeps its

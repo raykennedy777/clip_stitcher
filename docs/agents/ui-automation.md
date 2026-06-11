@@ -30,6 +30,7 @@ up from the matched element to its `AXRow` ancestor and set `AXSelected = true`
 | `output.type` | Type popup |
 | `output.container` | Container popup (absent for audio-only type) |
 | `output.export` | Export… button |
+| `output.reencodeWarning` | Re-encode dominance warning (issue #15); present only when > 50 % of the planned output duration re-encodes — an `AXStaticText`, full warning text in `AXValue` (not `AXValueDescription`) |
 | `output.status` | Export outcome (done / failed / cancelled); absent while idle or running |
 
 For `output.status` the readable text is its accessibility value: done is
@@ -59,6 +60,11 @@ Clip rows: `source.clip.<index>` (0-based timeline order) is an AX *container*
 raw AX API it reads back via `AXValueDescription`, not `AXValue`. A clip with no
 verdict (no target set, video unprobed) has no badge element at all. These exact
 strings are pinned by `ClipRoleTests.badgeTextMatchesTheVisibleStrings`.
+
+Each row's planned copy/re-encode split (issue #15) is `source.clip.<index>.share`;
+the readable text (e.g. `92% copied`, `0% copied`) is its accessibility value (read
+via `AXValueDescription`, like the badge). Absent until the clip's frame index is
+built (import still running, or source missing).
 
 ## Modal-panel bypass (issue #37)
 

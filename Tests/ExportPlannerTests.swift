@@ -169,4 +169,74 @@ struct ExportPlannerTests {
         #expect(ExportPlanner.frameDuration("25") == nil)
         #expect(ExportPlanner.frameDuration("0/1") == nil)
     }
+
+    // MARK: copy/re-encode share (issue #15)
+
+    /// Shares are duration-weighted through the pts, never segment-count-weighted: with
+    /// deliberately non-uniform frame spacing (1 s frames then 0.5 s frames) the plan
+    /// `[re-encode 1..<4, copy 4..<8, re-encode 8..<9]` is 1-of-3 segments but
+    /// 2.0 s of 5.5 s copied.
+    @Test func copyShareIsDurationWeightedNotSegmentCounted() throws {
+        let uneven = FrameIndex(
+            pts: [0, 1, 2, 3, 4, 4.5, 5, 5.5, 6, 6.5],
+            keyframeFlags: [true, false, false, false, true, false, false, false, true, false])
+        let share = try #require(ExportPlanner.copyShare(
+            for: clip(video: video(), inPoint: 1, outPoint: 8),
+            target: clip(video: video()), settings: OutputSettings(), index: uneven))
+        #expect(share.copiedSeconds == 2.0)
+        #expect(share.totalSeconds == 5.5)
+        #expect(abs(share.copiedFraction - 2.0 / 5.5) < 1e-9)
+    }
+
+    /// The open-GOP poster child (issue #15): every cut-range keyframe carries leading
+    /// pictures, so no copy span can start and the whole kept range re-encodes — 0% copied.
+    @Test func copyShareIsZeroWhenNoCopySafePointExists() throws {
+        // Frame 3 presents before keyframe 4 but decodes after it (dts .16 > .12):
+        // keyframe 4 has a leading picture, and the only count-0 keyframe (0) sits
+        // before the in point.
+        let openGOP = FrameIndex(
+            pts: [0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28],
+            dts: [0, 0.04, 0.08, 0.16, 0.12, 0.20, 0.24, 0.28],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let share = try #require(ExportPlanner.copyShare(
+            for: clip(video: video(), inPoint: 1, outPoint: 6),
+            target: clip(video: video()), settings: OutputSettings(), index: openGOP))
+        #expect(share.copiedSeconds == 0)
+        #expect(share.totalSeconds > 0)
+        #expect(share.copiedFraction == 0)
+    }
+
+    /// A conform-routed clip is a full re-encode of its kept window: 0% copied over the
+    /// whole-clip duration (the last frame contributes its predecessor's delta).
+    @Test func copyShareOfAConformedClipIsZeroOverItsKeptWindow() throws {
+        let share = try #require(ExportPlanner.copyShare(
+            for: clip(video: video(codec: "mpeg2video")),
+            target: clip(video: video(codec: "h264")), settings: OutputSettings(), index: index))
+        #expect(share.copiedSeconds == 0)
+        #expect(abs(share.totalSeconds - 0.32) < 1e-9)
+    }
+
+    /// Cut-only severs the target (ADR-0018), so the same mismatching clip smart-renders
+    /// against itself — a whole-clip keep is a pure copy, 100 % copied.
+    @Test func copyShareUnderCutOnlyIgnoresTheTarget() throws {
+        let share = try #require(ExportPlanner.copyShare(
+            for: clip(video: video(codec: "mpeg2video")),
+            target: clip(video: video(codec: "h264")),
+            settings: settings(mode: .separate, rendering: .cutOnly), index: index))
+        #expect(share.copiedFraction == 1.0)
+    }
+
+    /// The Output warning fires only when re-encode *dominates* (> 50 % of output
+    /// duration) — boundary slivers on closed-GOP sources must stay quiet.
+    @Test func reencodeWarningFiresOnlyAboveTheDominanceThreshold() {
+        let dominated = [ExportPlanner.CopyShare(copiedSeconds: 0, totalSeconds: 28)]
+        #expect(ExportPlanner.reencodeDominanceWarning(shares: dominated)
+            == "~28 s of 28 s will be re-encoded — little of this export can be stream-copied untouched.")
+        let slivers = [ExportPlanner.CopyShare(copiedSeconds: 26, totalSeconds: 28)]
+        #expect(ExportPlanner.reencodeDominanceWarning(shares: slivers) == nil)
+        // exactly half is not "dominates"
+        let half = [ExportPlanner.CopyShare(copiedSeconds: 14, totalSeconds: 28)]
+        #expect(ExportPlanner.reencodeDominanceWarning(shares: half) == nil)
+        #expect(ExportPlanner.reencodeDominanceWarning(shares: []) == nil)
+    }
 }

@@ -99,6 +99,78 @@ enum ExportPlanner {
         }
     }
 
+    // MARK: - Copy/re-encode share (issue #15)
+
+    /// How much of a clip's kept range the plan stream-copies vs re-encodes, in seconds
+    /// of source presentation time — duration-weighted through the frame index's pts,
+    /// never segment-count-weighted (GOPs are not uniform).
+    struct CopyShare: Equatable {
+        var copiedSeconds: Double
+        var totalSeconds: Double
+        /// 0…1; 0 when the total is empty (nothing to weight).
+        var copiedFraction: Double { totalSeconds > 0 ? copiedSeconds / totalSeconds : 0 }
+    }
+
+    /// The clip's copy/re-encode split, computed *before* export from the same verdict and
+    /// planner the export itself uses (`videoTreatment` — never a second planning path).
+    /// Pure arithmetic over the cached frame index: no media I/O, so the UI can recompute
+    /// it on every cut/target/settings change. A conformed clip is a full re-encode of its
+    /// kept window; a smart-rendered clip maps each planned segment through the pts. Nil
+    /// when no plan exists (empty kept range).
+    static func copyShare(for clip: Clip, target: Clip?, settings: OutputSettings,
+                          index: FrameIndex) -> CopyShare? {
+        guard index.count > 0 else { return nil }
+        let target = effectiveTarget(target, settings: settings)
+        guard let treatment = try? videoTreatment(for: clip, target: target, index: index) else {
+            return nil
+        }
+        switch treatment {
+        case .conform:
+            let inStart = clip.inPoint ?? 0
+            let outEx = clip.outPoint.map { $0 + 1 } ?? index.count
+            guard outEx > inStart else { return nil }
+            return CopyShare(copiedSeconds: 0, totalSeconds: duration(of: inStart..<outEx, index: index))
+        case .smartRender(let segments, _):
+            let copied = segments.filter { $0.kind == .copy }
+                .reduce(0.0) { $0 + duration(of: $1.range, index: index) }
+            let total = segments.reduce(0.0) { $0 + duration(of: $1.range, index: index) }
+            return CopyShare(copiedSeconds: copied, totalSeconds: total)
+        }
+    }
+
+    /// A presentation-frame range's duration in seconds, read off the index pts (so
+    /// non-uniform GOP/frame spacing weighs correctly). A range reaching the file end has
+    /// no next pts to subtract against; the last frame contributes its predecessor's delta.
+    static func duration(of range: Range<Int>, index: FrameIndex) -> Double {
+        let pts = index.pts
+        guard range.lowerBound >= 0, range.lowerBound < range.upperBound,
+              range.lowerBound < pts.count else { return 0 }
+        let upper = min(range.upperBound, pts.count)
+        let start = pts[range.lowerBound]
+        let end: Double
+        if upper < pts.count {
+            end = pts[upper]
+        } else {
+            let last = pts[pts.count - 1]
+            end = last + (pts.count > 1 ? max(0, last - pts[pts.count - 2]) : 0)
+        }
+        return max(0, end - start)
+    }
+
+    /// The Output view's prominent warning when re-encode dominates the export — more than
+    /// half the output duration (issue #15). Below the threshold returns nil: closed-GOP
+    /// sources re-encode only boundary slivers and the warning would be noise. Cause-free
+    /// wording: a dominant re-encode can be sparse clean cut points (open GOP) *or*
+    /// conform-routed clips.
+    static func reencodeDominanceWarning(shares: [CopyShare]) -> String? {
+        let total = shares.reduce(0.0) { $0 + $1.totalSeconds }
+        let copied = shares.reduce(0.0) { $0 + $1.copiedSeconds }
+        let reencoded = total - copied
+        guard total > 0, reencoded / total > 0.5 else { return nil }
+        return "~\(Int(reencoded.rounded())) s of \(Int(total.rounded())) s will be re-encoded"
+            + " — little of this export can be stream-copied untouched."
+    }
+
     /// One frame's duration in seconds from an ffprobe rational rate ("25/1" → 0.04);
     /// nil when the rate is missing or malformed.
     static func frameDuration(_ frameRate: String?) -> Double? {

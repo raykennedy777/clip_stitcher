@@ -47,6 +47,15 @@ struct OutputView: View {
             }
 
             Section {
+                // Prominent only when re-encode dominates the planned export (issue #15) —
+                // below the threshold closed-GOP sources re-encode mere boundary slivers
+                // and a warning would be noise.
+                if let warning = reencodeDominanceWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("output.reencodeWarning")
+                        .accessibilityValue(Text(warning))
+                }
                 HStack {
                     Button("Export…") { chooseDestinationAndExport() }
                         .disabled(document.project.clips.isEmpty || isExporting)
@@ -78,9 +87,12 @@ struct OutputView: View {
                 }
                 exportOutcome
             } footer: {
-                Text("Cuts land on the exact frame you chose. Everything between the "
-                     + "boundaries is stream-copied untouched; only the partial GOPs at "
-                     + "the in/out points are re-encoded.")
+                // Honest about the plan (issue #15): how much is actually stream-copied
+                // depends on clean cut points and on clips matching the target — each
+                // clip's row shows its own split.
+                Text("Cuts land on the exact frame you chose. Footage is stream-copied "
+                     + "untouched wherever clean cut points allow; the rest is re-encoded. "
+                     + "Each clip's row shows its copied share.")
             }
         }
         .formStyle(.grouped)
@@ -99,6 +111,15 @@ struct OutputView: View {
         .onChange(of: isExporting) { _, running in
             if !running { showCancelAlert = false }
         }
+    }
+
+    /// The dominance warning (issue #15): the export-wide re-encoded share, summed
+    /// duration-weighted over every clip with a computed split. Irrelevant to an
+    /// audio-only export (no video plan runs at all).
+    private var reencodeDominanceWarning: String? {
+        guard document.project.output.type != .audioOnly else { return nil }
+        let shares = document.project.clips.compactMap { document.copyShares[$0.id] }
+        return ExportPlanner.reencodeDominanceWarning(shares: shares)
     }
 
     private var exportFraction: Double {

@@ -82,4 +82,15 @@ struct ClipDetailLineTests {
         #expect(ClipRowView.detailLine(for: clip)
                 == "H264 1024×576 · 50 fps · 1 audio track")
     }
+
+    /// The copied-share readout (issue #15): whole-percent rounding, but a partial share
+    /// never rounds up to "100% copied" — boundary slivers still re-encode, and claiming
+    /// otherwise repeats the false footer this issue removed. "0% copied" is the
+    /// open-GOP poster child.
+    @Test func copiedShareTextRoundsButNeverInflatesTo100() {
+        #expect(ClipRowView.copiedShareText(fraction: 0) == "0% copied")
+        #expect(ClipRowView.copiedShareText(fraction: 0.921) == "92% copied")
+        #expect(ClipRowView.copiedShareText(fraction: 0.999) == "99% copied")
+        #expect(ClipRowView.copiedShareText(fraction: 1.0) == "100% copied")
+    }
 }

@@ -36,6 +36,11 @@ final class ProjectDocument: ReferenceFileDocument {
 
     @Published var project: VidProject
     @Published var importStates: [Clip.ID: ImportState] = [:]
+    /// Per-clip copy/re-encode split, recomputed from the cached frame indexes whenever
+    /// the project changes (issue #15) — the Source rows and the Output view's dominance
+    /// warning read this. Pure planner arithmetic, no media I/O; a clip stays absent
+    /// until its index is built.
+    @Published var copyShares: [Clip.ID: ExportPlanner.CopyShare] = [:]
     /// Runtime-only export progress/outcome, surfaced by the Output view.
     @Published var exportStatus: ExportStatus = .idle
     /// True once the user confirmed a cancel (issue #32) — disables the cancel button
@@ -101,6 +106,23 @@ final class ProjectDocument: ReferenceFileDocument {
         undoManager?.registerUndo(withTarget: self) { doc in
             doc.commit(old)
         }
+        // Every project mutation — in/out points, target, output settings, splits, undo —
+        // funnels through here, so this is the one place the copy/re-encode shares stay
+        // current (issue #15). Pure arithmetic over cached indexes; no media I/O.
+        refreshCopyShares()
+    }
+
+    /// Recomputes every clip's copy/re-encode split from the cached frame indexes
+    /// (issue #15). Clips whose index isn't built yet are skipped — they gain a share
+    /// when their import/index task finishes.
+    func refreshCopyShares() {
+        var shares: [Clip.ID: ExportPlanner.CopyShare] = [:]
+        for clip in project.clips {
+            guard let index = frameIndexCache[clip.id] else { continue }
+            shares[clip.id] = ExportPlanner.copyShare(
+                for: clip, target: project.targetClip, settings: project.output, index: index)
+        }
+        if shares != copyShares { copyShares = shares }
     }
 
     /// Imports `urls`, inserting them at `index` (clamped) or appending when nil.
@@ -158,6 +180,8 @@ final class ProjectDocument: ReferenceFileDocument {
         for (original, copy) in zip(originals, copies) {
             adoptRuntimeState(of: original.id, for: copy)
         }
+        // The copies' indexes were adopted *after* the commit-time refresh ran.
+        refreshCopyShares()
         return copies.map(\.id)
     }
 
@@ -297,6 +321,8 @@ final class ProjectDocument: ReferenceFileDocument {
         for piece in pieces.dropFirst() {
             adoptRuntimeState(of: id, for: piece)
         }
+        // The later pieces' indexes were adopted *after* the commit-time refresh ran.
+        refreshCopyShares()
     }
 
     // MARK: - Audio tracks (ADR-0014)
@@ -412,6 +438,16 @@ final class ProjectDocument: ReferenceFileDocument {
             importStates[clip.id] = resolveSource(for: clip, refreshIfStale: true) == nil
                 ? .sourceMissing
                 : .ready
+        }
+        // A reopened project has no runtime indexes yet; build them in the background
+        // (throttled like import) so the copy/re-encode shares appear without waiting
+        // for an export or a cut-editor open (issue #15).
+        for clip in project.clips where importStates[clip.id] == .ready {
+            Task { @MainActor in
+                await importThrottle.acquire()
+                defer { Task { await importThrottle.release() } }
+                if (try? await frameIndex(for: clip)) != nil { refreshCopyShares() }
+            }
         }
     }
 
@@ -608,13 +644,20 @@ final class ProjectDocument: ReferenceFileDocument {
             }
             importStates[id] = .indexing
 
-            let count = try await FrameIndexer.frameCount(url: url)
+            // The full per-frame index, not just the packet count — both demux the whole
+            // file once, and having the index cached at import is what lets the copy/
+            // re-encode share show before any export or cut-editor open (issue #15). The
+            // count comes off the index so the row, the cut-editor, and the planner can
+            // never disagree about frame numbering.
+            let index = try await FrameIndexer.buildIndex(url: url)
+            frameIndexCache[id] = index
             if let i = project.clips.firstIndex(where: { $0.id == id }) {
                 var p = project
-                p.clips[i].frameCount = count
+                p.clips[i].frameCount = index.count
                 commit(p)
             }
             importStates[id] = .ready
+            refreshCopyShares()
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             importStates[id] = .failed(message)

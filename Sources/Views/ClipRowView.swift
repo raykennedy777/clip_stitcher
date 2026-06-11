@@ -41,6 +41,9 @@ struct ClipRowView: View {
     /// The clip's resolved source URL — nil while unresolved or source-missing,
     /// which keeps the generic placeholder in the thumbnail box.
     let url: URL?
+    /// The clip's planned copy/re-encode split (issue #15) — nil until the frame
+    /// index is built, which hides the share quietly.
+    var share: ExportPlanner.CopyShare? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -145,8 +148,15 @@ struct ClipRowView: View {
             }
         case .ready:
             if let frames = clip.frameCount, let duration = clip.duration {
-                Text("\(frames) frames · \(formattedDuration(duration))")
-                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("\(frames) frames · \(formattedDuration(duration))")
+                    // With a selection the share rides the selection line below instead,
+                    // so it renders exactly once per row.
+                    if clip.inPoint == nil, clip.outPoint == nil, let text = shareText {
+                        shareBadge(text)
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
             }
         case .sourceMissing:
             Label("Source missing — select the clip and use Relink…", systemImage: "questionmark.folder")
@@ -163,10 +173,39 @@ struct ClipRowView: View {
         if clip.inPoint != nil || clip.outPoint != nil {
             let inFrame = clip.inPoint ?? 0
             let outFrame = clip.outPoint ?? max(0, (clip.frameCount ?? 1) - 1)
-            Label("In \(inFrame) – Out \(outFrame) · \(max(0, outFrame - inFrame + 1)) frames", systemImage: "scissors")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.tint)
+            HStack(spacing: 4) {
+                Label("In \(inFrame) – Out \(outFrame) · \(max(0, outFrame - inFrame + 1)) frames", systemImage: "scissors")
+                if let text = shareText {
+                    shareBadge(text)
+                }
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.tint)
         }
+    }
+
+    /// The quiet per-clip copied-share readout (issue #15), e.g. "92% copied" —
+    /// "0% copied" is the open-GOP poster child (no copy-safe cut points at all).
+    private var shareText: String? {
+        share.map { Self.copiedShareText(fraction: $0.copiedFraction) }
+    }
+
+    /// Formats a copied fraction for the row. Rounds to whole percent, but never
+    /// rounds a partial share *up* to 100% — claiming "100% copied" while boundary
+    /// slivers re-encode would repeat the lie the Output footer used to tell.
+    nonisolated static func copiedShareText(fraction: Double) -> String {
+        let percent = min(Int((fraction * 100).rounded()), fraction < 1.0 ? 99 : 100)
+        return "\(max(0, percent))% copied"
+    }
+
+    /// The share as its own element so AX probes can read the verdict per row
+    /// (`source.clip.<index>.share`, 0-based like the role badge — issue #5/#15).
+    private func shareBadge(_ text: String) -> some View {
+        Text("· \(text)")
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier("source.clip.\(position - 1).share")
+            .accessibilityLabel("Copied share")
+            .accessibilityValue(Text(text))
     }
 
     /// The selection's start as approximate media seconds (in point ÷ frame
