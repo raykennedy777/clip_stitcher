@@ -80,3 +80,10 @@ the audio process under the same no-orphans rule as the video decoder.
   point stops a session that started before it; a session starting at or past the out
   point — or re-based there by a mid-play seek — runs to the clip end. Previously Play
   was a dead button from the out point onward.
+- **Amended 2026-06-11 (scroll-scrub design session):** user-initiated seeks no longer
+  restart playback — *any* seek from *any* input (arrows, scrubber drag, jump popover,
+  scene jumps, in/out links, scroll-scrub) now **pauses playback and lands on the new
+  frame**, in both the cut-editor and the output preview. Space resumes. The
+  restart-on-seek machinery above is retained for what still needs it (mid-play
+  monitor-track switches); it just stops being invoked for user seeks. This also
+  retires the mid-play-seek branch of the play-session end rule.

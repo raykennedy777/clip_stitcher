@@ -50,8 +50,8 @@ final class CutEditorModel: ObservableObject {
     /// The container's start_time — input `-ss` is measured from it (ADR-0013
     /// trap), so audio seeks subtract it from the frame's pts.
     private var containerStartTime: Double = 0
-    /// The frame this play session started (or last re-based) from, deciding
-    /// whether the out point stops it — see `playbackEnd`.
+    /// The frame this play session started from, deciding whether the out
+    /// point stops it — see `playbackEnd`.
     private var playbackOrigin = 0
 
     /// Display-corrected preview dimensions (SAR applied), resolved once at load and
@@ -135,18 +135,10 @@ final class CutEditorModel: ObservableObject {
 
     func seek(to frame: Int) {
         guard let index else { return }
+        if isPlaying { stopPlayback() }   // any user seek pauses playback (ADR-0015 amendment)
         let previous = currentFrame
         let clamped = min(max(0, frame), max(0, index.count - 1))
         currentFrame = clamped
-
-        // A seek during playback moves the audio with it: restart the stream at
-        // the new playhead (the play loop re-derives frames from the new base)
-        // and re-base the session, so scrubbing past the out point mid-play
-        // continues to the clip end instead of stopping on the next tick.
-        if isPlaying {
-            playbackOrigin = clamped
-            startAudio(atFrame: clamped)
-        }
 
         // Warm the keyframes around wherever the playhead lands (issue #34), so the
         // next `]`/`[` press paints from cache.
@@ -268,8 +260,8 @@ final class CutEditorModel: ObservableObject {
     /// Jump to the next/previous scene change: scan up to 5 seconds from the
     /// playhead for a frame whose difference from its predecessor crosses the
     /// scene threshold, and land there — or at the 5-second cap when the window
-    /// holds no cut, so the key always moves the playhead. Like seek(), this
-    /// doesn't stop playback.
+    /// holds no cut, so the key always moves the playhead. Landing seeks, so a
+    /// scene jump pauses playback like every other seek.
     func scanToSceneChange(forward: Bool) {
         guard !isSceneScanning, let index, frameCount > 0 else { return }
         let current = currentFrame
