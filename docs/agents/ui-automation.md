@@ -97,6 +97,21 @@ open --env-keep-all /path/to/VidConform.app   # or launch the binary directly
 (`open` strips the environment unless the binary is launched directly —
 `…/VidConform.app/Contents/MacOS/VidConform &` is the reliable way.)
 
+## Synthesized-event gotchas (issue #41)
+
+- **Esc doesn't fire SwiftUI's `.cancelAction`** when posted as a synthesized
+  CGEvent keyboard event, even with the window reported as `AXFocusedWindow` —
+  a real keyboard works fine (human-verified). Other shortcuts (Space, ⌘J) and
+  popover dismissal do respond to synthetic keys. Close dialogs/windows by
+  AX-pressing their Cancel/OK buttons instead.
+- **Shift-flag latching**: posting an event with `flags = .maskShift` alone
+  latches Shift into the combined event-source state, corrupting every later
+  synthesized event. Bracket shifted events with real Shift keydown/keyup
+  (virtual key 56).
+- **Direct binary launch shows the document Open panel** (no auto-untitled
+  document) — press its `NewDocumentButton`. A relaunch may instead restore
+  the previous document with its clips; don't assume a clean slate.
+
 ## Probe recipe
 
 A minimal external probe (Swift script, no project needed):
