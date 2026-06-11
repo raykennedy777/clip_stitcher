@@ -126,10 +126,15 @@ enum ExportEngine {
     /// muxer splits *only* there, so internal keyframes are carried through untouched.
     /// Assumes `needsCut(plan)`.
     static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String,
-                             bitstreamFilter: [String] = []) -> [String] {
+                             bitstreamFilter: [String] = [], trackTimescale: Int? = nil) -> [String] {
         var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
         args += bitstreamFilter
         args += ["-f", "segment"]
+        // The segment muxer doesn't forward bare muxer flags to the inner mp4 muxer —
+        // the export-wide timescale pin (issue #24) rides -segment_format_options.
+        if let trackTimescale {
+            args += ["-segment_format_options", "video_track_timescale=\(trackTimescale)"]
+        }
         let times = [plan.inSegmentTime, plan.outSegmentTime].compactMap { $0 }
         args += ["-segment_times", times.map(Self.timeString).joined(separator: ",")]
         args += ["-reset_timestamps", "1", segmentPattern]
@@ -138,9 +143,37 @@ enum ExportEngine {
 
     /// ffmpeg args to copy a whole clip's **video** to a single file (no cut). Used when
     /// the plan trims neither end.
-    static func remuxArguments(source: URL, output: URL, bitstreamFilter: [String] = []) -> [String] {
-        ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
-            + bitstreamFilter + [output.path]
+    static func remuxArguments(source: URL, output: URL, bitstreamFilter: [String] = [],
+                               trackTimescale: Int? = nil) -> [String] {
+        var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
+        args += bitstreamFilter
+        if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
+        args.append(output.path)
+        return args
+    }
+
+    /// The single video track timescale an MP4 export pins on **every** piece — copies,
+    /// boundary re-encodes, and conform re-encodes (issue #24). Pieces from different
+    /// muxer runs otherwise land in different timescales and the concat demuxer reads
+    /// them all in the first piece's: a 1/90000 clip after a 1/25000 one plays stretched
+    /// 3.6×, and a conform's encoder-default 1/12800 track collapses onto ~0 spacing.
+    ///
+    /// The least common multiple of the clips' **measured** timescales (the one-packet
+    /// copy probe — never the source container's time_base, the MKV 1/1000 trap) is the
+    /// smallest value that represents every clip's frame timing in whole ticks — the
+    /// correctness bar; no clip's frame durations may round. `nil` (no probes, or an LCM
+    /// past the 32-bit muxer range) means no export-wide pin — the per-clip #18 behavior
+    /// then applies unchanged.
+    static func exportWideTimescale(probed: [Int]) -> Int? {
+        guard !probed.isEmpty else { return nil }
+        func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
+        var acc = 1
+        for value in probed where value > 0 {
+            let (multiplied, overflow) = acc.multipliedReportingOverflow(by: value / gcd(acc, value))
+            guard !overflow, multiplied <= Int(Int32.max) else { return nil }
+            acc = multiplied
+        }
+        return acc > 1 ? acc : nil
     }
 
     /// ffmpeg args to join already-cut, same-codec video pieces with the concat demuxer —
@@ -499,6 +532,29 @@ enum ExportEngine {
         //    the target spec, self-verified before it ships (ADR-0011).
         var videoPieces: [URL] = []
         if wantsVideo {
+            // One export-wide MP4 track timescale, measured per clip via the one-packet
+            // copy probe and combined by LCM (issue #24) — stamped on every piece so
+            // cross-clip joins can't stretch or collapse. Any unprobeable clip drops the
+            // export-wide pin entirely (a partial pin would misrepresent the unprobed
+            // clip's copies); the per-clip #18 behavior then applies as before.
+            var exportTimescale: Int? = nil
+            if ext.lowercased() == "mp4" {
+                var probes: [Int] = []
+                for (i, item) in items.enumerated() {
+                    let probeOut = work.appendingPathComponent("tsprobe_\(i).mp4")
+                    guard let result = try? await ProcessRunner.run(
+                            ffmpeg, BoundaryReencodeEngine.timescaleProbeArguments(
+                                source: item.source, output: probeOut)),
+                          result.status == 0,
+                          let ts = BoundaryReencodeEngine.trackTimescale(
+                            timeBase: await MediaProbe.videoTimeBase(url: probeOut)) else {
+                        probes = []
+                        break
+                    }
+                    probes.append(ts)
+                }
+                exportTimescale = exportWideTimescale(probed: probes)
+            }
             for (i, item) in items.enumerated() {
                 let withinClip: @Sendable (Double) -> Void = { w in
                     progress(ExportProgress.clipFraction(clipIndex: i, clipCount: items.count, withinClip: w))
@@ -507,12 +563,12 @@ enum ExportEngine {
                     videoPieces.append(try await ConformEngine.produceConformedPiece(
                         ffmpeg, source: item.source, conform: conform,
                         start: item.audioStart, end: item.audioEnd, work: work, ext: ext, clipIndex: i,
-                        onProgress: withinClip))
+                        trackTimescale: exportTimescale, onProgress: withinClip))
                 } else {
                     videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
                         ffmpeg, source: item.source, plan: item.segments, index: item.index,
                         encoder: item.encoder, work: work, ext: ext, clipIndex: i,
-                        codec: item.codec, onProgress: withinClip))
+                        codec: item.codec, trackTimescale: exportTimescale, onProgress: withinClip))
                 }
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }

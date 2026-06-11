@@ -139,23 +139,29 @@ enum BoundaryReencodeEngine {
     static func produceVideoPiece(
         _ ffmpeg: URL, source: URL, plan: [PlannedSegment], index: FrameIndex,
         encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
+        trackTimescale: Int? = nil,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
         // mpeg2video→MKV copy needs the missing-PTS refill (issue #2); [] otherwise.
         let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: codec, ext: ext)
 
-        // An MP4 plan mixing copy and re-encode pieces must mux them in one track
-        // timescale (issue #18): measure what the copy pieces will inherit via the
-        // one-packet timescale probe, and pin the re-encodes to it. An unreadable
-        // probe leaves the pin off — the verify gates still backstop the seam.
-        var pieceTimescale: Int? = nil
-        if ext.lowercased() == "mp4",
+        // The export-wide MP4 timescale (issue #24) stamps every piece — copies
+        // included — so cross-clip joins can't stretch or collapse. Without one
+        // (non-MP4 output, or a clip that couldn't be probed), an MP4 plan mixing
+        // copy and re-encode pieces falls back to the per-clip pin (issue #18):
+        // measure what the copy pieces will inherit via the one-packet timescale
+        // probe and pin the re-encodes to it. An unreadable probe leaves the pin
+        // off — the verify gates still backstop the seam.
+        let copyTimescale: Int? = ext.lowercased() == "mp4" ? trackTimescale : nil
+        var pieceTimescale: Int? = copyTimescale
+        if pieceTimescale == nil,
+           ext.lowercased() == "mp4",
            plan.contains(where: { $0.kind == .copy }),
            plan.contains(where: { $0.kind == .reEncode }) {
             let probe = work.appendingPathComponent("c\(clipIndex)_tsprobe.mp4")
             try await run(ffmpeg, timescaleProbeArguments(source: source, output: probe))
-            pieceTimescale = trackTimescale(timeBase: await MediaProbe.videoTimeBase(url: probe))
+            pieceTimescale = Self.trackTimescale(timeBase: await MediaProbe.videoTimeBase(url: probe))
         }
 
         let segmentFrames = plan.map { $0.range.count }
@@ -191,14 +197,15 @@ enum BoundaryReencodeEngine {
                     let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
                     try await run(ffmpeg, ExportEngine.cutArguments(
                         source: source, plan: copyPlan, segmentPattern: pattern,
-                        bitstreamFilter: bsf), onOutTime: onOutTime)
+                        bitstreamFilter: bsf, trackTimescale: copyTimescale), onOutTime: onOutTime)
                     piece = work.appendingPathComponent(String(
                         format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)",
                         ExportEngine.wantedSegmentIndex(plan: copyPlan)))
                 } else {
                     piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp.\(ext)")
                     try await run(ffmpeg, ExportEngine.remuxArguments(
-                        source: source, output: piece, bitstreamFilter: bsf),
+                        source: source, output: piece, bitstreamFilter: bsf,
+                        trackTimescale: copyTimescale),
                                   onOutTime: onOutTime)
                 }
             }

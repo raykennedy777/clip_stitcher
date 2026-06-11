@@ -103,6 +103,20 @@ struct ConformEngineTests {
         #expect(args.prefix(4) == ["-v", "error", "-i", src.path])
     }
 
+    /// The export-wide MP4 timescale (issue #24) pins the conform's track — without it
+    /// the encoder-default 1/12800 collapses next to a copy piece at the concat.
+    @Test func conformArgumentsCarryTheExportWideTimescaleWhenSet() {
+        let pinned = ConformEngine.conformArguments(
+            source: src, start: nil, end: nil, sourceVideo: hevc, targetVideo: mpeg2,
+            output: out, trackTimescale: 450000)
+        let i = pinned.firstIndex(of: "-video_track_timescale")
+        #expect(i != nil && pinned[pinned.index(after: i!)] == "450000")
+        // and without one the command keeps its validated shape
+        let plain = ConformEngine.conformArguments(
+            source: src, start: nil, end: nil, sourceVideo: hevc, targetVideo: mpeg2, output: out)
+        #expect(!plain.contains("-video_track_timescale"))
+    }
+
     // MARK: relaxed frame-count (ADR-0011)
 
     /// M2's exact frame-count assertion is relaxed for conformed pieces to `duration × target_fps`

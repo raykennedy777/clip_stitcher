@@ -89,6 +89,40 @@ struct ExportEngineTests {
         #expect(!remux.contains("-bsf:v"))
     }
 
+    // MARK: export-wide MP4 timescale (issue #24)
+
+    @Test func exportWideTimescaleIsTheLcmOfTheProbes() {
+        // the two real failure legs: 25000 vs 90000 sources, and an MKV-source 16000
+        #expect(ExportEngine.exportWideTimescale(probed: [25000, 90000]) == 450000)
+        #expect(ExportEngine.exportWideTimescale(probed: [16000, 25000]) == 400000)
+        #expect(ExportEngine.exportWideTimescale(probed: [16000]) == 16000)
+        #expect(ExportEngine.exportWideTimescale(probed: [25000, 25000]) == 25000)
+    }
+
+    @Test func exportWideTimescaleRefusesToOverflowTheMuxerRange() {
+        // co-prime monsters would blow past Int32 — no pin beats a rounded pin
+        #expect(ExportEngine.exportWideTimescale(probed: [1_000_003, 999_999_937]) == nil)
+        #expect(ExportEngine.exportWideTimescale(probed: []) == nil)
+    }
+
+    @Test func copyCommandsCarryTheExportWideTimescale() {
+        let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: 2.0)
+        let cut = ExportEngine.cutArguments(source: src, plan: plan,
+                                            segmentPattern: "/tmp/p_%03d.mp4", trackTimescale: 450000)
+        // the segment muxer forwards inner-muxer flags only via -segment_format_options
+        let i = cut.firstIndex(of: "-segment_format_options")
+        #expect(i != nil && cut[cut.index(after: i!)] == "video_track_timescale=450000")
+        let remux = ExportEngine.remuxArguments(source: src, output: URL(fileURLWithPath: "/tmp/o.mp4"),
+                                                trackTimescale: 450000)
+        let j = remux.firstIndex(of: "-video_track_timescale")
+        #expect(j != nil && remux[remux.index(after: j!)] == "450000")
+        // and without a pin both commands keep their validated shapes
+        #expect(!ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
+            .contains("-segment_format_options"))
+        #expect(!ExportEngine.remuxArguments(source: src, output: URL(fileURLWithPath: "/tmp/o.ts"))
+            .contains("-video_track_timescale"))
+    }
+
     @Test func theBitstreamFilterLandsBeforeTheSegmentMuxerFlags() {
         let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: 2.0)
         let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mkv")

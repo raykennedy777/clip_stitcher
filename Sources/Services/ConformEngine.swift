@@ -49,13 +49,17 @@ enum ConformEngine {
     /// open start/end omits the corresponding seek flag (read from file start / to file end).
     static func conformArguments(
         source: URL, start: Double?, end: Double?,
-        sourceVideo: VideoProperties, targetVideo: VideoProperties, output: URL
+        sourceVideo: VideoProperties, targetVideo: VideoProperties, output: URL,
+        trackTimescale: Int? = nil
     ) -> [String] {
         var args = ["-v", "error"]
         if let start { args += ["-ss", ExportEngine.timeString(start)] }
         if let end { args += ["-t", ExportEngine.timeString(end - (start ?? 0))] }
         args += ["-i", source.path]
         args += conformVideoArgs(source: sourceVideo, target: targetVideo)
+        // The export-wide MP4 pin (issue #24): without it the encoder-default 1/12800
+        // track collapses next to a copy piece at the cross-clip concat.
+        if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
         args += ["-an", output.path]
         return args
     }
@@ -74,6 +78,7 @@ enum ConformEngine {
     static func produceConformedPiece(
         _ ffmpeg: URL, source: URL, conform: VideoConform,
         start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int,
+        trackTimescale: Int? = nil,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         let piece = work.appendingPathComponent("c\(clipIndex)_conform.\(ext)")
@@ -89,7 +94,8 @@ enum ConformEngine {
         let windowDuration = windowEnd.map { $0 - (start ?? 0) }
         let args = conformArguments(source: source, start: start, end: end,
                                     sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
-                                    output: piece)
+                                    output: piece,
+                                    trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil)
         let parser = ProgressParser()
         let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
             if let t = parser.feed(chunk) {
