@@ -35,6 +35,16 @@ on its own.
   earlier "snap to nearest keyframe" intent).
 - Segments are cut with:
   `ffmpeg -i <src> -map 0:v:0 -c copy -f segment -segment_times <t…> -reset_timestamps 1 out_%03d.<ext>`
+  - **Amended (issue #2):** for **mpeg2video into MKV** (cut and whole-clip remux alike) the copy
+    additionally carries `-bsf:v setts=pts=if(eq(PTS\,NOPTS)\,DTS\,PTS)`. Real MPEG-PS broadcast
+    captures contain occasional packets with no PTS at all (the second frame of each
+    duplicated-timestamp anomaly); TS and MP4 tolerate them, matroska refuses ("Can't write
+    packet with unknown timestamp") — even on a plain whole-file remux, so this was never about
+    the joins. The filter refills exactly those packets' PTS from DTS — the same rule
+    `FrameIndexer.parseIndex` uses to number frames (ADR-0006) — and is the identity on
+    fully-stamped sources. Every other codec×container command is byte-identical to its
+    validated shape. De-risked on the real BBC capture end-to-end (cut, re-encode, concat,
+    chained remux, audio mux — frame-exact, clean decode, verify gates pass).
   where each `segment_time` is the **midpoint between the target cut-point's DTS (decode time) and
   the DTS of the packet decoded immediately before it**. The segment muxer splits at the first
   keyframe whose **decode** time is `>=` the requested time, so the value must be derived from DTS,

@@ -43,7 +43,6 @@ struct ExportItem {
 enum ExportError: LocalizedError {
     case noClips
     case invalidPlan
-    case unsupportedContainer(codec: String, container: String)
     case cutFailed(String)
     case conformFailed(String)
     case concatFailed(String)
@@ -57,8 +56,6 @@ enum ExportError: LocalizedError {
         switch self {
         case .noClips: return "There are no clips to export."
         case .invalidPlan: return "A clip's in/out points collapse to nothing after snapping to clean cut points."
-        case .unsupportedContainer(let codec, let container):
-            return "The \(container.uppercased()) container can't carry \(codec) video by stream-copy. Choose TS (recommended for this footage) or MP4."
         case .cutFailed(let d): return "Could not cut a clip.\n\(d)"
         case .conformFailed(let d): return "Could not conform a clip to the target.\n\(d)"
         case .concatFailed(let d): return "Could not join the clips.\n\(d)"
@@ -94,12 +91,20 @@ enum ExportEngine {
         case external(URL, stream: Int)
     }
 
-    /// Whether a codec can be stream-copied into a container. Matroska rejects MPEG-2's
-    /// unknown/non-monotonic timestamps at the cut joins (verified in the shell — it fails
-    /// with "Can't write packet with unknown timestamp"); TS and MP4 tolerate them, and
-    /// H.264/HEVC are fine in all three.
-    static func streamCopyCompatible(codec: String?, container: Container) -> Bool {
-        !(container == .mkv && codec == "mpeg2video")
+    /// Output bitstream filter that makes matroska accept stream-copied MPEG-2 (issue #2).
+    /// Real MPEG-PS broadcast captures carry occasional video packets with **no PTS at
+    /// all** (the second frame of each duplicated-timestamp anomaly — the BBC fixture has
+    /// them; even a plain whole-file remux failed with "Can't write packet with unknown
+    /// timestamp"). TS and MP4 tolerate a missing PTS; matroska refuses the packet. The
+    /// `setts` filter refills exactly those packets' PTS from their DTS — the same refill
+    /// `FrameIndexer.parseIndex` applies when numbering frames (ADR-0006), so the muxed
+    /// timestamps agree with the app's frame index and the verify gate's source pattern.
+    /// All other packets pass through untouched, so on a fully-stamped source it is the
+    /// identity. Scoped to mpeg2video→MKV: every other codec×container command stays
+    /// byte-identical to its validated shape.
+    static func ptsRefillBitstreamFilter(codec: String?, ext: String) -> [String] {
+        guard codec == "mpeg2video", ext.lowercased() == "mkv" else { return [] }
+        return ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"]
     }
 
     /// Whether the plan trims either end. When neither end is cut the clip is copied
@@ -120,8 +125,11 @@ enum ExportEngine {
     /// keyframe whose DTS reaches the segment time. With explicit `-segment_times` the
     /// muxer splits *only* there, so internal keyframes are carried through untouched.
     /// Assumes `needsCut(plan)`.
-    static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String) -> [String] {
-        var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy", "-f", "segment"]
+    static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String,
+                             bitstreamFilter: [String] = []) -> [String] {
+        var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
+        args += bitstreamFilter
+        args += ["-f", "segment"]
         let times = [plan.inSegmentTime, plan.outSegmentTime].compactMap { $0 }
         args += ["-segment_times", times.map(Self.timeString).joined(separator: ",")]
         args += ["-reset_timestamps", "1", segmentPattern]
@@ -130,8 +138,9 @@ enum ExportEngine {
 
     /// ffmpeg args to copy a whole clip's **video** to a single file (no cut). Used when
     /// the plan trims neither end.
-    static func remuxArguments(source: URL, output: URL) -> [String] {
-        ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy", output.path]
+    static func remuxArguments(source: URL, output: URL, bitstreamFilter: [String] = []) -> [String] {
+        ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
+            + bitstreamFilter + [output.path]
     }
 
     /// ffmpeg args to join already-cut, same-codec video pieces with the concat demuxer —
@@ -462,9 +471,8 @@ enum ExportEngine {
         }
         // No mixed-codec refusal: a non-matching clip is conformed to the target's codec
         // (ADR-0011), so every piece reaching the concat is already the target codec.
-        for item in items where !streamCopyCompatible(codec: item.codec, container: settings.container) {
-            throw ExportError.unsupportedContainer(codec: item.codec ?? "this", container: settings.container.fileExtension)
-        }
+        // No container refusal either — the one bad combination (mpeg2video into MKV)
+        // is handled by the pts-refill bitstream filter (issue #2).
 
         let ffmpeg = try FFTools.ffmpegURL()
         // Video pieces always use the container extension; an audio-only output has no video
@@ -504,7 +512,7 @@ enum ExportEngine {
                     videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
                         ffmpeg, source: item.source, plan: item.segments, index: item.index,
                         encoder: item.encoder, work: work, ext: ext, clipIndex: i,
-                        onProgress: withinClip))
+                        codec: item.codec, onProgress: withinClip))
                 }
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }

@@ -138,10 +138,12 @@ enum BoundaryReencodeEngine {
     /// at the clip's top edge while they run.
     static func produceVideoPiece(
         _ ffmpeg: URL, source: URL, plan: [PlannedSegment], index: FrameIndex,
-        encoder: [String], work: URL, ext: String, clipIndex: Int,
+        encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
+        // mpeg2video→MKV copy needs the missing-PTS refill (issue #2); [] otherwise.
+        let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: codec, ext: ext)
 
         // An MP4 plan mixing copy and re-encode pieces must mux them in one track
         // timescale (issue #18): measure what the copy pieces will inherit via the
@@ -188,13 +190,15 @@ enum BoundaryReencodeEngine {
                 if ExportEngine.needsCut(copyPlan) {
                     let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
                     try await run(ffmpeg, ExportEngine.cutArguments(
-                        source: source, plan: copyPlan, segmentPattern: pattern), onOutTime: onOutTime)
+                        source: source, plan: copyPlan, segmentPattern: pattern,
+                        bitstreamFilter: bsf), onOutTime: onOutTime)
                     piece = work.appendingPathComponent(String(
                         format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)",
                         ExportEngine.wantedSegmentIndex(plan: copyPlan)))
                 } else {
                     piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp.\(ext)")
-                    try await run(ffmpeg, ExportEngine.remuxArguments(source: source, output: piece),
+                    try await run(ffmpeg, ExportEngine.remuxArguments(
+                        source: source, output: piece, bitstreamFilter: bsf),
                                   onOutTime: onOutTime)
                 }
             }

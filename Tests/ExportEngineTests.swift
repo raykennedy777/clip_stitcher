@@ -68,14 +68,38 @@ struct ExportEngineTests {
         #expect(list.contains("file '/tmp/b.mp4'"))
     }
 
-    @Test func mpeg2IsIncompatibleWithMkvButFineElsewhere() {
-        // Matroska can't stream-copy MPEG-2 (unknown-timestamp at joins); TS/MP4 can.
-        #expect(ExportEngine.streamCopyCompatible(codec: "mpeg2video", container: .mkv) == false)
-        #expect(ExportEngine.streamCopyCompatible(codec: "mpeg2video", container: .ts) == true)
-        #expect(ExportEngine.streamCopyCompatible(codec: "mpeg2video", container: .mp4) == true)
-        // H.264/HEVC are fine in every container.
-        #expect(ExportEngine.streamCopyCompatible(codec: "h264", container: .mkv) == true)
-        #expect(ExportEngine.streamCopyCompatible(codec: "hevc", container: .mkv) == true)
+    @Test func mpeg2IntoMkvGetsThePtsRefillFilter() {
+        // Matroska refuses the BBC capture's no-PTS packets on stream copy (issue #2);
+        // the setts filter refills exactly those from DTS — same rule as the frame index.
+        let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mkv")
+        #expect(bsf == ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"])
+    }
+
+    @Test func everyOtherCodecContainerComboKeepsItsValidatedCommandShape() {
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "ts").isEmpty)
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mp4").isEmpty)
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "mkv").isEmpty)
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "hevc", ext: "mkv").isEmpty)
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: nil, ext: "mkv").isEmpty)
+        // and without a filter the cut/remux commands are byte-identical to before
+        let plan = SegmentPlan(inFrame: 10, outFrame: 20, inSegmentTime: 1.0, outSegmentTime: 2.0)
+        let cut = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
+        #expect(!cut.contains("-bsf:v"))
+        let remux = ExportEngine.remuxArguments(source: src, output: URL(fileURLWithPath: "/tmp/o.ts"))
+        #expect(!remux.contains("-bsf:v"))
+    }
+
+    @Test func theBitstreamFilterLandsBeforeTheSegmentMuxerFlags() {
+        let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: 2.0)
+        let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mkv")
+        let args = ExportEngine.cutArguments(source: src, plan: plan,
+                                             segmentPattern: "/tmp/p_%03d.mkv", bitstreamFilter: bsf)
+        let bsfIndex = args.firstIndex(of: "-bsf:v")
+        let segIndex = args.firstIndex(of: "segment")
+        #expect(bsfIndex != nil && segIndex != nil && bsfIndex! < segIndex!)
+        let remux = ExportEngine.remuxArguments(source: src, output: URL(fileURLWithPath: "/tmp/o.mkv"),
+                                                bitstreamFilter: bsf)
+        #expect(remux.contains("-bsf:v") && remux.last == "/tmp/o.mkv")
     }
 
     // MARK: - Audio re-encode
