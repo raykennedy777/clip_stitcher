@@ -78,6 +78,17 @@ a "track" (see Clip).
 _Avoid_: audio channel (that's mono/stereo layout), audio stream (use for the raw stream
 inside a container)
 
+**Channel mix**:
+A per-clip, per-audio-track choice of how a source's channels are mixed into its output
+track: Original (pass through), Stereo (fold a surround source down to two-speaker
+stereo; no-op otherwise), Left only / Right only (one side of that stereo fold-down,
+heard alone), or Mono (everything folded to one signal). A channel mix never changes the
+output track's channel layout — only what is mixed into it. Options that would be no-ops
+for a given source are disabled, and the mix resets to Original whenever the track's
+source changes.
+_Avoid_: channel settings, downmix option, channel layout (that's the track's shape,
+which a channel mix never touches)
+
 ### Domain concepts
 
 **Target clip**:
