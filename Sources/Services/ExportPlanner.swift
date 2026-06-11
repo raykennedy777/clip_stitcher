@@ -16,6 +16,9 @@ enum ExportPlanner {
         var index: FrameIndex
         var containerStart: Double
         var audioSources: [ExportEngine.AudioSource?]
+        /// Per-track channel-mix filters (ADR-0019), resolved alongside `audioSources`
+        /// by `AudioSourceResolver.resolveMixFilters`; nil legs carry no mix.
+        var audioMixFilters: [String?] = []
     }
 
     /// How one clip's video reaches the output (ADR-0011) — exactly one of the two,
@@ -88,14 +91,18 @@ enum ExportPlanner {
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: conform.targetVideo.codec,
                               audioStart: window.start, audioEnd: window.end,
-                              audioSources: input.audioSources, audioDuration: window.duration,
+                              audioSources: input.audioSources,
+                              audioMixFilters: input.audioMixFilters,
+                              audioDuration: window.duration,
                               conform: conform)
         case .smartRender(let segments, let encoder):
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: clip.video?.codec,
                               segments: segments, index: index, encoder: encoder,
                               audioStart: window.start, audioEnd: window.end,
-                              audioSources: input.audioSources, audioDuration: window.duration)
+                              audioSources: input.audioSources,
+                              audioMixFilters: input.audioMixFilters,
+                              audioDuration: window.duration)
         }
     }
 

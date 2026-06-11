@@ -29,6 +29,34 @@ enum ConformEngine {
         "aresample=\(sampleRate),aformat=channel_layouts=\(channelLayout(channels))"
     }
 
+    /// The channel-mix filter for one audio leg (ADR-0019), inserted **before** the
+    /// per-leg `audioFilter` conform on every surface (export rebuild, cut-editor,
+    /// output preview — one builder so the three can't drift). nil when the mix is a
+    /// no-op for the source — then the leg stays byte-identical to today's. The mix
+    /// works on the source's normal stereo listening experience: a surround source is
+    /// first folded to stereo (ffmpeg's standard fold-down — the same one `-ac 2`
+    /// applies), then Left/Right/Mono shape that stereo image. The conform after it
+    /// carries the result into the output track's fixed layout. De-risked in the shell
+    /// on MPEG-2/H.264/HEVC in TS/MKV/MP4 with a synthesized 5.1 source (2026-06):
+    /// sample counts and track layouts are untouched by every recipe.
+    static func mixFilter(_ mix: ChannelMix, sourceChannels: Int?) -> String? {
+        guard !mix.isNoOp(sourceChannels: sourceChannels) else { return nil }
+        let foldDown = "aformat=channel_layouts=stereo"
+        let fold = (sourceChannels ?? 0) > 2 ? foldDown + "," : ""
+        switch mix {
+        case .original:
+            return nil
+        case .stereo:
+            return foldDown
+        case .leftOnly:
+            return fold + "pan=stereo|c0=c0|c1=c0"
+        case .rightOnly:
+            return fold + "pan=stereo|c0=c1|c1=c1"
+        case .mono:
+            return fold + "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1"
+        }
+    }
+
     /// ffmpeg channel-layout name for a channel count (the broadcast cases). An uncommon
     /// count falls back to stereo — rate/channels are match dimensions referenced from the
     /// target, and the footage in this domain is mono/stereo.

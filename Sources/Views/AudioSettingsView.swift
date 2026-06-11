@@ -47,8 +47,8 @@ struct AudioSettingsView: View {
                     .frame(minHeight: 120)
                 } else {
                     List {
-                        ForEach(Array(clip.resolvedAudioSelections.enumerated()), id: \.offset) { slot, selection in
-                            trackRow(clip: clip, slot: slot, selection: selection)
+                        ForEach(Array(clip.resolvedAudioSelections.enumerated()), id: \.offset) { slot, trackSlot in
+                            trackRow(clip: clip, slot: slot, trackSlot: trackSlot)
                         }
                     }
                     .frame(minHeight: 160)
@@ -71,7 +71,7 @@ struct AudioSettingsView: View {
                 .padding()
             }
         }
-        .frame(width: 520)
+        .frame(width: 620)
         .fileImporter(
             isPresented: $isBrowsing,
             allowedContentTypes: Self.audioContentTypes
@@ -89,14 +89,16 @@ struct AudioSettingsView: View {
     // MARK: - Rows
 
     @ViewBuilder
-    private func trackRow(clip: Clip, slot: Int, selection: AudioTrackSelection) -> some View {
+    private func trackRow(clip: Clip, slot: Int, trackSlot: AudioTrackSlot) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text("Track \(slot + 1)")
                     .frame(width: 64, alignment: .leading)
                     .foregroundStyle(.secondary)
 
-                sourcePicker(clip: clip, slot: slot, selection: selection)
+                sourcePicker(clip: clip, slot: slot, selection: trackSlot.selection)
+
+                mixPicker(clip: clip, slot: slot, current: trackSlot.mix)
 
                 Spacer()
 
@@ -177,6 +179,41 @@ struct AudioSettingsView: View {
         .help(sourceLabel(clip: clip, slot: slot, selection: selection))
     }
 
+    /// The slot's channel-mix menu (ADR-0019): how this source's channels are mixed
+    /// into its output track — never the track's layout. Options that change nothing
+    /// for this source are greyed out (Stereo for a mono/stereo source, everything but
+    /// Original for mono or unknown). With several clips selected and diverging mixes
+    /// the label reads "Multiple"; picking any option converges them.
+    private func mixPicker(clip: Clip, slot: Int, current: ChannelMix) -> some View {
+        let tracks = clip.effectiveAudioTracks
+        let channels = slot < tracks.count ? tracks[slot]?.channels : nil
+        let mixes = Set(selectedClips.map { c -> ChannelMix in
+            let slots = c.resolvedAudioSelections
+            return slot < slots.count ? slots[slot].mix : .original
+        })
+        let uniform = mixes.count <= 1
+        return Menu {
+            ForEach(ChannelMix.allCases, id: \.self) { mix in
+                Button {
+                    updateMix(clip: clip, slot: slot, to: mix)
+                } label: {
+                    if uniform && mix == current {
+                        Label(mix.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(mix.displayName)
+                    }
+                }
+                .disabled(mix != .original && mix.isNoOp(sourceChannels: channels))
+            }
+        } label: {
+            Text(uniform ? current.displayName : "Multiple")
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 100, alignment: .leading)
+        .help("Channel mix — how this source's channels are mixed into the output track")
+    }
+
     private func sourceLabel(clip: Clip, slot: Int, selection: AudioTrackSelection) -> String {
         switch selection {
         case .stream(let s):
@@ -197,7 +234,20 @@ struct AudioSettingsView: View {
     private func updateSlot(clip: Clip, slot: Int, to selection: AudioTrackSelection) {
         var selections = clip.resolvedAudioSelections
         guard slot < selections.count else { return }
-        selections[slot] = selection
+        // A changed source resets the slot's mix to Original — the mix is a judgment
+        // about the previous source's content (ADR-0019). Re-picking the same source
+        // keeps it.
+        if selections[slot].selection != selection {
+            selections[slot] = AudioTrackSlot(selection: selection)
+        }
+        document.setAudioSelections(ids: Set(clipIDs), selections: selections)
+    }
+
+    /// Changes only the slot's mix; the source stays put.
+    private func updateMix(clip: Clip, slot: Int, to mix: ChannelMix) {
+        var selections = clip.resolvedAudioSelections
+        guard slot < selections.count else { return }
+        selections[slot].mix = mix
         document.setAudioSelections(ids: Set(clipIDs), selections: selections)
     }
 

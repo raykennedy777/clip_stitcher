@@ -480,30 +480,35 @@ final class CutEditorModel: ObservableObject {
         player.start(
             url: source.url, streamIndex: source.streamIndex,
             seekSeconds: AudioStreamPlayer.seekSeconds(
-                sourceTime: index.pts[frame], containerStartTime: containerStartTime))
+                sourceTime: index.pts[frame], containerStartTime: containerStartTime),
+            filter: source.mixFilter)
     }
 
     /// The monitored audio slot resolved to a playable source: the clip's own file
     /// and stream, or an external file's chosen stream (aligned file start =
-    /// video-file start, ADR-0014 — the same seek offset applies). Reads the live
-    /// clip — the dropdown and settings sheet write to the document, and this
-    /// model's `clip` is a snapshot from when the window opened. nil when there is
-    /// nothing playable: no slots, a slot past the clip's own streams (silence),
-    /// or an external bookmark that no longer resolves.
-    private func monitoredAudioSource() -> (url: URL, streamIndex: Int)? {
+    /// video-file start, ADR-0014 — the same seek offset applies), plus the slot's
+    /// channel-mix filter (ADR-0019 — the same mix the export inserts, so what is
+    /// monitored is what ships). Reads the live clip — the dropdown and settings
+    /// sheet write to the document, and this model's `clip` is a snapshot from when
+    /// the window opened. nil when there is nothing playable: no slots, a slot past
+    /// the clip's own streams (silence), or an external bookmark that no longer
+    /// resolves.
+    private func monitoredAudioSource() -> (url: URL, streamIndex: Int, mixFilter: String?)? {
         let live = document?.project.clips.first { $0.id == clip.id } ?? clip
         let selections = live.resolvedAudioSelections
         guard !selections.isEmpty else { return nil }
         let slot = min(max(0, live.monitoredAudioTrack ?? 0), selections.count - 1)
-        switch selections[slot] {
+        let mixFilter = ConformEngine.mixFilter(
+            selections[slot].mix, sourceChannels: live.effectiveAudioTracks[slot]?.channels)
+        switch selections[slot].selection {
         case .stream(let i):
             guard i < live.allAudioTracks.count else { return nil }
-            return (url, i)
+            return (url, i, mixFilter)
         case .external(let bookmark, _, let streamIndex, _, _):
             var stale = false
             guard let extURL = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale),
                   FileManager.default.fileExists(atPath: extURL.path) else { return nil }
-            return (extURL, streamIndex)
+            return (extURL, streamIndex, mixFilter)
         }
     }
 

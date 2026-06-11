@@ -212,4 +212,41 @@ struct AudioSourceResolverTests {
         #expect(own.tracks[1].channels == 2)
         #expect(own.fallbacks.isEmpty)
     }
+
+    // MARK: channel-mix resolution (ADR-0019)
+
+    /// Mix filters resolve per slot from the slot's mix and its *source's* channel
+    /// count — Original and no-ops (here: a mono source, and a silence slot with no
+    /// probed properties) resolve to nil, so those legs carry no filter.
+    @Test func mixFiltersResolvePerSlotAgainstTheFeedingSource() {
+        var clip = clipOwning([ownTrack(codec: "mp2", channels: 1),
+                               ownTrack(codec: "aac", channels: 2)])
+        clip.audioSelections = [
+            AudioTrackSlot(selection: .stream(0), mix: .mono),      // mono source: no-op
+            AudioTrackSlot(selection: .stream(1), mix: .leftOnly),  // stereo source: real
+            AudioTrackSlot(selection: .stream(1), mix: .original),  // original: nothing
+            AudioTrackSlot(selection: .stream(9), mix: .mono),      // silence slot: nothing
+        ]
+        let filters = AudioSourceResolver.resolveMixFilters(for: clip)
+        #expect(filters.count == 4)
+        #expect(filters[0] == nil)
+        #expect(filters[1] == "pan=stereo|c0=c0|c1=c0")
+        #expect(filters[2] == nil)
+        #expect(filters[3] == nil)
+    }
+
+    /// An external slot's mix reads the chosen stream's probed channels.
+    @Test func externalSlotMixUsesItsProbedStreamChannels() {
+        var clip = clipOwning([ownTrack(codec: "aac")])
+        clip.audioSelections = [
+            AudioTrackSlot(
+                selection: .external(bookmark: Data(), name: "surround.mkv", streamIndex: 1,
+                                     tracks: [ownTrack(codec: "aac", channels: 2),
+                                              ownTrack(codec: "ac3", channels: 6)],
+                                     duration: nil),
+                mix: .stereo),
+        ]
+        let filters = AudioSourceResolver.resolveMixFilters(for: clip)
+        #expect(filters == ["aformat=channel_layouts=stereo"])
+    }
 }

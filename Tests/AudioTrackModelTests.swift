@@ -144,6 +144,63 @@ struct AudioTrackModelTests {
         #expect(decoded.monitoredAudioTrack == 0)
     }
 
+    // MARK: - Channel mix (ADR-0019)
+
+    @Test func noOpTableMatchesTheADR() {
+        // Stereo is a surround fold-down: no-op for mono & stereo sources.
+        #expect(ChannelMix.stereo.isNoOp(sourceChannels: 1))
+        #expect(ChannelMix.stereo.isNoOp(sourceChannels: 2))
+        #expect(!ChannelMix.stereo.isNoOp(sourceChannels: 6))
+        // Left/Right/Mono act on the stereo image: no-op only for mono sources.
+        for mix in [ChannelMix.leftOnly, .rightOnly, .mono] {
+            #expect(mix.isNoOp(sourceChannels: 1))
+            #expect(!mix.isNoOp(sourceChannels: 2))
+            #expect(!mix.isNoOp(sourceChannels: 6))
+        }
+        // Original is the identity; an unknown source (unprobed external, missing
+        // stream — the slot plays silence) makes every mix a no-op.
+        #expect(ChannelMix.original.isNoOp(sourceChannels: 6))
+        for mix in ChannelMix.allCases {
+            #expect(mix.isNoOp(sourceChannels: nil))
+        }
+    }
+
+    @Test func defaultSlotsCarryTheOriginalMix() {
+        var clip = Clip(bookmark: Data(), displayName: "a.mkv")
+        clip.audioTracks = [track(), track()]
+        #expect(clip.resolvedAudioSelections.allSatisfy { $0.mix == .original })
+    }
+
+    @Test func preMixSlotJSONDecodesWithOriginalEverywhere() throws {
+        // A literal pre-#38 clip payload: audioSelections is an array of the bare
+        // selection enum. Old documents must load with every track at Original.
+        let json = """
+        {"id":"6F1E9A2B-1111-2222-3333-444455556666","bookmark":"","displayName":"a.mkv",
+         "audioSelections":[{"stream":{"_0":1}},
+            {"external":{"bookmark":"","name":"x.mp3","streamIndex":0}}]}
+        """
+        let decoded = try JSONDecoder().decode(Clip.self, from: Data(json.utf8))
+        let slots = try #require(decoded.audioSelections)
+        #expect(slots.count == 2)
+        #expect(slots[0] == .stream(1))
+        #expect(slots.allSatisfy { $0.mix == .original })
+        if case .external(_, let name, _, _, _) = slots[1].selection {
+            #expect(name == "x.mp3")
+        } else {
+            Issue.record("second slot should still decode as the external selection")
+        }
+    }
+
+    @Test func mixSurvivesARoundTrip() throws {
+        var clip = Clip(bookmark: Data(), displayName: "a.mkv")
+        clip.audioTracks = [track(), track()]
+        clip.audioSelections = [AudioTrackSlot(selection: .stream(0), mix: .leftOnly),
+                                .stream(1)]
+        let decoded = try roundTrip(clip)
+        #expect(decoded.audioSelections?[0].mix == .leftOnly)
+        #expect(decoded.audioSelections?[1].mix == .original)
+    }
+
     @Test func selectionsDriveTheOutputTrackCount() {
         let a = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2)
         var rich = Clip(bookmark: Data(), displayName: "r")

@@ -36,8 +36,8 @@ enum AudioSourceResolver {
     static func resolveSources(
         for clip: Clip, missingExternal policy: MissingExternalPolicy
     ) throws -> [ExportEngine.AudioSource?] {
-        try clip.resolvedAudioSelections.enumerated().map { slot, selection in
-            switch selection {
+        try clip.resolvedAudioSelections.enumerated().map { slot, trackSlot in
+            switch trackSlot.selection {
             case .stream(let s):
                 return s < clip.allAudioTracks.count ? .stream(s) : nil
             case .external(let bookmark, let name, let streamIndex, _, _):
@@ -51,6 +51,16 @@ enum AudioSourceResolver {
                 }
                 return .external(url, stream: streamIndex)
             }
+        }
+    }
+
+    /// The channel-mix filter feeding each of the clip's audio track slots (ADR-0019),
+    /// in slot order — nil where the slot's mix is Original or a no-op for its source
+    /// (`ConformEngine.mixFilter`). Resolved next to `resolveSources` so every surface
+    /// pairs a leg's source and its mix from the same slot list.
+    static func resolveMixFilters(for clip: Clip) -> [String?] {
+        zip(clip.resolvedAudioSelections, clip.effectiveAudioTracks).map { slot, properties in
+            ConformEngine.mixFilter(slot.mix, sourceChannels: properties?.channels)
         }
     }
 

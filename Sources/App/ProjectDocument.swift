@@ -329,10 +329,10 @@ final class ProjectDocument: ReferenceFileDocument {
 
     /// Replaces the audio track slots of every clip in `ids` in one undo step;
     /// `nil` restores the default (all of the clip's own streams in container
-    /// order). This is the Audio Settings sheet's same-source fan-out (issue #12) —
-    /// it covers the slot assignments only: each clip's monitored-track choice is
-    /// untouched beyond clamping it into the new list.
-    func setAudioSelections(ids: Set<Clip.ID>, selections: [AudioTrackSelection]?) {
+    /// order, each at the Original mix). This is the Audio Settings sheet's
+    /// same-source fan-out (issue #12) — it covers the slot assignments only: each
+    /// clip's monitored-track choice is untouched beyond clamping it into the new list.
+    func setAudioSelections(ids: Set<Clip.ID>, selections: [AudioTrackSlot]?) {
         var p = project
         var changed = false
         for i in p.clips.indices where ids.contains(p.clips[i].id) {
@@ -528,8 +528,8 @@ final class ProjectDocument: ReferenceFileDocument {
                     throw ExportError.cutFailed("External audio file “\(missing.name)” (track \(missing.slot + 1) of “\(clip.displayName)”) was not found.")
                 }
                 // Pad/trim is by design; a gap of 1 s or more gets a notice (ADR-0014).
-                for (slot, selection) in clip.resolvedAudioSelections.enumerated() {
-                    if case .external(_, let name, _, _, _) = selection,
+                for (slot, trackSlot) in clip.resolvedAudioSelections.enumerated() {
+                    if case .external(_, let name, _, _, _) = trackSlot.selection,
                        let gap = clip.externalAudioMismatch(slot: slot), abs(gap) >= 1.0 {
                         let direction = gap < 0 ? "shorter — silence fills the rest" : "longer — the extra is unused"
                         warnings.append("“\(name)” is \(String(format: "%.1f", abs(gap))) s \(direction) (track \(slot + 1) of “\(clip.displayName)”).")
@@ -543,7 +543,8 @@ final class ProjectDocument: ReferenceFileDocument {
                 var item = try ExportPlanner.planItem(
                     for: ExportPlanner.ClipInput(clip: clip, url: url, index: index,
                                                  containerStart: containerStart,
-                                                 audioSources: audioSources),
+                                                 audioSources: audioSources,
+                                                 audioMixFilters: AudioSourceResolver.resolveMixFilters(for: clip)),
                     target: project.targetClip, settings: project.output)
                 // A conform toward a color-tagged target may have to *assume* the source's
                 // color standard when the source carries no tags (issue #35); the assumption

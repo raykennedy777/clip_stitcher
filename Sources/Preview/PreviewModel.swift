@@ -163,7 +163,8 @@ final class PreviewModel: ObservableObject {
                     url: url,
                     containerStart: containerStart,
                     sources: try AudioSourceResolver.resolveSources(
-                        for: clip, missingExternal: .degradeToSilence)
+                        for: clip, missingExternal: .degradeToSilence),
+                    mixFilters: AudioSourceResolver.resolveMixFilters(for: clip)
                 )
             }
             let built = PreviewTimeline.build(clips: specs, targetFrameRate: targetVideo.frameRate)
@@ -419,7 +420,7 @@ final class PreviewModel: ObservableObject {
         switch entry.source {
         case .stream(let url, let streamIndex):
             player.start(url: url, streamIndex: streamIndex, seekSeconds: entry.seekSeconds,
-                         filter: plan.conformFilter(track: monitoredTrack),
+                         filter: plan.legFilter(track: monitoredTrack, segment: segment),
                          duration: entry.remaining)
         case .silence:
             player.startSilence(duration: entry.remaining)

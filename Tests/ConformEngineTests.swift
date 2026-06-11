@@ -245,4 +245,39 @@ struct ConformEngineTests {
         #expect(ConformEngine.audioFilter(sampleRate: 44100, channels: 1)
             == "aresample=44100,aformat=channel_layouts=mono")
     }
+
+    // MARK: channel mix (ADR-0019)
+
+    /// The exact mix recipes validated in the shell (issue #38 de-risk, 2026-06) on
+    /// MPEG-2/H.264/HEVC in TS/MKV/MP4 — pinned so the shipped command can't drift
+    /// from the de-risked one.
+    @Test func stereoSourceMixRecipesMatchTheDeRiskedStrings() {
+        #expect(ConformEngine.mixFilter(.leftOnly, sourceChannels: 2)
+            == "pan=stereo|c0=c0|c1=c0")
+        #expect(ConformEngine.mixFilter(.rightOnly, sourceChannels: 2)
+            == "pan=stereo|c0=c1|c1=c1")
+        #expect(ConformEngine.mixFilter(.mono, sourceChannels: 2)
+            == "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1")
+    }
+
+    /// A surround source folds to stereo first (ffmpeg's standard fold-down — verified
+    /// FL/FC/BL placement and dropped LFE on a synthesized 5.1); Left/Right/Mono then
+    /// shape that stereo image.
+    @Test func surroundSourceMixRecipesFoldDownFirst() {
+        #expect(ConformEngine.mixFilter(.stereo, sourceChannels: 6)
+            == "aformat=channel_layouts=stereo")
+        #expect(ConformEngine.mixFilter(.leftOnly, sourceChannels: 6)
+            == "aformat=channel_layouts=stereo,pan=stereo|c0=c0|c1=c0")
+        #expect(ConformEngine.mixFilter(.mono, sourceChannels: 6)
+            == "aformat=channel_layouts=stereo,pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1")
+    }
+
+    /// A no-op mix builds no filter at all — the leg stays byte-identical to a
+    /// pre-#38 export.
+    @Test func noOpMixesBuildNoFilter() {
+        #expect(ConformEngine.mixFilter(.original, sourceChannels: 2) == nil)
+        #expect(ConformEngine.mixFilter(.stereo, sourceChannels: 2) == nil)
+        #expect(ConformEngine.mixFilter(.leftOnly, sourceChannels: 1) == nil)
+        #expect(ConformEngine.mixFilter(.mono, sourceChannels: nil) == nil)
+    }
 }

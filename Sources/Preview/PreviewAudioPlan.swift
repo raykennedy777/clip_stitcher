@@ -29,16 +29,21 @@ struct PreviewAudioPlan {
         let outputStart: Double
         /// Leg length in output seconds: the segment's frames at the target rate.
         let duration: Double
+        /// The clip's channel-mix filter for this track (ADR-0019), exactly as the
+        /// export's rebuild inserts it before the leg conform; nil for Original/no-op.
+        let mixFilter: String?
     }
 
     /// Per-clip audio inputs, resolved by the caller (bookmarks → URLs, probes done):
     /// `sources[t]` feeds output track `t` exactly as the export's
     /// `ExportItem.audioSources` does — nil (and anything past the list's end) is
-    /// silence.
+    /// silence. `mixFilters[t]` is that leg's channel mix (ADR-0019), resolved by the
+    /// same `AudioSourceResolver` call the export uses.
     struct ClipAudio {
         let url: URL
         let containerStart: Double
         let sources: [ExportEngine.AudioSource?]
+        var mixFilters: [String?] = []
     }
 
     /// The output tracks the export would carry (`AudioSourceResolver.resolveOutputTracks`)
@@ -67,7 +72,8 @@ struct PreviewAudioPlan {
                     source: source,
                     seekBase: max(0, segment.windowStart - (clip?.containerStart ?? 0)),
                     outputStart: Double(segment.outputStart) / fps,
-                    duration: Double(segment.outputCount) / fps
+                    duration: Double(segment.outputCount) / fps,
+                    mixFilter: clip.flatMap { t < $0.mixFilters.count ? $0.mixFilters[t] : nil }
                 )
             }
         }
@@ -95,6 +101,18 @@ struct PreviewAudioPlan {
         guard track >= 0, track < tracks.count else { return nil }
         return ConformEngine.audioFilter(
             sampleRate: tracks[track].sampleRate, channels: tracks[track].channels)
+    }
+
+    /// The full decode filter for leg (`track`, `segment`): its channel mix (ADR-0019)
+    /// then the track conform — the same order as the export's rebuild chain, so the
+    /// monitored track previews exactly what ships. Falls back to the bare conform for
+    /// an out-of-range segment.
+    func legFilter(track: Int, segment: Int) -> String? {
+        let conform = conformFilter(track: track)
+        guard track >= 0, track < legs.count,
+              segment >= 0, segment < legs[track].count,
+              let mix = legs[track][segment].mixFilter else { return conform }
+        return conform.map { mix + "," + $0 } ?? mix
     }
 
     /// The picker name for output track `t` (0-based), named like the cut-editor's

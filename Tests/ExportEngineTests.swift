@@ -222,6 +222,22 @@ struct ExportEngineTests {
         #expect(args.last == "/tmp/out.ts")
     }
 
+    @Test func audioMuxInsertsTheLegsMixBeforeItsConform() {
+        // Clip 0 mixes track 0 to left-only (ADR-0019); clip 1 keeps Original. The pan
+        // sits before the conform and wholly before the sample-exact atrim/apad, and
+        // only on clip 0's leg — the join's sample math is untouched (shell-verified).
+        var mixed = ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 1)
+        mixed.audioMixFilters = ["pan=stereo|c0=c0|c1=c0"]
+        let items = [mixed, ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 1)]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(fc.contains("[0:a:0]pan=stereo|c0=c0|c1=c0,aresample=48000,aformat=channel_layouts=stereo,"
+                          + "atrim=end_sample=48000,apad=whole_len=48000[c0t0]"))
+        #expect(fc.contains("[1:a:0]aresample=48000,aformat=channel_layouts=stereo,"
+                          + "atrim=end_sample=48000,apad=whole_len=48000[c1t0]"))
+    }
+
     @Test func audioMuxSilenceFillsAClipWithoutTheTrack(){
         // Two output tracks, but the second clip only carries one source: its leg on
         // track 2 is anullsrc silence in the track's format, trimmed to the same exact

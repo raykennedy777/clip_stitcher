@@ -26,6 +26,10 @@ struct ExportItem {
     /// own Nth audio stream, an external file, or `nil` for silence. Output tracks past
     /// the end of this list are silence too.
     var audioSources: [ExportEngine.AudioSource?] = [.stream(0)]
+    /// The channel-mix filter for each leg, by output track (ADR-0019) — nil for
+    /// Original/no-op (and for every track past the end). Inserted before the leg's
+    /// conform in the rebuild chain; never on a silence leg.
+    var audioMixFilters: [String?] = []
     /// The clip's kept video duration in seconds — every audio leg is trimmed/padded to
     /// exactly this many samples so the output tracks can't drift apart at joins
     /// (ADR-0014). Falls back to `audioEnd - audioStart` when unset.
@@ -418,11 +422,12 @@ enum ExportEngine {
                 let samples = keptDuration(item).map { Int(($0 * Double(track.sampleRate)).rounded()) }
                 let layout = ConformEngine.channelLayout(track.channels)
                 let source = t < item.audioSources.count ? item.audioSources[t] : nil
+                let mix = t < item.audioMixFilters.count ? item.audioMixFilters[t] : nil
                 switch source {
                 case .stream(let s):
-                    chains.append("[\(ownInput[i]):a:\(s)]" + legFilter(track: track, samples: samples) + label)
+                    chains.append("[\(ownInput[i]):a:\(s)]" + legFilter(track: track, samples: samples, mix: mix) + label)
                 case .external(let url, let s):
-                    chains.append("[\(externalInput[i][url]!):a:\(s)]" + legFilter(track: track, samples: samples) + label)
+                    chains.append("[\(externalInput[i][url]!):a:\(s)]" + legFilter(track: track, samples: samples, mix: mix) + label)
                 case nil:
                     chains.append("anullsrc=r=\(track.sampleRate):cl=\(layout),atrim=end_sample=\(samples ?? 0)" + label)
                 }
@@ -456,10 +461,16 @@ enum ExportEngine {
         return args
     }
 
-    /// One real audio leg's filter: conform to the track's rate/layout, then force the
-    /// exact kept length — trim the overshoot, silence-pad the shortfall.
-    private static func legFilter(track: AudioCodecPolicy.OutputAudioTrack, samples: Int?) -> String {
+    /// One real audio leg's filter: the leg's channel mix when it has one (ADR-0019 —
+    /// the mix shapes what *enters* the track, so it precedes the conform), conform to
+    /// the track's rate/layout, then force the exact kept length — trim the overshoot,
+    /// silence-pad the shortfall. The mix sits wholly before `atrim`/`apad`, so the
+    /// sample-exact trimming the joins depend on is untouched (shell-verified: counts
+    /// are identical with and without a mix on all three formats).
+    private static func legFilter(track: AudioCodecPolicy.OutputAudioTrack, samples: Int?,
+                                  mix: String? = nil) -> String {
         var f = ConformEngine.audioFilter(sampleRate: track.sampleRate, channels: track.channels)
+        if let mix { f = mix + "," + f }
         if let n = samples { f += ",atrim=end_sample=\(n),apad=whole_len=\(n)" }
         return f
     }

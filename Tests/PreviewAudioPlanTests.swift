@@ -34,11 +34,13 @@ struct PreviewAudioPlanTests {
     ]
 
     private func plan(sourcesA: [ExportEngine.AudioSource?],
-                      sourcesB: [ExportEngine.AudioSource?]) -> PreviewAudioPlan {
+                      sourcesB: [ExportEngine.AudioSource?],
+                      mixFiltersA: [String?] = []) -> PreviewAudioPlan {
         PreviewAudioPlan.build(
             segments: segments(), targetFps: 25,
             clips: [
-                clipA: PreviewAudioPlan.ClipAudio(url: urlA, containerStart: 0.24, sources: sourcesA),
+                clipA: PreviewAudioPlan.ClipAudio(url: urlA, containerStart: 0.24,
+                                                  sources: sourcesA, mixFilters: mixFiltersA),
                 clipB: PreviewAudioPlan.ClipAudio(url: urlB, containerStart: 0, sources: sourcesB),
             ],
             tracks: tracks)
@@ -120,6 +122,20 @@ struct PreviewAudioPlanTests {
         #expect(p.conformFilter(track: 0) == "aresample=48000,aformat=channel_layouts=stereo")
         #expect(p.conformFilter(track: 1) == "aresample=44100,aformat=channel_layouts=mono")
         #expect(p.conformFilter(track: 2) == nil)
+    }
+
+    /// A leg's channel mix (ADR-0019) composes before the track conform — the same
+    /// order as the export's rebuild chain — and only on the clip that set it; a
+    /// mix-free leg falls back to the bare conform.
+    @Test func legFilterPrependsTheClipsMixToTheConform() {
+        let p = plan(sourcesA: [.stream(0)], sourcesB: [.stream(0)],
+                     mixFiltersA: ["pan=stereo|c0=c0|c1=c0"])
+        #expect(p.legFilter(track: 0, segment: 0)
+            == "pan=stereo|c0=c0|c1=c0,aresample=48000,aformat=channel_layouts=stereo")
+        #expect(p.legFilter(track: 0, segment: 1)
+            == "aresample=48000,aformat=channel_layouts=stereo")
+        // Out-of-range gracefully degrades like conformFilter.
+        #expect(p.legFilter(track: 2, segment: 0) == nil)
     }
 
     /// Picker rows are named like the cut-editor dropdown: container title when

@@ -1,6 +1,6 @@
 import Foundation
 
-/// One slot in a clip's audio track list (ADR-0014): which source feeds it.
+/// Which source feeds one slot in a clip's audio track list (ADR-0014).
 enum AudioTrackSelection: Codable, Equatable {
     /// The clip's own Nth audio stream (0-based).
     case stream(Int)
@@ -9,6 +9,78 @@ enum AudioTrackSelection: Codable, Equatable {
     /// audio streams; `tracks` (all of them) and `duration` are probed when the file
     /// is picked, for stream naming, output formats, and the length-mismatch notice.
     case external(bookmark: Data, name: String, streamIndex: Int, tracks: [AudioProperties]?, duration: Double?)
+}
+
+/// How a slot's source channels are mixed into its output track (ADR-0019): never the
+/// track's channel layout — only what is mixed into it. Semantics are relative to the
+/// source's normal stereo listening experience: Stereo is a deliberate surround→stereo
+/// fold-down, Left/Right only take one side of that fold-down heard alone, Mono folds
+/// everything to one signal.
+enum ChannelMix: String, Codable, CaseIterable, Equatable {
+    case original
+    case stereo
+    case leftOnly
+    case rightOnly
+    case mono
+
+    var displayName: String {
+        switch self {
+        case .original: return "Original"
+        case .stereo: return "Stereo"
+        case .leftOnly: return "Left only"
+        case .rightOnly: return "Right only"
+        case .mono: return "Mono"
+        }
+    }
+
+    /// ADR-0019's no-op table: Stereo changes nothing for a mono/stereo source;
+    /// Left/Right/Mono change nothing for a mono source; Original is the identity by
+    /// definition. An unknown channel count (an unprobed external file, a missing
+    /// stream — the slot plays silence) counts as no-op too: there is no content to
+    /// judge a mix against. No-op options are disabled in the picker and produce no
+    /// filter, so the leg stays byte-identical to today's.
+    func isNoOp(sourceChannels: Int?) -> Bool {
+        guard let channels = sourceChannels, channels > 0 else { return true }
+        switch self {
+        case .original: return true
+        case .stereo: return channels <= 2
+        case .leftOnly, .rightOnly, .mono: return channels <= 1
+        }
+    }
+}
+
+/// One slot in a clip's audio track list: which source feeds it, plus how that source's
+/// channels are mixed into the output track (ADR-0019). Saves made before the channel
+/// mix stored the bare `AudioTrackSelection`; decoding accepts both shapes, so old
+/// projects load with every track at Original.
+struct AudioTrackSlot: Codable, Equatable {
+    var selection: AudioTrackSelection
+    var mix: ChannelMix
+
+    init(selection: AudioTrackSelection, mix: ChannelMix = .original) {
+        self.selection = selection
+        self.mix = mix
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let selection = try container.decodeIfPresent(AudioTrackSelection.self, forKey: .selection) {
+            self.selection = selection
+            self.mix = try container.decodeIfPresent(ChannelMix.self, forKey: .mix) ?? .original
+        } else {
+            // The pre-mix shape: the slot *is* the selection enum's own payload.
+            self.selection = try AudioTrackSelection(from: decoder)
+            self.mix = .original
+        }
+    }
+
+    /// Case-shaped factories so a slot list reads like the selection list it replaced.
+    static func stream(_ i: Int) -> AudioTrackSlot { AudioTrackSlot(selection: .stream(i)) }
+    static func external(bookmark: Data, name: String, streamIndex: Int,
+                         tracks: [AudioProperties]?, duration: Double?) -> AudioTrackSlot {
+        AudioTrackSlot(selection: .external(bookmark: bookmark, name: name, streamIndex: streamIndex,
+                                            tracks: tracks, duration: duration))
+    }
 }
 
 /// One imported source file plus its selected in/out range and probed properties.
@@ -40,23 +112,25 @@ struct Clip: Codable, Identifiable, Equatable {
     }
 
     /// The clip's audio track slots; nil means the default — all of the clip's own
-    /// streams in container order. Decodes as nil from saves made before ADR-0014.
-    var audioSelections: [AudioTrackSelection]? = nil
+    /// streams in container order, each at the Original mix. Decodes as nil from saves
+    /// made before ADR-0014. (Named for the save key: pre-mix saves stored the bare
+    /// selection enum, which `AudioTrackSlot` still decodes.)
+    var audioSelections: [AudioTrackSlot]? = nil
 
     /// The slot monitored in the cut-editor's audio dropdown. Stored now; it becomes
     /// audible when the cut-editor gains audio playback.
     var monitoredAudioTrack: Int? = nil
 
     /// The audio track slots with the default applied.
-    var resolvedAudioSelections: [AudioTrackSelection] {
+    var resolvedAudioSelections: [AudioTrackSlot] {
         audioSelections ?? allAudioTracks.indices.map { .stream($0) }
     }
 
     /// The probed properties feeding each slot — nil where unknown (an out-of-range
     /// stream or an unprobed external file). Drives track naming and output formats.
     var effectiveAudioTracks: [AudioProperties?] {
-        resolvedAudioSelections.map { selection in
-            switch selection {
+        resolvedAudioSelections.map { slot in
+            switch slot.selection {
             case .stream(let i):
                 return i < allAudioTracks.count ? allAudioTracks[i] : nil
             case .external(_, _, let streamIndex, let tracks, _):
@@ -81,7 +155,7 @@ struct Clip: Codable, Identifiable, Equatable {
     func externalAudioMismatch(slot: Int) -> Double? {
         let selections = resolvedAudioSelections
         guard slot < selections.count,
-              case .external(_, _, _, _, let externalDuration?) = selections[slot],
+              case .external(_, _, _, _, let externalDuration?) = selections[slot].selection,
               let videoDuration = duration else { return nil }
         return externalDuration - videoDuration
     }
