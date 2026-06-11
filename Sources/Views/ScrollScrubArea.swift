@@ -50,11 +50,14 @@ final class ScrollCatchView: NSView {
     private func handle(_ event: NSEvent) -> NSEvent? {
         guard let window, event.window === window,
               bounds.contains(convert(event.locationInWindow, from: nil)) else { return event }
+        let shift = event.modifierFlags.contains(.shift)
         let steps = accumulator.frameSteps(
-            deltaY: event.scrollingDeltaY,
+            deltaY: ScrollScrubAccumulator.effectiveDeltaY(
+                deltaY: event.scrollingDeltaY, deltaX: event.scrollingDeltaX,
+                precise: event.hasPreciseScrollingDeltas, shift: shift),
             precise: event.hasPreciseScrollingDeltas,
             momentum: event.momentumPhase != [])
-        if steps != 0 { onSteps?(steps, event.modifierFlags.contains(.shift)) }
+        if steps != 0 { onSteps?(steps, shift) }
         // Consumed even when no step fired (sub-threshold or momentum), so
         // nothing beneath the scrub area scrolls and coasting dies here.
         return nil

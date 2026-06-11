@@ -76,6 +76,28 @@ struct ScrollScrubAccumulatorTests {
         #expect(acc.frameSteps(deltaY: 0, precise: true, momentum: false) == 0)
         #expect(acc.frameSteps(deltaY: 0, precise: false, momentum: false) == 0)
     }
+
+    // MARK: - Shifted wheels arrive axis-swapped (macOS scrolls them sideways)
+
+    @Test func aShiftedWheelWithAnEmptyVerticalDeltaFallsBackToHorizontal() {
+        #expect(ScrollScrubAccumulator.effectiveDeltaY(
+            deltaY: 0, deltaX: -1, precise: false, shift: true) == -1)
+    }
+
+    @Test func withoutShiftTheHorizontalDeltaStaysIgnored() {
+        #expect(ScrollScrubAccumulator.effectiveDeltaY(
+            deltaY: 0, deltaX: -3, precise: false, shift: false) == 0)
+    }
+
+    @Test func aShiftedTrackpadKeepsItsVerticalDelta() {
+        #expect(ScrollScrubAccumulator.effectiveDeltaY(
+            deltaY: -12, deltaX: -30, precise: true, shift: true) == -12)
+    }
+
+    @Test func aShiftedWheelThatStillCarriesAVerticalDeltaUsesIt() {
+        #expect(ScrollScrubAccumulator.effectiveDeltaY(
+            deltaY: 2, deltaX: -1, precise: false, shift: true) == 2)
+    }
 }
 
 /// Scrolling over a jump-popover field rolls that field's staged text (issue

@@ -16,6 +16,19 @@ struct ScrollScrubAccumulator {
     /// add up. Signed: reversing direction unwinds it before stepping back.
     private var carry: CGFloat = 0
 
+    /// The vertical delta to scrub by. macOS re-routes a shifted mouse wheel
+    /// onto the horizontal axis before apps see the event (Shift+wheel scrolls
+    /// sideways system-wide), so the Shift+scroll keyframe stride would read
+    /// an empty vertical delta and do nothing. Under Shift, a wheel event with
+    /// no vertical delta falls back to the horizontal one — the same physical
+    /// gesture, same sign. Everything else keeps vertical-only semantics:
+    /// deltaX is ignored (horizontal scrubbing is an explicit non-goal).
+    static func effectiveDeltaY(deltaY: CGFloat, deltaX: CGFloat,
+                                precise: Bool, shift: Bool) -> CGFloat {
+        if shift, !precise, deltaY == 0 { return deltaX }
+        return deltaY
+    }
+
     /// Frame steps for one scroll event; positive = forward in time.
     ///
     /// Mouse wheel (`precise == false`): one notch = one frame, every notch in
