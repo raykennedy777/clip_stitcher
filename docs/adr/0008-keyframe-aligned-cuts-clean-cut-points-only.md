@@ -59,10 +59,31 @@ on its own.
     (verified: a CRA-to-CRA extraction came out ±1–2 frames).
 - Correctness is verified by **frame count against frame-index positions** plus a **decode check**
   (`-xerror`), never by reading the (reset) output timestamps. A third check inspects the output's
-  presentation timestamps for **uniform spacing** (`ExportEngine.timestampDefect`): within one
-  produced piece the frame rate is constant, so a duplicate PTS or a one-slot gap is unambiguous.
-  This is *not* "reading the reset timestamps to confirm a cut landed right" (still forbidden) — it
-  asserts the piece's own internal regularity, catching the two concat-mux defects below.
+  presentation timestamps (`ExportEngine.timestampDefect`). This is *not* "reading the reset
+  timestamps to confirm a cut landed right" (still forbidden) — it asserts the piece's timestamp
+  health, catching the two concat-mux defects below.
+  - **Amended (issue #19):** the check's original premise — one piece, one source, constant frame
+    rate ⇒ uniform spacing — is false for **faithful stream copies of a timestamp-irregular
+    source**. The real 2009 BBC broadcast capture carries ~714 duplicate-PTS + re-sync-gap
+    anomalies in 67 min; a copy span covering one reproduces it bit-exact, and the uniformity
+    check rejected (and deleted) correct exports. The gate is now **plan-aware**: inside a
+    **copied** span, an anomaly is a defect only if the source has no anomaly of the same kind
+    (duplicate vs gap) within **±3 frame intervals** of the corresponding source position;
+    **re-encoded** spans, the **seam intervals** between segments, and a **2-interval window** at
+    every segment edge keep strict uniformity — that is where the shipped defect classes
+    (start_time seam gap, B-pyramid/MKV PTS collapse, MP4 timescale squeeze) live. An anomaly the
+    source has that the output *lacks* is never a defect (containers may normalize). The ±3
+    radius is measured, not guessed: the mpegts mux round-trip surfaces the second frame of a
+    source duplicate with no PTS at all, the frame indexer refills it from DTS (ADR-0006), and
+    that re-materializes the anomaly displaced by up to the stream's B-frame reorder depth
+    (displacement 2 observed on the real MPEG-2 fixture; ±1 — the first guess — spuriously
+    failed it). Consequence of seam strictness: a source anomaly that happens to sit *at* a
+    planned segment boundary still fails verification — conservative by design; the shell
+    de-risk caught a real misplaced-seam defect at exactly that position, so loosening seams
+    would have shipped it. De-risked on MPEG-2/TS (dirty BBC end-to-end pass + clean-CFR
+    no-regression + injected dup/gap still fail), H.264/MP4 and HEVC/MKV+MP4 (clean
+    copy+re-encode+concat pass both old and new gate). A full re-encode (`ConformEngine`) keeps
+    the plain uniformity check — there is no copied span to be faithful to.
 
 ## Consequences
 

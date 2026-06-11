@@ -376,6 +376,109 @@ struct ExportEngineTests {
     @Test func timestampDefectIgnoresTooFewFrames() {
         #expect(ExportEngine.timestampDefect(pts: [0.0, 0.04]) == nil)
     }
+
+    // MARK: plan-aware gate (issue #19): copy spans verify against the source's pattern
+
+    /// 25fps source with the BBC capture's signature anomaly: a duplicated PTS at
+    /// frame `dupAt`, then a double-slot gap two frames later that re-syncs.
+    private func dirtySource(count: Int, dupAt: Int) -> [Double] {
+        var pts: [Double] = []
+        var t = 0.0
+        for i in 0..<count {
+            pts.append(t)
+            // the duplicate's slot is repaid by the gap, so the tail re-syncs
+            if i == dupAt { continue }              // duplicate: next frame shares t
+            t += (i == dupAt + 2) ? 0.08 : 0.04     // gap two frames later
+        }
+        return pts
+    }
+
+    @Test func aFaithfulCopyOfAnIrregularSourcePasses() {
+        let src = dirtySource(count: 120, dupAt: 50)
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100),
+                    PlannedSegment(kind: .reEncode, range: 100..<110)]
+        // piece = source pattern over the copy span + uniform re-encode tail
+        var pts = Array(src[0..<100])
+        let tail0 = src[99] + 0.04
+        pts += (0..<10).map { tail0 + 0.04 * Double($0) }
+        #expect(ExportEngine.timestampDefect(pts: pts) != nil)              // old gate rejected it
+        #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src) == nil)
+    }
+
+    @Test func theReMaterializedAnomalyMayDriftUpToThreeIntervals() {
+        // The mpegts round-trip refills the duplicate's lost pts from dts, displacing
+        // the anomaly by up to the B-frame reorder depth (measured 2 on the real
+        // BBC fixture; ±3 is the documented bound).
+        let src = dirtySource(count: 120, dupAt: 50)
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100),
+                    PlannedSegment(kind: .reEncode, range: 100..<110)]
+        var drifted = dirtySource(count: 120, dupAt: 53)   // same shape, 3 intervals later
+        drifted = Array(drifted[0..<100]) + (0..<10).map { drifted[99] + 0.04 * Double($0 + 1) }
+        #expect(ExportEngine.timestampDefect(pts: drifted, plan: plan, sourcePts: src) == nil)
+        var tooFar = dirtySource(count: 120, dupAt: 56)    // 6 intervals: not the same anomaly
+        tooFar = Array(tooFar[0..<100]) + (0..<10).map { tooFar[99] + 0.04 * Double($0 + 1) }
+        #expect(ExportEngine.timestampDefect(pts: tooFar, plan: plan, sourcePts: src) != nil)
+    }
+
+    @Test func anAnomalyTheSourceDoesNotHaveStillFails() {
+        let src = (0..<120).map { 0.04 * Double($0) }      // clean source
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100),
+                    PlannedSegment(kind: .reEncode, range: 100..<110)]
+        var pts = (0..<110).map { 0.04 * Double($0) }
+        pts[50] = pts[49]                                   // collapse inside the copy span
+        let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src)
+        #expect(reason?.contains("duplicate") == true)
+    }
+
+    @Test func aMatchingKindIsRequiredNotJustAnyAnomaly() {
+        let src = dirtySource(count: 120, dupAt: 50)       // source has dup@50, gap@52
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100)]
+        var pts = Array(src[0..<100])
+        pts[20] = pts[19]                                   // dup where source is clean
+        #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src) != nil)
+    }
+
+    @Test func seamAndSegmentEdgeWindowsStayStrict() {
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100),
+                    PlannedSegment(kind: .reEncode, range: 100..<110)]
+        // A source anomaly *at* the planned seam is not forgiven — the seam is where
+        // the shipped defect classes live, so the gate stays conservative there (the
+        // de-risk caught a real misplaced-seam gap exactly at this position).
+        var src = (0..<120).map { 0.04 * Double($0) }
+        for j in 100..<120 { src[j] += 0.04 }            // source gap at interval 99: the seam
+        var pts = Array(src[0..<100])
+        pts += (0..<10).map { src[100] + 0.04 * Double($0) }   // reproduces the seam gap
+        let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src)
+        #expect(reason?.contains("gap") == true)
+        // an injected gap at the copy→re-encode seam of an otherwise clean export
+        var clean = (0..<110).map { 0.04 * Double($0) }
+        for j in 100..<110 { clean[j] += 0.04 }
+        #expect(ExportEngine.timestampDefect(pts: clean, plan: plan,
+                                             sourcePts: (0..<120).map { 0.04 * Double($0) }) != nil)
+        // a source anomaly inside the 2-interval window at a copy edge is also strict
+        let edgy = dirtySource(count: 120, dupAt: 1)
+        #expect(ExportEngine.timestampDefect(
+            pts: Array(edgy[0..<100]),
+            plan: [PlannedSegment(kind: .copy, range: 0..<100)],
+            sourcePts: edgy) != nil)
+    }
+
+    @Test func reEncodedSegmentsKeepStrictUniformity() {
+        let src = dirtySource(count: 120, dupAt: 50)
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100),
+                    PlannedSegment(kind: .reEncode, range: 100..<110)]
+        var pts = Array(src[0..<100])
+        pts += (0..<10).map { src[99] + 0.04 * Double($0 + 1) }
+        pts[105] = pts[104]                                 // dup inside the re-encode
+        let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src)
+        #expect(reason?.contains("duplicate") == true)
+    }
+
+    @Test func anEmptyPlanFallsBackToStrictUniformity() {
+        let src = dirtySource(count: 120, dupAt: 50)
+        let pts = Array(src[0..<100])
+        #expect(ExportEngine.timestampDefect(pts: pts, plan: [], sourcePts: src) != nil)
+    }
 }
 
 /// Pins the per-track own-codec mux shape (issue #31 / ADR-0018): cut-only tracks each

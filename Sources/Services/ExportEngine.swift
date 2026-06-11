@@ -216,19 +216,73 @@ enum ExportEngine {
     /// Pure, so it is unit-tested against captured-defect timestamps; the export engines run
     /// it as a final self-check before a piece ships, so neither defect can slip out silently.
     static func timestampDefect(pts: [Double]) -> String? {
+        timestampDefect(pts: pts, plan: [], sourcePts: [])
+    }
+
+    /// Plan-aware variant (issue #19): a stream-copied span is a *faithful* copy, so its
+    /// timestamps legitimately reproduce the source's own irregularities (the 2009 BBC
+    /// broadcast capture has ~714 duplicate+gap anomalies in 67 min — rejecting them
+    /// rejected correct exports). Inside a **copy** segment an anomaly is a defect only
+    /// when the source has no same-kind anomaly within ±3 intervals of the corresponding
+    /// position: the mpegts round-trip surfaces the second frame of a source duplicate
+    /// with no pts, the indexer refills it from dts (ADR-0006), and that displaces the
+    /// re-materialized anomaly by up to the B-frame reorder depth — measured 2 on the
+    /// real fixture, so ±3 covers the ≤3-B-frame GOPs of this domain. **Re-encoded**
+    /// segments, the seam intervals between segments, and a 2-interval window at every
+    /// segment edge keep strict uniformity — that is where the shipped defect classes
+    /// (start_time seam gap, B-pyramid/MKV collapse, timescale squeeze) live, and the
+    /// de-risk caught a real misplaced-seam defect exactly there. An anomaly the source
+    /// has that the output lacks is never a defect (containers may normalize).
+    ///
+    /// With no plan (or a frame-count mismatch, which gate 1 reports separately) every
+    /// interval is held to strict uniformity — the pre-#19 behavior, still what a full
+    /// re-encode (`ConformEngine`) wants.
+    static func timestampDefect(pts: [Double], plan: [PlannedSegment], sourcePts: [Double]) -> String? {
         guard pts.count >= 3 else { return nil }
         let deltas = zip(pts.dropFirst(), pts).map { $0 - $1 }
         let median = deltas.sorted()[deltas.count / 2]
         guard median > 0 else { return "frames share a timestamp (zero median interval)" }
+
+        // Output index of each segment's first frame; the plan tiles the piece, so
+        // output frame `starts[s] + k` is source frame `plan[s].range.lowerBound + k`.
+        var starts: [Int] = []
+        var total = 0
+        for segment in plan { starts.append(total); total += segment.range.count }
+        let planApplies = !plan.isEmpty && total == pts.count && !sourcePts.isEmpty
+        func segmentIndex(of frame: Int) -> Int {
+            var s = plan.count - 1
+            while s > 0 && starts[s] > frame { s -= 1 }
+            return s
+        }
+        let seamWindow = 2
+        let matchRadius = 3
+        func anomalyKind(_ d: Double) -> Int { d <= median * 0.5 ? -1 : (d >= median * 1.5 ? 1 : 0) }
+        let sourceDeltas = zip(sourcePts.dropFirst(), sourcePts).map { $0 - $1 }
+
         for (i, d) in deltas.enumerated() {
-            if d <= median * 0.5 {
+            let kind = anomalyKind(d)
+            if kind == 0 { continue }
+            if planApplies {
+                let s = segmentIndex(of: i)
+                if plan[s].kind == .copy && segmentIndex(of: i + 1) == s {
+                    let within = i - starts[s]
+                    let lastInterval = plan[s].range.count - 2
+                    if within >= seamWindow && lastInterval - within >= seamWindow {
+                        let m = plan[s].range.lowerBound + within
+                        let nearby = (m - matchRadius)...(m + matchRadius)
+                        if nearby.contains(where: { $0 >= 0 && $0 < sourceDeltas.count
+                            && anomalyKind(sourceDeltas[$0]) == kind }) {
+                            continue   // faithful reproduction of the source's anomaly
+                        }
+                    }
+                }
+            }
+            if kind == -1 {
                 return String(format: "frames at %.3fs and %.3fs are only %.4fs apart (~%.4fs expected — a duplicate)",
                               pts[i], pts[i + 1], d, median)
             }
-            if d >= median * 1.5 {
-                return String(format: "a %.4fs gap between %.3fs and %.3fs (~%.4fs expected — a frame slot was skipped)",
-                              d, pts[i], pts[i + 1], median)
-            }
+            return String(format: "a %.4fs gap between %.3fs and %.3fs (~%.4fs expected — a frame slot was skipped)",
+                          d, pts[i], pts[i + 1], median)
         }
         return nil
     }

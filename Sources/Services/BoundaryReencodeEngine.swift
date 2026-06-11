@@ -217,7 +217,8 @@ enum BoundaryReencodeEngine {
             try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
             result = joined
         }
-        try await verifyPiece(ffmpeg, result, expectedFrames: expectedFrameCount(plan))
+        try await verifyPiece(ffmpeg, result, expectedFrames: expectedFrameCount(plan),
+                              plan: plan, sourcePts: index.pts)
         return result
     }
 
@@ -256,9 +257,13 @@ enum BoundaryReencodeEngine {
     ///      would miss.
     ///   3. Timestamp check — the output's presentation timestamps must be free of the seam
     ///      gap (start_time concat offset) and duplicates (B-pyramid/MKV collapse) that the
-    ///      frame count and decode would both pass over. The piece is one source's footage at
-    ///      one frame rate, so its spacing is uniform when clean (`ExportEngine.timestampDefect`).
-    private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedFrames: Int) async throws {
+    ///      frame count and decode would both pass over. Re-encoded spans, seams, and
+    ///      segment-edge windows are held to uniform spacing; a copied span is held to the
+    ///      *source's* timestamp pattern instead — a faithful copy of an irregular source
+    ///      is correct output, not a defect (issue #19, plan-aware
+    ///      `ExportEngine.timestampDefect`).
+    private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedFrames: Int,
+                                    plan: [PlannedSegment], sourcePts: [Double]) async throws {
         let actual = try await FrameIndexer.frameCount(url: piece)
         guard actual == expectedFrames else {
             throw ExportError.verificationFailed(
@@ -273,13 +278,14 @@ enum BoundaryReencodeEngine {
             throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
         }
         let pts = try await FrameIndexer.buildIndex(url: piece).pts
-        if let reason = ExportEngine.timestampDefect(pts: pts) {
+        if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts) {
             throw ExportError.verificationFailed("The cut produced irregular timestamps: \(reason)")
         }
     }
 
-    /// The clip's mean frame interval in seconds — exact under the CFR every shipped
-    /// piece is held to (`ExportEngine.timestampDefect`). `nil` below two frames.
+    /// The clip's mean frame interval in seconds — exact under CFR; a timestamp-dirty
+    /// source's stray dup/gap anomalies (issue #19) wash out over the average. Only
+    /// feeds progress estimation. `nil` below two frames.
     private static func meanFrameInterval(_ index: FrameIndex) -> Double? {
         let pts = index.pts
         guard pts.count >= 2 else { return nil }
