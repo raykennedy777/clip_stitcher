@@ -28,6 +28,11 @@ enum MatchEvaluator {
         cv.sampleAspectRatio == tv.sampleAspectRatio &&
         cv.colorPrimaries == tv.colorPrimaries &&
         cv.colorTransfer == tv.colorTransfer &&
+        // The matrix joins the strict compare like the other two color dimensions (issue #35):
+        // a matrix-only difference between stream-copied neighbours is a visible color shift at
+        // the join — the exact glitch ADR-0005's strict rule exists to prevent. A clip differing
+        // only here now routes to conform instead of smart render, deliberately.
+        cv.colorSpace == tv.colorSpace &&
         cv.colorRange == tv.colorRange
     }
 
@@ -51,6 +56,7 @@ enum MatchEvaluator {
         output.sampleAspectRatio == target.sampleAspectRatio &&
         colorSatisfies(output.colorPrimaries, target: target.colorPrimaries) &&
         colorSatisfies(output.colorTransfer, target: target.colorTransfer) &&
+        colorSatisfies(output.colorSpace, target: target.colorSpace) &&
         colorSatisfies(output.colorRange, target: target.colorRange)
     }
 

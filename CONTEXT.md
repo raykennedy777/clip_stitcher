@@ -48,6 +48,13 @@ _Avoid_: timebase probe (a stream has a timebase; an MP4 *track* has a timescale
 Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)
 
+**Assumed input spec**:
+The color standard the conform engine assumes for an untagged source before converting it
+toward a color-tagged target (≤ 576 lines: BT.601, 625- or 525-line by frame-rate family;
+taller: BT.709). Always surfaced as an export warning naming the clip and the standard
+(issue #35, ADR-0011).
+_Avoid_: default color, guessed color
+
 **Cut-only**:
 The separate-mode rendering choice that cuts each clip in its own format with the minimum
 encoding: boundary re-encode in the clip's own codec at cut points, stream copy elsewhere,

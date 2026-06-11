@@ -56,6 +56,7 @@ enum MediaProbe {
                 sampleAspectRatio: s.sample_aspect_ratio,
                 colorPrimaries: s.color_primaries,
                 colorTransfer: s.color_transfer,
+                colorSpace: s.color_space,
                 colorRange: s.color_range
             )
         }
@@ -146,6 +147,7 @@ private struct FFStream: Decodable {
     var sample_aspect_ratio: String?
     var color_primaries: String?
     var color_transfer: String?
+    var color_space: String?
     var color_range: String?
     var sample_rate: String?
     var channels: Int?

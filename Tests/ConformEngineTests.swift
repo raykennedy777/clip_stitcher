@@ -80,6 +80,105 @@ struct ConformEngineTests {
         #expect(args.contains("libx264") && args.contains("-level"))
     }
 
+    // MARK: color conversion toward a tagged target (issue #35)
+
+    /// The France 2005 target as probed: a *hybrid* triple — bt709 primaries/transfer but a
+    /// bt470bg (BT.601) matrix — which is exactly why the conversion uses the individual
+    /// space/primaries/trc options and never an `all=` preset.
+    private let france = VideoProperties(
+        codec: "h264", profile: "High", level: "51", width: 704, height: 576,
+        frameRate: "50/1", pixelFormat: "yuv420p", fieldOrder: "progressive",
+        sampleAspectRatio: "12:11", colorPrimaries: "bt709", colorTransfer: "bt709",
+        colorSpace: "bt470bg", colorRange: "tv")
+
+    /// Untagged SD → tagged target (shell leg A): the source's color is assumed BT.601
+    /// 625-line (≤576 lines, 25 fps family), converted with both sides pinned explicitly,
+    /// and the encoder writes the target triple into the VUI. The conversion sits after
+    /// `format=` and before the fps tail, on progressive frames. Byte-exact to the
+    /// shell-proven command.
+    @Test func convertsUntaggedSDTowardTaggedTargetWithAssumed601() {
+        #expect(ConformEngine.conformVideoArgs(source: mpeg2, target: france) == [
+            "-vf", "bwdif=mode=0,scale=704:432,pad=704:576:0:72,setsar=12/11,format=yuv420p,"
+                + "colorspace=ispace=bt470bg:iprimaries=bt470bg:itrc=smpte170m:irange=tv"
+                + ":space=bt470bg:primaries=bt709:trc=bt709:range=tv,fps=50",
+            "-c:v", "libx264", "-profile:v", "high", "-level", "5.1",
+            "-x264-params", "b-pyramid=0", "-color_range", "tv",
+            "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt470bg",
+        ])
+    }
+
+    /// Untagged HD → tagged target (shell leg B): >576 lines assumes BT.709, and because the
+    /// France target's *matrix* is bt470bg the assumed-709 source still genuinely converts —
+    /// matching tags would have skipped instead.
+    @Test func convertsUntaggedHDTowardTaggedTargetWithAssumed709() {
+        #expect(ConformEngine.conformVideoArgs(source: hevc, target: france) == [
+            "-vf", "scale=704:432,pad=704:576:0:72,setsar=12/11,format=yuv420p,"
+                + "colorspace=ispace=bt709:iprimaries=bt709:itrc=bt709:irange=tv"
+                + ":space=bt470bg:primaries=bt709:trc=bt709:range=tv,fps=50",
+            "-c:v", "libx264", "-profile:v", "high", "-level", "5.1",
+            "-x264-params", "b-pyramid=0", "-color_range", "tv",
+            "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt470bg",
+        ])
+    }
+
+    /// An untagged source whose *assumed* spec already equals the target's tags is tagged
+    /// without conversion (shell leg E3): `setparams` pins the assumption on the frames so the
+    /// encoder's color flags are an identity, never ffmpeg's own auto-conversion guess —
+    /// pixels stay byte-identical (proven in the shell on a solid-color source).
+    @Test func assumedSpecMatchingTargetTagsWithoutConverting() {
+        var target601 = mpeg2
+        target601.colorPrimaries = "bt470bg"; target601.colorTransfer = "smpte170m"
+        target601.colorSpace = "bt470bg"
+        let args = ConformEngine.conformVideoArgs(source: mpeg2, target: target601)
+        #expect(args[1].contains(
+            "setparams=color_primaries=bt470bg:color_trc=smpte170m:colorspace=bt470bg:range=tv"))
+        #expect(!args[1].contains("colorspace=ispace"))
+        #expect(args.contains("-color_primaries") && args.contains("smpte170m"))
+    }
+
+    /// A fully-tagged source matching the target's tags passes the color stage untouched
+    /// (no gratuitous conversion — shell leg E2): no color filter at all, only the VUI flags,
+    /// which are an identity against the already-correct frame props.
+    @Test func taggedSourceMatchingTargetSkipsTheColorStage() {
+        #expect(ConformEngine.colorStage(source: france, target: france) == nil)
+        var smaller = france; smaller.width = 352; smaller.height = 288
+        let args = ConformEngine.conformVideoArgs(source: smaller, target: france)
+        #expect(!args[1].contains("colorspace") && !args[1].contains("setparams"))
+        #expect(args.suffix(6) == ["-color_primaries", "bt709", "-color_trc", "bt709",
+                                   "-colorspace", "bt470bg"])
+    }
+
+    /// The untagged-source heuristic (issue #35): SD splits on the rate family — 625-line
+    /// BT.601 for 25/50 fps, 525-line for 30000/1001-family — and anything over 576 lines
+    /// is BT.709. BT.601's transfer probes as smpte170m in both variants.
+    @Test func assumedColorTripleFollowsTheIndustryHeuristic() {
+        #expect(ConformEngine.assumedColorTriple(height: 576, frameRate: "25/1")
+            == ("bt470bg", "smpte170m", "bt470bg"))
+        #expect(ConformEngine.assumedColorTriple(height: 480, frameRate: "30000/1001")
+            == ("smpte170m", "smpte170m", "smpte170m"))
+        #expect(ConformEngine.assumedColorTriple(height: 1080, frameRate: "50/1")
+            == ("bt709", "bt709", "bt709"))
+    }
+
+    /// The assumption is surfaced to the user (issue #35 acceptance): named plainly when an
+    /// untagged source converts toward a tagged target, silent when the source is fully
+    /// tagged or the target imposes no complete spec.
+    @Test func assumedColorWarningNamesTheAssumptionOnlyWhenUsed() {
+        let warned = ConformEngine.assumedColorWarning(clipName: "BBC", source: mpeg2, target: france)
+        #expect(warned?.contains("BT.601 (625-line)") == true && warned?.contains("BBC") == true)
+        #expect(ConformEngine.assumedColorWarning(clipName: "f", source: france, target: france) == nil)
+        #expect(ConformEngine.assumedColorWarning(clipName: "x", source: mpeg2, target: h264) == nil)
+    }
+
+    /// A target tagged on only part of the triple keeps the pre-#35 behavior: a converter
+    /// can't aim at a partial spec, so no conversion and no VUI triple is emitted (the
+    /// self-verify still flags the specified fields loudly).
+    @Test func partiallyTaggedTargetGetsNoConversion() {
+        var partial = h264; partial.colorPrimaries = "bt709"   // transfer/matrix unprobed
+        let args = ConformEngine.conformVideoArgs(source: mpeg2, target: partial)
+        #expect(!args[1].contains("colorspace") && !args.contains("-color_primaries"))
+    }
+
     // MARK: full conform command (kept range)
 
     private let src = URL(fileURLWithPath: "/clips/in.mkv")

@@ -29,6 +29,7 @@ struct MediaProbeTests {
                 "sample_aspect_ratio": "16:11",
                 "color_primaries": "bt470bg",
                 "color_transfer": "bt470bg",
+                "color_space": "bt470bg",
                 "color_range": "tv"
             },
             {
@@ -57,7 +58,7 @@ struct MediaProbeTests {
             codec: "mpeg2video", profile: "Main", level: "8", width: 704, height: 576,
             frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: "tt",
             sampleAspectRatio: "16:11", colorPrimaries: "bt470bg",
-            colorTransfer: "bt470bg", colorRange: "tv"))
+            colorTransfer: "bt470bg", colorSpace: "bt470bg", colorRange: "tv"))
         #expect(result.audioTracks.count == 2)
         // the legacy single-track field stays filled with the first stream (ADR-0014)
         #expect(result.audio == result.audioTracks.first)

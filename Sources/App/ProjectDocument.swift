@@ -509,6 +509,15 @@ final class ProjectDocument: ReferenceFileDocument {
                                                  containerStart: containerStart,
                                                  audioSources: audioSources),
                     target: project.targetClip, settings: project.output)
+                // A conform toward a color-tagged target may have to *assume* the source's
+                // color standard when the source carries no tags (issue #35); the assumption
+                // is surfaced rather than silent so a wrong-looking result is explicable.
+                if let conform = item.conform,
+                   let note = ConformEngine.assumedColorWarning(
+                       clipName: clip.displayName,
+                       source: conform.sourceVideo, target: conform.targetVideo) {
+                    warnings.append(note)
+                }
                 if cutOnly {
                     // Each clip's output carries exactly its own tracks, each encoded
                     // to its own source codec — AAC where the container declines one,

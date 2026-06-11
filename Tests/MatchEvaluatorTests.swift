@@ -97,6 +97,20 @@ struct MatchEvaluatorTests {
         #expect(!MatchEvaluator.colorSatisfies(nil, target: "tv"))
     }
 
+    @Test func matrixJoinsTheStrictCompareAndTheConformGate() {
+        // Issue #35: the YUV matrix (ffprobe color_space) is the third leg of the colour
+        // triple. A matrix-only difference between stream-copied neighbours is a visible
+        // colour shift at the join, so it forces a conform like the other colour dimensions.
+        var hybrid = video()   // bt709 primaries/transfer…
+        hybrid.colorSpace = "bt470bg"   // …but a BT.601 matrix — the France 2005 shape
+        #expect(!MatchEvaluator.videoMatches(hybrid, video()))
+        #expect(MatchEvaluator.videoMatches(hybrid, hybrid))
+        // The conform gate mirrors the other colour fields: a target without a matrix tag
+        // imposes none; a tagged one must be met.
+        #expect(MatchEvaluator.conformedVideoMatches(hybrid, video()))
+        #expect(!MatchEvaluator.conformedVideoMatches(video(), hybrid))
+    }
+
     @Test func videoMismatchFailsRegardlessOfAudio() {
         let target = clip(video: video(width: 1920), audio: audio())
         let other = clip(video: video(width: 1280), audio: audio())

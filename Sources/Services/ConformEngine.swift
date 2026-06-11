@@ -14,8 +14,9 @@ enum ConformEngine {
 
     /// ffmpeg video filter-chain + encoder args that transform `source` → `target`. The
     /// chain runs deinterlace (if any) → scale → pad (only on a display-aspect mismatch) →
-    /// setsar → format → fps/interlace; the encoder then pins the target codec, profile,
-    /// level, interlace flags, and color range.
+    /// setsar → format → color conversion toward a tagged target (issue #35) → fps/interlace;
+    /// the encoder then pins the target codec, profile, level, interlace flags, color range,
+    /// and — for a fully color-tagged target — the primaries/transfer/matrix VUI triple.
     static func conformVideoArgs(source: VideoProperties, target: VideoProperties) -> [String] {
         let chain = filterChain(source: source, target: target).joined(separator: ",")
         return ["-vf", chain] + encoderArgs(target: target)
@@ -178,6 +179,7 @@ enum ConformEngine {
         // target imposes no color requirement (mirrors MatchEvaluator.conformedVideoMatches).
         if !MatchEvaluator.colorSatisfies(g.colorPrimaries, target: want.colorPrimaries)
             || !MatchEvaluator.colorSatisfies(g.colorTransfer, target: want.colorTransfer)
+            || !MatchEvaluator.colorSatisfies(g.colorSpace, target: want.colorSpace)
             || !MatchEvaluator.colorSatisfies(g.colorRange, target: want.colorRange) {
             diffs.append("color")
         }
@@ -200,6 +202,13 @@ enum ConformEngine {
         filters.append("setsar=\(sarFraction(target.sampleAspectRatio))")
         filters.append("format=\(target.pixelFormat)")
 
+        // Color conversion toward a tagged target (issue #35) sits after `format=` — the
+        // `colorspace` filter needs one of its supported pixel formats — and before the
+        // fps/interlace tail, so it always runs on progressive frames.
+        if let stage = colorStage(source: source, target: target) {
+            filters.append(stage)
+        }
+
         // Frame-rate / scan tail. Interlacing a progressive source needs the field-rate
         // (2× the target frame rate) feeding the interlace filter, which halves it back.
         if tgtInterlaced && !srcInterlaced {
@@ -209,26 +218,134 @@ enum ConformEngine {
             filters.append("fps=\(fpsToken(target.frameRate, double: false))")
         }
 
-        // Color tail. When the target carries no color metadata (an untagged SD source like the
+        // Strip tail. When the target carries no color metadata (an untagged SD source like the
         // SATRip H.264), a fully-tagged source (e.g. bt709 HD) would otherwise propagate its VUI
         // into the output, so the conformed clip would be rendered as bt709 next to the untagged
         // target and the join would visibly colour-shift. `setparams` resets the frames to
         // unspecified so the conformed clip plays back under the same default as the target, keeping
         // the seam seamless (ADR-0011). It can't drop everything — libx264 + Matroska still signal
         // limited `tv` range — but that residual tag matches the target's default and is accepted by
-        // verifyConformed (conformedVideoMatches ignores colour the target leaves unspecified). No
-        // *conversion* toward a differently-tagged target is attempted; true zscale conversion is a TODO.
+        // verifyConformed (conformedVideoMatches ignores colour the target leaves unspecified).
+        // Conversion toward a *tagged* target is `colorStage` above (issue #35).
         if targetIsUntagged(target) {
             filters.append("setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown")
         }
         return filters
     }
 
-    /// Whether the target declares no color metadata at all — primaries, transfer, and range all
-    /// absent (an untagged source probes every field as "unknown"). Such a target is matched by
-    /// stripping the conformed output's tags, not by converting toward a color space.
+    /// Whether the target declares no color metadata at all — primaries, transfer, matrix, and
+    /// range all absent (an untagged source probes every field as "unknown"). Such a target is
+    /// matched by stripping the conformed output's tags, not by converting toward a color space.
     private static func targetIsUntagged(_ t: VideoProperties) -> Bool {
-        t.colorPrimaries == nil && t.colorTransfer == nil && t.colorRange == nil
+        t.colorPrimaries == nil && t.colorTransfer == nil && t.colorSpace == nil && t.colorRange == nil
+    }
+
+    // MARK: - Color conversion toward a tagged target (issue #35)
+
+    /// One complete color description — the primaries/transfer/matrix triple plus range — in
+    /// ffprobe token spelling. A conversion can only run between two complete specs, so the
+    /// builders below resolve every field (probed, else assumed) before any filter is written.
+    struct ColorSpec: Equatable {
+        var primaries: String
+        var transfer: String
+        var matrix: String
+        var range: String
+    }
+
+    /// The target's color spec when it is fully tagged — all three triple fields probed (range
+    /// defaults to limited `tv`, broadcast's universal default). A target tagged on only some
+    /// triple fields stays nil: a converter cannot aim at a partial spec, so such a target keeps
+    /// the pre-#35 behavior (no conversion; verifyConformed still flags the specified fields).
+    static func targetColorSpec(_ t: VideoProperties) -> ColorSpec? {
+        guard let p = t.colorPrimaries, let tr = t.colorTransfer, let m = t.colorSpace else { return nil }
+        return ColorSpec(primaries: p, transfer: tr, matrix: m, range: t.colorRange ?? "tv")
+    }
+
+    /// The industry-standard assumption for an untagged source (issue #35): SD (≤ 576 active
+    /// lines) is BT.601 — the 625-line variant for the 25/50 fps family, the 525-line variant
+    /// for 30000/1001-family rates — and anything taller is BT.709. BT.601's transfer curve is
+    /// ffprobe's `smpte170m` for both variants (numerically the same curve as bt709).
+    static func assumedColorTriple(height: Int, frameRate: String) -> (primaries: String, transfer: String, matrix: String) {
+        guard height <= 576 else { return ("bt709", "bt709", "bt709") }
+        let den = frameRate.split(separator: "/").compactMap { Int($0) }.last
+        return den == 1001
+            ? ("smpte170m", "smpte170m", "smpte170m")
+            : ("bt470bg", "smpte170m", "bt470bg")
+    }
+
+    /// The source's color spec a conversion reads from: each probed field as-is, each missing
+    /// field filled from the `assumedColorTriple` heuristic. `assumed` reports whether any
+    /// field was filled — that's when the export surfaces the assumption to the user.
+    static func effectiveInputColor(_ s: VideoProperties) -> (spec: ColorSpec, assumed: Bool) {
+        let fallback = assumedColorTriple(height: s.height, frameRate: s.frameRate)
+        let assumed = s.colorPrimaries == nil || s.colorTransfer == nil || s.colorSpace == nil
+        let spec = ColorSpec(primaries: s.colorPrimaries ?? fallback.primaries,
+                             transfer: s.colorTransfer ?? fallback.transfer,
+                             matrix: s.colorSpace ?? fallback.matrix,
+                             range: s.colorRange ?? "tv")
+        return (spec, assumed)
+    }
+
+    /// The color filter for a tagged target, or nil when none is needed. Three cases (all
+    /// shell-proven, issue #35):
+    /// - input spec ≠ target spec → a real `colorspace` conversion with both sides pinned
+    ///   explicitly (never inherited from frame props, so the de-risked command is exactly
+    ///   what runs);
+    /// - specs equal but the input was assumed → `setparams` tags the frames with the
+    ///   assumption *without touching pixels*. This is load-bearing, not cosmetic: the
+    ///   encoder's `-colorspace`-family flags (`encoderArgs`) are conversion *requests* to
+    ///   ffmpeg's filter-graph color negotiation — left untagged, the frames would be
+    ///   auto-converted using ffmpeg's own input guess instead of ours (proven in the shell:
+    ///   an untagged 601 source "tagged" bt709 via flags alone shifted to real 709 bytes);
+    /// - specs equal and fully probed → nothing; the decoded frame props already match the
+    ///   encoder flags, and the negotiation is a proven byte-stable identity.
+    static func colorStage(source: VideoProperties, target: VideoProperties) -> String? {
+        guard let tgt = targetColorSpec(target) else { return nil }
+        let input = effectiveInputColor(source)
+        if input.spec == tgt {
+            guard input.assumed else { return nil }
+            return "setparams=color_primaries=\(filterColorToken(tgt.primaries))"
+                + ":color_trc=\(filterColorToken(tgt.transfer))"
+                + ":colorspace=\(filterColorToken(tgt.matrix))"
+                + ":range=\(tgt.range)"
+        }
+        return "colorspace=ispace=\(filterColorToken(input.spec.matrix))"
+            + ":iprimaries=\(filterColorToken(input.spec.primaries))"
+            + ":itrc=\(filterColorToken(input.spec.transfer))"
+            + ":irange=\(input.spec.range)"
+            + ":space=\(filterColorToken(tgt.matrix))"
+            + ":primaries=\(filterColorToken(tgt.primaries))"
+            + ":trc=\(filterColorToken(tgt.transfer))"
+            + ":range=\(tgt.range)"
+    }
+
+    /// ffprobe color names map 1:1 onto the `colorspace` filter's option tokens for the whole
+    /// SD/HD SDR domain (bt709/bt470bg/smpte170m — shell-verified); the few spellings that
+    /// differ are aliased here. An unknown name passes through and fails the encode loudly
+    /// rather than guessing.
+    private static func filterColorToken(_ probed: String) -> String {
+        switch probed {
+        case "iec61966-2-1": return "srgb"
+        case "iec61966-2-4": return "xvycc"
+        case "bt2020nc": return "bt2020ncl"
+        default: return probed
+        }
+    }
+
+    /// The export-log line naming the color spec assumed for an untagged source converting
+    /// toward a tagged target (issue #35) — nil when the source is fully tagged or the target
+    /// imposes no complete spec. Plain language: the maintainer reads these, not ffprobe.
+    static func assumedColorWarning(clipName: String, source: VideoProperties, target: VideoProperties) -> String? {
+        guard targetColorSpec(target) != nil else { return nil }
+        let input = effectiveInputColor(source)
+        guard input.assumed else { return nil }
+        let name: String
+        switch input.spec.matrix {
+        case "bt470bg": name = "BT.601 (625-line)"
+        case "smpte170m": name = "BT.601 (525-line)"
+        default: name = "BT.709"
+        }
+        return "“\(clipName)” doesn’t say what color standard it uses — assumed \(name) when converting it to the target’s color."
     }
 
     /// The scale (and, on a DAR mismatch, pad) filters. When source and target display the
@@ -297,6 +414,15 @@ enum ConformEngine {
             args.removeSubrange(2...3)
         }
         if let range = target.colorRange { args += ["-color_range", range] }
+        // A fully-tagged target gets its triple written into the VUI explicitly rather than
+        // relying on frame-prop propagation alone (issue #35). Safe only because `colorStage`
+        // guarantees the frames reaching the encoder already carry exactly these values —
+        // on untagged frames these flags would trigger ffmpeg's own auto-conversion (see
+        // `colorStage`); with matching frame props they are a byte-stable identity.
+        if let spec = targetColorSpec(target) {
+            args += ["-color_primaries", spec.primaries, "-color_trc", spec.transfer,
+                     "-colorspace", spec.matrix]
+        }
         return args
     }
 

@@ -16,6 +16,11 @@ struct VideoProperties: Codable, Equatable, Sendable {
     var sampleAspectRatio: String?
     var colorPrimaries: String?
     var colorTransfer: String?
+    /// The YUV↔RGB matrix coefficients (ffprobe `color_space`, e.g. "bt470bg") — the third
+    /// leg of the color triple alongside primaries and transfer (issue #35). Defaulted so
+    /// saves made before the field decode as nil (untagged), which is also what an untagged
+    /// stream probes as.
+    var colorSpace: String? = nil
     var colorRange: String?
 }
 
