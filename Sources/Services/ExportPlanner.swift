@@ -86,7 +86,8 @@ enum ExportPlanner {
             firstPts: index.pts.first, lastPts: index.pts.last,
             frameDuration: frameDuration(clip.video?.frameRate),
             containerStart: input.containerStart)
-        switch try videoTreatment(for: clip, target: target, index: index) {
+        switch try videoTreatment(for: clip, target: target, index: index,
+                                  containerStart: input.containerStart) {
         case .conform(let conform):
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: conform.targetVideo.codec,
@@ -99,11 +100,46 @@ enum ExportPlanner {
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: clip.video?.codec,
                               segments: segments, index: index, encoder: encoder,
+                              containerStart: input.containerStart,
+                              frameRate: clip.video?.frameRate,
+                              sourceDamaged: !(clip.damageZones ?? []).isEmpty,
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources,
                               audioMixFilters: input.audioMixFilters,
                               audioDuration: window.duration)
         }
+    }
+
+    // MARK: - Repair report (#47)
+
+    /// The export-completion line reporting what one clip's export repaired: the
+    /// video-affecting zones inside the kept window — exactly the zones the plan
+    /// forced into repaired re-encode segments (audio-only gaps are silence-filled by
+    /// every leg already, issue #44, and stay out of the count). Positions are clip
+    /// time, formatted like the source row's damage line, capped at six. `nil` when
+    /// nothing was repaired: no zones, none in the window, or video wasn't exported.
+    static func repairReport(clipName: String, zones: [DamageZone]?,
+                             windowStart: Double?, windowEnd: Double?) -> String? {
+        let repaired = (zones ?? []).filter { zone in
+            zone.affectsVideo
+                && zone.end > (windowStart ?? 0)
+                && (windowEnd.map { zone.start < $0 } ?? true)
+        }
+        guard !repaired.isEmpty else { return nil }
+        let shown = repaired.prefix(6).map { formattedClipTime($0.start) }
+        let times = shown.joined(separator: ", ") + (repaired.count > 6 ? ", …" : "")
+        return repaired.count == 1
+            ? "Repaired a damage zone in “\(clipName)” at \(times)."
+            : "Repaired \(repaired.count) damage zones in “\(clipName)” at \(times)."
+    }
+
+    /// h:mm:ss (or m:ss under an hour), rounded down — the cut-editor's jump popover
+    /// accepts these directly. Shared with the source row's damage line so the report
+    /// and the row can't disagree about a zone's position.
+    static func formattedClipTime(_ seconds: Double) -> String {
+        let total = Int(seconds)
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     // MARK: - Copy/re-encode share (issue #15)
@@ -125,10 +161,11 @@ enum ExportPlanner {
     /// kept window; a smart-rendered clip maps each planned segment through the pts. Nil
     /// when no plan exists (empty kept range).
     static func copyShare(for clip: Clip, target: Clip?, settings: OutputSettings,
-                          index: FrameIndex) -> CopyShare? {
+                          index: FrameIndex, containerStart: Double = 0) -> CopyShare? {
         guard index.count > 0 else { return nil }
         let target = effectiveTarget(target, settings: settings)
-        guard let treatment = try? videoTreatment(for: clip, target: target, index: index) else {
+        guard let treatment = try? videoTreatment(for: clip, target: target, index: index,
+                                                  containerStart: containerStart) else {
             return nil
         }
         switch treatment {

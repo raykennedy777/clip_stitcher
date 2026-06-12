@@ -209,19 +209,13 @@ struct ClipRowView: View {
     /// no zones found, or the clip predates detection. Pure for unit tests.
     nonisolated static func damageLineText(zones: [DamageZone]?) -> String? {
         guard let zones, !zones.isEmpty else { return nil }
-        let shown = zones.prefix(6).map { formattedZoneTime($0.start) }
+        // The shared formatter keeps the row and the export's repair report agreeing
+        // about every zone's position (issue #47).
+        let shown = zones.prefix(6).map { ExportPlanner.formattedClipTime($0.start) }
         let times = shown.joined(separator: ", ") + (zones.count > 6 ? ", …" : "")
         return zones.count == 1
             ? "Damage zone at \(times)"
             : "\(zones.count) damage zones at \(times)"
-    }
-
-    /// h:mm:ss (or m:ss under an hour), rounded down — the cut-editor's jump popover
-    /// accepts these directly.
-    private nonisolated static func formattedZoneTime(_ seconds: Double) -> String {
-        let total = Int(seconds)
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     /// Shown only when the clip has a selection narrower than the whole clip.

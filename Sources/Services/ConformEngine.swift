@@ -522,7 +522,9 @@ enum ConformEngine {
 
     /// Frame-rate filter token from an ffprobe "num/den" rate, optionally doubled for the
     /// field rate. A unit denominator collapses to the integer ("25/1" → "25", doubled "50").
-    private static func fpsToken(_ rate: String, double: Bool) -> String {
+    /// Internal (not private): the repaired re-encode's fps fill (issue #47) shares it
+    /// so the two paths can't drift on the token spelling.
+    static func fpsToken(_ rate: String, double: Bool) -> String {
         let p = rate.split(separator: "/").compactMap { Int($0) }
         guard p.count == 2, p[1] != 0 else { return double ? "50" : "25" }
         let num = double ? p[0] * 2 : p[0]
@@ -530,8 +532,9 @@ enum ConformEngine {
     }
 
     /// Frames-per-second as a Double from an ffprobe "num/den" rate ("25/1" → 25.0, "30000/1001"
-    /// → 29.97). `nil` for an unparseable/degenerate rate.
-    private static func frameRateValue(_ rate: String) -> Double? {
+    /// → 29.97). `nil` for an unparseable/degenerate rate. Internal (not private): the
+    /// repaired re-encode's slot budget (issue #47) shares it.
+    static func frameRateValue(_ rate: String) -> Double? {
         let p = rate.split(separator: "/").compactMap { Double($0) }
         guard p.count == 2, p[1] != 0 else { return nil }
         return p[0] / p[1]

@@ -226,6 +226,136 @@ struct ExportPlannerTests {
         #expect(share.copiedFraction == 1.0)
     }
 
+    // MARK: damage repair threading (#47)
+
+    /// A 100-frame, 25 fps index with keyframes every 25 — wide enough for a zone to
+    /// land mid-copy.
+    private let longIndex = FrameIndex(
+        pts: (0..<100).map { Double($0) * 0.04 },
+        keyframeFlags: (0..<100).map { $0 % 25 == 0 })
+
+    private func damagedClip(zones: [DamageZone]) -> Clip {
+        var c = clip(video: video())
+        c.damageZones = zones
+        return c
+    }
+
+    /// A recorded zone reaches the smart-render plan as a repaired re-encode segment
+    /// extending to the surrounding copy-safe boundaries; without zones the plan is
+    /// today's, byte for byte.
+    @Test func damageZonesForceRepairedSegmentsIntoTheVerdict() throws {
+        let zone = DamageZone(start: 1.6, end: 1.8, affectsVideo: true)
+        let treatment = try ExportPlanner.videoTreatment(
+            for: damagedClip(zones: [zone]), target: nil, index: longIndex, containerStart: 0)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [
+            PlannedSegment(kind: .copy, range: 0..<25, outCutKeyframe: 25),
+            PlannedSegment(kind: .reEncode, range: 25..<50, damage: [zone]),
+            PlannedSegment(kind: .copy, range: 50..<100),
+        ])
+    }
+
+    /// A scanned-clean clip (zones == []) and an unscanned clip (nil) both plan
+    /// exactly as before repair existed.
+    @Test func cleanAndUnscannedClipsPlanAsToday() throws {
+        let plain = try ExportPlanner.videoTreatment(
+            for: clip(video: video()), target: nil, index: longIndex, containerStart: 0)
+        let clean = try ExportPlanner.videoTreatment(
+            for: damagedClip(zones: []), target: nil, index: longIndex, containerStart: 0)
+        #expect(plain == clean)
+        guard case .smartRender(let segments, _) = plain else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [PlannedSegment(kind: .copy, range: 0..<100)])
+    }
+
+    /// The zone times are container-start-relative; the planner maps them through the
+    /// index's absolute pts by adding the container start.
+    @Test func zoneMappingHonorsTheContainerStart() throws {
+        let shifted = FrameIndex(
+            pts: (0..<100).map { 1.44 + Double($0) * 0.04 },
+            keyframeFlags: (0..<100).map { $0 % 25 == 0 })
+        let zone = DamageZone(start: 1.6, end: 1.8, affectsVideo: true)   // abs 3.04–3.24
+        let treatment = try ExportPlanner.videoTreatment(
+            for: damagedClip(zones: [zone]), target: nil, index: shifted, containerStart: 1.44)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        // abs 3.04 is frame 40 — the repair lands in [25, 50). Mapping the zone's
+        // 1.6 as absolute time (frame 4) would have put it in [0, 25) instead.
+        #expect(segments.contains(PlannedSegment(kind: .reEncode, range: 25..<50, damage: [zone])))
+    }
+
+    /// A repaired span counts as re-encoded in the copy share — the Output view's
+    /// numbers reflect the repair work.
+    @Test func copyShareCountsRepairedSpansAsReencoded() throws {
+        let zone = DamageZone(start: 1.6, end: 1.8, affectsVideo: true)
+        let whole = try #require(ExportPlanner.copyShare(
+            for: clip(video: video()), target: nil, settings: OutputSettings(), index: longIndex))
+        let repaired = try #require(ExportPlanner.copyShare(
+            for: damagedClip(zones: [zone]), target: nil, settings: OutputSettings(),
+            index: longIndex, containerStart: 0))
+        #expect(whole.copiedFraction == 1.0)
+        #expect(repaired.copiedFraction < 1.0)
+        #expect(repaired.totalSeconds == whole.totalSeconds)
+    }
+
+    /// A smart-rendered item carries the container start and source rate the repaired
+    /// segments execute with.
+    @Test func plannedItemCarriesContainerStartAndFrameRate() throws {
+        let zone = DamageZone(start: 1.6, end: 1.8, affectsVideo: true)
+        let item = try ExportPlanner.planItem(
+            for: ExportPlanner.ClipInput(clip: damagedClip(zones: [zone]),
+                                         url: URL(fileURLWithPath: "/clips/in.ts"),
+                                         index: longIndex, containerStart: 1.44,
+                                         audioSources: [.stream(0)]),
+            target: nil)
+        #expect(item.containerStart == 1.44)
+        #expect(item.frameRate == "25/1")
+        // The MKV copy cut needs the pts refill whenever the *source* is damaged —
+        // even a clean kept window muxes the discarded segments (issue #47).
+        #expect(item.sourceDamaged)
+    }
+
+    // MARK: repair report (#47)
+
+    @Test func repairReportListsVideoZonesInTheKeptWindow() {
+        let zones = [
+            DamageZone(start: 95.5, end: 96.0, affectsVideo: true),
+            DamageZone(start: 4774.84, end: 4775.5, affectsVideo: true),
+            DamageZone(start: 200.0, end: 200.5, affectsVideo: false),   // audio-only: out
+        ]
+        #expect(ExportPlanner.repairReport(clipName: "match.ts", zones: zones,
+                                           windowStart: nil, windowEnd: nil)
+            == "Repaired 2 damage zones in “match.ts” at 1:35, 1:19:34.")
+        #expect(ExportPlanner.repairReport(clipName: "match.ts", zones: [zones[0]],
+                                           windowStart: nil, windowEnd: nil)
+            == "Repaired a damage zone in “match.ts” at 1:35.")
+    }
+
+    @Test func repairReportFiltersZonesOutsideTheKeptWindow() {
+        let zones = [
+            DamageZone(start: 95.5, end: 96.0, affectsVideo: true),
+            DamageZone(start: 500.0, end: 501.0, affectsVideo: true),
+        ]
+        // Window [400, 600): only the second zone was in the export.
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: zones,
+                                           windowStart: 400, windowEnd: 600)
+            == "Repaired a damage zone in “c” at 8:20.")
+        // Nothing in the window — no report.
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: zones,
+                                           windowStart: 1000, windowEnd: nil) == nil)
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: nil,
+                                           windowStart: nil, windowEnd: nil) == nil)
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: [],
+                                           windowStart: nil, windowEnd: nil) == nil)
+    }
+
     /// The Output warning fires only when re-encode *dominates* (> 50 % of output
     /// duration) — boundary slivers on closed-GOP sources must stay quiet.
     @Test func reencodeWarningFiresOnlyAboveTheDominanceThreshold() {

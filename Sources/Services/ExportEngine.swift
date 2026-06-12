@@ -20,6 +20,19 @@ struct ExportItem {
     var segments: [PlannedSegment] = []
     var index: FrameIndex = FrameIndex(pts: [], keyframeFlags: [])
     var encoder: [String] = []
+    /// The container's start_time — the base of every damage-zone time and input-seek
+    /// second. Repaired segments (issue #47) need it to place their select windows;
+    /// 0 for an undamaged plan, where nothing reads it.
+    var containerStart: Double = 0
+    /// The probed video frame rate ("25/1") — a repaired segment's fps fill and slot
+    /// budget run at the source rate (issue #47). nil on undamaged plans.
+    var frameRate: String? = nil
+    /// Whether the clip's source has recorded damage zones at all — not just inside
+    /// this plan's kept window. The MKV copy cut needs the pts refill whenever the
+    /// *file* carries timestamp-less packets: the segment muxer writes the discarded
+    /// segments too, so a clean kept window still chokes on damage elsewhere (the
+    /// 1844 control-window failure, issue #47).
+    var sourceDamaged: Bool = false
     var audioStart: Double? = nil
     var audioEnd: Double? = nil
     /// What feeds each of this clip's audio legs, by output track (ADR-0014): the clip's
@@ -104,10 +117,14 @@ enum ExportEngine {
     /// `FrameIndexer.parseIndex` applies when numbering frames (ADR-0006), so the muxed
     /// timestamps agree with the app's frame index and the verify gate's source pattern.
     /// All other packets pass through untouched, so on a fully-stamped source it is the
-    /// identity. Scoped to mpeg2video→MKV: every other codec×container command stays
-    /// byte-identical to its validated shape.
-    static func ptsRefillBitstreamFilter(codec: String?, ext: String) -> [String] {
-        guard codec == "mpeg2video", ext.lowercased() == "mkv" else { return [] }
+    /// identity. Scoped to mpeg2video→MKV — plus any **damaged** clip→MKV (issue #47):
+    /// a damaged source carries no-PTS packets whatever its codec (the 1844 capture's
+    /// truncated pictures), and they kill the MKV copy cut even when the kept window is
+    /// clean, because the segment muxer writes the *discarded* segments too. Validated
+    /// on the real capture in the shell (refill → exit 0; without → "Can't write packet
+    /// with unknown timestamp"). Every clean clip's command stays byte-identical.
+    static func ptsRefillBitstreamFilter(codec: String?, ext: String, damaged: Bool = false) -> [String] {
+        guard codec == "mpeg2video" || damaged, ext.lowercased() == "mkv" else { return [] }
         return ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"]
     }
 
@@ -283,18 +300,27 @@ enum ExportEngine {
     /// With no plan (or a frame-count mismatch, which gate 1 reports separately) every
     /// interval is held to strict uniformity — the pre-#19 behavior, still what a full
     /// re-encode (`ConformEngine`) wants.
-    static func timestampDefect(pts: [Double], plan: [PlannedSegment], sourcePts: [Double]) -> String? {
+    ///
+    /// `outputCounts` (one entry per plan segment) re-anchors the mapping when a
+    /// segment's produced frame count differs from its source range — a repaired
+    /// re-encode fills holes and drops corrupt frames (issue #47), shifting where every
+    /// later copy span lands in the piece. Omitted, each segment is its range's length.
+    static func timestampDefect(pts: [Double], plan: [PlannedSegment], sourcePts: [Double],
+                                outputCounts: [Int]? = nil) -> String? {
         guard pts.count >= 3 else { return nil }
         let deltas = zip(pts.dropFirst(), pts).map { $0 - $1 }
         let median = deltas.sorted()[deltas.count / 2]
         guard median > 0 else { return "frames share a timestamp (zero median interval)" }
 
         // Output index of each segment's first frame; the plan tiles the piece, so
-        // output frame `starts[s] + k` is source frame `plan[s].range.lowerBound + k`.
+        // output frame `starts[s] + k` is source frame `plan[s].range.lowerBound + k`
+        // (copy segments always produce exactly their range).
+        let counts = outputCounts ?? plan.map { $0.range.count }
         var starts: [Int] = []
         var total = 0
-        for segment in plan { starts.append(total); total += segment.range.count }
-        let planApplies = !plan.isEmpty && total == pts.count && !sourcePts.isEmpty
+        for count in counts { starts.append(total); total += count }
+        let planApplies = !plan.isEmpty && counts.count == plan.count && total == pts.count
+            && !sourcePts.isEmpty
         func segmentIndex(of frame: Int) -> Int {
             var s = plan.count - 1
             while s > 0 && starts[s] > frame { s -= 1 }
@@ -312,8 +338,15 @@ enum ExportEngine {
                 let s = segmentIndex(of: i)
                 if plan[s].kind == .copy && segmentIndex(of: i + 1) == s {
                     let within = i - starts[s]
-                    let lastInterval = plan[s].range.count - 2
-                    if within >= seamWindow && lastInterval - within >= seamWindow {
+                    let lastInterval = counts[s] - 2
+                    // The piece's outermost edges are not seams — nothing abuts the
+                    // first segment's head or the last segment's tail, so a faithful
+                    // copy may reproduce the source's anomaly right up to them (the
+                    // HEVC fixture's B-pyramid tail cut presents a missing slot in
+                    // its final interval). Interior edges keep the strict window.
+                    let headGuard = s == 0 ? 0 : seamWindow
+                    let tailGuard = s == plan.count - 1 ? 0 : seamWindow
+                    if within >= headGuard && lastInterval - within >= tailGuard {
                         let m = plan[s].range.lowerBound + within
                         let nearby = (m - matchRadius)...(m + matchRadius)
                         if nearby.contains(where: { $0 >= 0 && $0 < sourceDeltas.count
@@ -591,7 +624,10 @@ enum ExportEngine {
                     videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
                         ffmpeg, source: item.source, plan: item.segments, index: item.index,
                         encoder: item.encoder, work: work, ext: ext, clipIndex: i,
-                        codec: item.codec, trackTimescale: exportTimescale, onProgress: withinClip))
+                        codec: item.codec, trackTimescale: exportTimescale,
+                        containerStart: item.containerStart, frameRate: item.frameRate,
+                        sourceDamaged: item.sourceDamaged,
+                        onProgress: withinClip))
                 }
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }

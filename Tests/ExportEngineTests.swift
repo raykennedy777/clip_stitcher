@@ -75,6 +75,19 @@ struct ExportEngineTests {
         #expect(bsf == ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"])
     }
 
+    /// A damaged source carries no-PTS packets whatever its codec (the 1844 capture's
+    /// truncated pictures killed every MKV copy cut — even ones whose kept window was
+    /// clean, since the segment muxer writes the discarded segments too). The refill
+    /// extends to damaged clips into MKV; clean clips keep today's exact commands.
+    @Test func damagedSourcesIntoMkvGetThePtsRefillWhateverTheCodec() {
+        let want = ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"]
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "mkv", damaged: true) == want)
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "hevc", ext: "mkv", damaged: true) == want)
+        // mp4/ts tolerate a missing PTS — no shape change there even when damaged.
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "mp4", damaged: true).isEmpty)
+        #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "ts", damaged: true).isEmpty)
+    }
+
     @Test func everyOtherCodecContainerComboKeepsItsValidatedCommandShape() {
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "ts").isEmpty)
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mp4").isEmpty)
@@ -498,6 +511,55 @@ struct ExportEngineTests {
         #expect(ExportEngine.timestampDefect(pts: tooFar, plan: plan, sourcePts: src) != nil)
     }
 
+    /// The piece's outermost edges are not seams — nothing abuts them. A copy running
+    /// to the file end may faithfully reproduce a source anomaly in its last intervals
+    /// (the HEVC fixture's tail presents with a missing slot: a `-t` stream-copy keeps
+    /// a decode-order prefix of its B-pyramid), and the source-match requirement still
+    /// applies. Interior seams keep the strict window — that is where the shipped
+    /// defect classes live.
+    @Test func outerEdgesOfThePieceAreNotSeams() {
+        // Source whose final interval is a double slot (B-pyramid tail cut).
+        var src = (0..<100).map { 0.04 * Double($0) }
+        src[99] = src[98] + 0.08
+        let plan = [PlannedSegment(kind: .copy, range: 0..<100)]
+        #expect(ExportEngine.timestampDefect(pts: src, plan: plan, sourcePts: src) == nil)
+        // The same gap WITHOUT a source match still fails, outer edge or not.
+        let clean = (0..<100).map { 0.04 * Double($0) }
+        #expect(ExportEngine.timestampDefect(pts: src, plan: plan, sourcePts: clean) != nil)
+        // An interior seam keeps the strict window: the same anomaly at a copy
+        // segment's last interval before a re-encode segment is never excused.
+        let interior = [PlannedSegment(kind: .copy, range: 0..<50),
+                        PlannedSegment(kind: .reEncode, range: 50..<100)]
+        var seamed = (0..<100).map { 0.04 * Double($0) }
+        seamed[49] = seamed[48] + 0.08
+        // ...even with an identical source — the seam stays strict.
+        #expect(ExportEngine.timestampDefect(pts: seamed, plan: interior, sourcePts: seamed) != nil)
+    }
+
+    /// A repaired segment's output count differs from its frame range (holes filled,
+    /// corrupt dropped — issue #47), shifting where later copy segments land in the
+    /// piece. `outputCounts` re-anchors the mapping so a copy span after a repair still
+    /// verifies against the source's own pattern at the right position.
+    @Test func outputCountsReanchorCopySpansAfterARepairedSegment() {
+        let src = dirtySource(count: 30, dupAt: 15)
+        let z = DamageZone(start: 0.1, end: 0.2, affectsVideo: true)
+        let plan = [PlannedSegment(kind: .reEncode, range: 0..<10, damage: [z]),
+                    PlannedSegment(kind: .copy, range: 10..<25)]
+        // The repaired piece came out 8 frames; the copy follows with the source's
+        // dup at source frame 15 → output interval 8 + (15 − 10) = 13.
+        var pts = (0..<8).map { 0.04 * Double($0) }
+        var t = pts.last! + 0.04
+        for i in 10..<25 {
+            pts.append(t)
+            if i == 15 { continue }
+            t += (i == 17) ? 0.08 : 0.04
+        }
+        // Without the counts the plan can't map (23 ≠ 25 frames) → strict gate trips.
+        #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src) != nil)
+        #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src,
+                                             outputCounts: [8, 15]) == nil)
+    }
+
     @Test func anAnomalyTheSourceDoesNotHaveStillFails() {
         let src = (0..<120).map { 0.04 * Double($0) }      // clean source
         let plan = [PlannedSegment(kind: .copy, range: 0..<100),
@@ -533,12 +595,13 @@ struct ExportEngineTests {
         for j in 100..<110 { clean[j] += 0.04 }
         #expect(ExportEngine.timestampDefect(pts: clean, plan: plan,
                                              sourcePts: (0..<120).map { 0.04 * Double($0) }) != nil)
-        // a source anomaly inside the 2-interval window at a copy edge is also strict
-        let edgy = dirtySource(count: 120, dupAt: 1)
-        #expect(ExportEngine.timestampDefect(
-            pts: Array(edgy[0..<100]),
-            plan: [PlannedSegment(kind: .copy, range: 0..<100)],
-            sourcePts: edgy) != nil)
+        // a source anomaly inside the 2-interval window at an *interior* copy edge is
+        // also strict, even when the source matches — only the piece's outermost
+        // edges relax (nothing abuts them; see outerEdgesOfThePieceAreNotSeams)
+        let edgy = dirtySource(count: 120, dupAt: 97)
+        var edgyPts = Array(edgy[0..<100])
+        edgyPts += (0..<10).map { edgy[99] + 0.04 * Double($0 + 1) }
+        #expect(ExportEngine.timestampDefect(pts: edgyPts, plan: plan, sourcePts: edgy) != nil)
     }
 
     @Test func reEncodedSegmentsKeepStrictUniformity() {

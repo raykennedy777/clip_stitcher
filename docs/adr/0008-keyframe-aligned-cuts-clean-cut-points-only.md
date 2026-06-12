@@ -94,6 +94,13 @@ on its own.
     no-regression + injected dup/gap still fail), H.264/MP4 and HEVC/MKV+MP4 (clean
     copy+re-encode+concat pass both old and new gate). A full re-encode (`ConformEngine`) keeps
     the plain uniformity check — there is no copied span to be faithful to.
+  - **Amended (issue #47 / ADR-0020):** the strict 2-interval edge window no longer applies at the
+    piece's **outermost** edges (the first segment's head, the last segment's tail) — nothing abuts
+    them within the piece, and a whole-file copy faithfully reproduces the source's own tail
+    anomaly (the `-t`-cut HEVC fixture presents a B-pyramid hole in its final interval; the old
+    gate made such sources unexportable). The source-match requirement still applies there, and
+    interior seams stay strict. The frame-count gate also gains damage awareness — repaired
+    segments expect their slot budget, short only inside an EOF damage window (ADR-0020).
 
 ## Consequences
 

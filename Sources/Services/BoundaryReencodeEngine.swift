@@ -77,6 +77,133 @@ enum BoundaryReencodeEngine {
         return args
     }
 
+    // MARK: - Repaired segments (#47)
+
+    /// ffmpeg args to re-encode a **repaired** segment — a span the planner forced
+    /// around damage zones (issue #47), validated in the shell on all three formats ×
+    /// three containers (#43 + #47 de-risk). It differs from `reencodeSegmentArguments`
+    /// exactly where damage breaks that recipe:
+    ///
+    /// - **Selects by time, not frame number**: at every truncated no-timestamp packet
+    ///   the index numbering and the decoder's emitted-frame numbering drift apart by
+    ///   one, so `between(n,…)` desyncs precisely where it matters. `t` after an input
+    ///   seek is `abs_pts − start_time − ss_requested` (the *requested* seek, even when
+    ///   the landing differs).
+    /// - **Anchors one keyframe early** (two on MPEG-PS, whose byte-estimated time-seek
+    ///   lands late — badly so near damage): a truncated final GOP decodes nothing when
+    ///   entered directly, and the span bound in the select discards the lead-in anyway.
+    /// - **Drops each zone's window and fills with `fps`** at the source rate: the
+    ///   dropped span is repaid by repeating the last good frame, so the source
+    ///   timeline length is preserved exactly. Each window is widened a quarter frame
+    ///   against float jitter, and clamped so the span's first frame always survives —
+    ///   `fps` needs a frame to hold, and a glitched held frame beats a shifted
+    ///   timeline when damage touches the span head.
+    /// - **`-frames:v` is the span's slot budget**: `fps` pads its end-of-stream flush
+    ///   to the last *decoded* frame (dropped or kept), so the budget is what truncates
+    ///   the fill exactly at the span end.
+    static func repairedSegmentArguments(
+        source: URL, range: Range<Int>, index: FrameIndex, zones: [DamageZone],
+        containerStart: Double, frameRate: String, encoder: [String], output: URL,
+        trackTimescale: Int? = nil
+    ) -> [String] {
+        let fps = ConformEngine.frameRateValue(frameRate) ?? 25
+        let interval = 1 / fps
+        let quarter = interval / 4
+        let anchor = repairAnchor(source: source, range: range, index: index)
+        let seek = max(0, index.pts[anchor] - containerStart)
+        let spanStart = index.pts[range.lowerBound] - containerStart
+        let spanEnd = segmentEndTime(range: range, index: index, frameDuration: interval)
+            - containerStart
+
+        var select = "between(t\\,\(ExportEngine.timeString(spanStart - seek - quarter))"
+            + "\\,\(ExportEngine.timeString(spanEnd - interval - seek + quarter)))"
+        for zone in zones {
+            let windowStart = max(zone.start - quarter, spanStart + interval - quarter)
+            select += "*not(between(t\\,\(ExportEngine.timeString(windowStart - seek))"
+                + "\\,\(ExportEngine.timeString(zone.end - seek + quarter))))"
+        }
+
+        var args = ["-v", "error", "-ss", ExportEngine.timeString(seek)]
+        args += ["-t", ExportEngine.timeString(spanEnd - (index.pts[anchor] - containerStart) + 1.0)]
+        args += ["-i", source.path]
+        args += ["-vf", "select='\(select)',setpts=PTS-STARTPTS,fps=\(ConformEngine.fpsToken(frameRate, double: false))"]
+        args += encoder
+        if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
+            args += ["-video_track_timescale", String(trackTimescale)]
+        }
+        args += ["-frames:v", String(slotBudget(range: range, index: index, fps: fps)), "-an", output.path]
+        return args
+    }
+
+    /// The frame count a repaired piece must come out at: the span's slot budget
+    /// (duration × fps — holes filled, corrupt frames dropped and held over), plus how
+    /// far short it may legitimately fall. The allowance is non-zero only when a damage
+    /// window runs through the **file end** (EOF truncation): the fps fill stops at the
+    /// last decoded frame, which the index cannot predict — the truncated packet sits
+    /// in the index but never decodes — so the piece may end anywhere between the last
+    /// clean frame and the full budget. Interior spans always fill exactly: their right
+    /// boundary is a clean keyframe that decodes, and the fill pads to it.
+    static func repairedSegmentExpectation(
+        range: Range<Int>, index: FrameIndex, zones: [DamageZone],
+        containerStart: Double, frameRate: String
+    ) -> (frames: Int, shortfallAllowance: Int) {
+        let fps = ConformEngine.frameRateValue(frameRate) ?? 25
+        let interval = 1 / fps
+        let budget = slotBudget(range: range, index: index, fps: fps)
+        guard range.upperBound == index.count else { return (budget, 0) }
+        let spanStart = index.pts[range.lowerBound] - containerStart
+        let spanEnd = segmentEndTime(range: range, index: index, frameDuration: interval)
+            - containerStart
+        // The windows the select drops, in span time (head-clamped like the builder).
+        let windows = zones.map { zone in
+            (start: max(zone.start - interval / 4, spanStart + interval * 0.75),
+             end: zone.end + interval / 4)
+        }
+        // Trailing uncertainty exists only when a window covers the final slot.
+        guard let trailing = windows.filter({ $0.end >= spanEnd - interval }).map(\.start).min()
+        else { return (budget, 0) }
+        // The last index frame outside every window is guaranteed to decode and be
+        // kept, anchoring the fill at least that deep.
+        var lastKept = spanStart
+        for i in range {
+            let t = index.pts[i] - containerStart
+            if t < trailing, !windows.contains(where: { t >= $0.start && t <= $0.end }) {
+                lastKept = max(lastKept, t)
+            }
+        }
+        let guaranteed = Int(((lastKept - spanStart) * fps).rounded()) + 1
+        return (budget, max(0, budget - guaranteed))
+    }
+
+    /// Where a repaired segment's content ends in absolute presentation time: the next
+    /// frame's pts, or one frame past the last when the span runs to the file end.
+    private static func segmentEndTime(range: Range<Int>, index: FrameIndex,
+                                       frameDuration: Double) -> Double {
+        range.upperBound < index.count
+            ? index.pts[range.upperBound]
+            : (index.pts.last ?? 0) + frameDuration
+    }
+
+    /// The repaired span's output slot count: duration × fps, rounded.
+    private static func slotBudget(range: Range<Int>, index: FrameIndex, fps: Double) -> Int {
+        let start = index.pts[range.lowerBound]
+        let end = segmentEndTime(range: range, index: index, frameDuration: 1 / fps)
+        return max(1, Int(((end - start) * fps).rounded()))
+    }
+
+    /// The decode anchor for a repaired span: one keyframe before the keyframe at/or
+    /// before the span start — two on MPEG-PS, whose byte-estimated `-ss` lands late
+    /// (#43 de-risk; the detector seeks the same margin). Never past the file head.
+    private static func repairAnchor(source: URL, range: Range<Int>, index: FrameIndex) -> Int {
+        let psExtensions = ["mpg", "mpeg", "vob"]
+        let back = psExtensions.contains(source.pathExtension.lowercased()) ? 2 : 1
+        var anchor = index.keyframeIndex(atOrBefore: range.lowerBound)
+        for _ in 0..<back {
+            anchor = index.keyframeIndex(atOrBefore: max(0, anchor - 1))
+        }
+        return anchor
+    }
+
     /// ffmpeg args producing the **timescale probe piece** (issue #18): one stream-copied
     /// video packet muxed into MP4, whose track timescale is then read back as the value
     /// the clip's real copy pieces will carry. Measured, never derived from the source:
@@ -139,12 +266,28 @@ enum BoundaryReencodeEngine {
     static func produceVideoPiece(
         _ ffmpeg: URL, source: URL, plan: [PlannedSegment], index: FrameIndex,
         encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
-        trackTimescale: Int? = nil,
+        trackTimescale: Int? = nil, containerStart: Double = 0, frameRate: String? = nil,
+        sourceDamaged: Bool = false,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
-        // mpeg2video→MKV copy needs the missing-PTS refill (issue #2); [] otherwise.
-        let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: codec, ext: ext)
+        // A repaired segment needs the source rate for its fps fill and slot budget;
+        // the planner only attaches damage when the rate parses, so this is a
+        // can't-happen guard, not a policy. `repairRate` is read only by repaired
+        // segments — the placeholder is never used (plans without damage don't read
+        // it, and plans with damage threw above unless the real rate parsed).
+        let parsedRate: String? = (frameRate.map { ConformEngine.frameRateValue($0) != nil } ?? false)
+            ? frameRate : nil
+        guard plan.allSatisfy({ $0.damage.isEmpty }) || parsedRate != nil else {
+            throw ExportError.invalidPlan
+        }
+        let repairRate = parsedRate ?? "25/1"
+        // mpeg2video→MKV copy needs the missing-PTS refill (issue #2), as does any
+        // damaged *source*→MKV — its truncated pictures choke the muxer even from
+        // discarded segments, whatever window is kept (issue #47); [] otherwise.
+        let bsf = ExportEngine.ptsRefillBitstreamFilter(
+            codec: codec, ext: ext,
+            damaged: sourceDamaged || plan.contains { !$0.damage.isEmpty })
 
         // The export-wide MP4 timescale (issue #24) stamps every piece — copies
         // included — so cross-clip joins can't stretch or collapse. Without one
@@ -184,6 +327,14 @@ enum BoundaryReencodeEngine {
             }
             let piece: URL
             switch segment.kind {
+            case .reEncode where !segment.damage.isEmpty:
+                piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_rep.\(ext)")
+                try await run(ffmpeg, repairedSegmentArguments(
+                    source: source, range: segment.range, index: index,
+                    zones: segment.damage, containerStart: containerStart,
+                    frameRate: repairRate, encoder: encoder, output: piece,
+                    trackTimescale: pieceTimescale),
+                    onOutTime: onOutTime)
             case .reEncode:
                 piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_re.\(ext)")
                 try await run(ffmpeg, reencodeSegmentArguments(
@@ -228,7 +379,24 @@ enum BoundaryReencodeEngine {
             try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
             result = joined
         }
-        try await verifyPiece(ffmpeg, result, expectedFrames: expectedFrameCount(plan),
+        // Per-segment expected output counts: a copy or plain re-encode produces
+        // exactly its frame range; a repaired segment produces its slot budget
+        // (duration × fps), short only inside an EOF damage window (issue #47).
+        var outputCounts: [Int] = []
+        var shortfallAllowance = 0
+        for segment in plan {
+            if segment.damage.isEmpty {
+                outputCounts.append(segment.range.count)
+            } else {
+                let expectation = repairedSegmentExpectation(
+                    range: segment.range, index: index, zones: segment.damage,
+                    containerStart: containerStart, frameRate: repairRate)
+                outputCounts.append(expectation.frames)
+                shortfallAllowance += expectation.shortfallAllowance
+            }
+        }
+        try await verifyPiece(ffmpeg, result, expectedCounts: outputCounts,
+                              shortfallAllowance: shortfallAllowance,
                               plan: plan, sourcePts: index.pts)
         return result
     }
@@ -260,7 +428,9 @@ enum BoundaryReencodeEngine {
 
     /// Verifies a produced video piece before it ships (ADR-0008). Three checks, any of
     /// which throws rather than letting a silently-wrong cut through:
-    ///   1. Frame count — the output's video packet count must equal the planned total,
+    ///   1. Frame count — the output's video packet count must equal the planned total
+    ///      (per-segment expected counts; a repaired segment expects its slot budget,
+    ///      short only within `shortfallAllowance` at an EOF damage window — issue #47),
     ///      catching any frame leaking past a cut (a desynced index once made a 2-clip
     ///      export come out +10 frames).
     ///   2. Decode check — a full `-xerror` decode pass must succeed, catching a corrupt
@@ -273,12 +443,22 @@ enum BoundaryReencodeEngine {
     ///      *source's* timestamp pattern instead — a faithful copy of an irregular source
     ///      is correct output, not a defect (issue #19, plan-aware
     ///      `ExportEngine.timestampDefect`).
-    private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedFrames: Int,
+    private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedCounts: [Int],
+                                    shortfallAllowance: Int = 0,
                                     plan: [PlannedSegment], sourcePts: [Double]) async throws {
+        let expectedFrames = expectedCounts.reduce(0, +)
         let actual = try await FrameIndexer.frameCount(url: piece)
-        guard actual == expectedFrames else {
+        guard actual <= expectedFrames, actual >= expectedFrames - shortfallAllowance else {
             throw ExportError.verificationFailed(
-                "Produced \(actual) video frames but the cut kept \(expectedFrames).")
+                "Produced \(actual) video frames but the cut kept \(expectedFrames)"
+                + (shortfallAllowance > 0 ? " (−\(shortfallAllowance) allowed at the damaged file end)." : "."))
+        }
+        // Any EOF shortfall lands in the trailing repaired segment — re-anchor the
+        // timestamp mapping so the copy spans before it still line up.
+        var outputCounts = expectedCounts
+        if actual < expectedFrames,
+           let last = plan.lastIndex(where: { !$0.damage.isEmpty }) {
+            outputCounts[last] -= expectedFrames - actual
         }
         let decode = try await ProcessRunner.run(
             ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
@@ -289,7 +469,8 @@ enum BoundaryReencodeEngine {
             throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
         }
         let pts = try await FrameIndexer.buildIndex(url: piece).pts
-        if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts) {
+        if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts,
+                                                     outputCounts: outputCounts) {
             throw ExportError.verificationFailed("The cut produced irregular timestamps: \(reason)")
         }
     }

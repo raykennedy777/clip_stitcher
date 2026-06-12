@@ -257,4 +257,130 @@ struct BoundaryReencodeEngineTests {
         #expect(abs((spans[0] ?? -1) - 0.16) < 1e-9)   // pts[4] - pts[0] = 0.40 - 0.24, = 4 frames
         #expect(spans[1] == nil)                        // runs to the clip end → no directive
     }
+
+    // MARK: repaired segments (#47)
+
+    /// 25 fps with a keyframe every 25 frames — the shape of the de-risked fixtures
+    /// (issue #43/#47 shell runs).
+    private func cleanIndex(count: Int = 200, gop: Int = 25, firstPts: Double = 0) -> FrameIndex {
+        FrameIndex(pts: (0..<count).map { firstPts + Double($0) * 0.04 },
+                   keyframeFlags: (0..<count).map { $0 % gop == 0 })
+    }
+
+    /// The repaired re-encode selects by **time**, not frame number (the index↔decoder
+    /// numbering drifts at truncated packets): the seek lands one keyframe before the
+    /// span's own anchor (a truncated final GOP decodes nothing when entered directly —
+    /// #47 de-risk), the select keeps the span and drops each zone's window
+    /// (quarter-frame margins), and `fps` at the source rate fills the dropped span
+    /// with the held frame. `-frames:v` is the span's slot budget — it bounds the run
+    /// and truncates the fps EOF fill exactly at the span end.
+    @Test func repairedSegmentSelectsByTimeDroppingZones() {
+        // Range [100,150): T0=4.0, T1=6.0. Anchor: keyframe at 100, one back → 75 (3.0 s).
+        let args = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: src, range: 100..<150, index: cleanIndex(),
+            zones: [DamageZone(start: 4.5, end: 5.0, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1",
+            encoder: ["-c:v", "libx264", "-pix_fmt", "yuv420p"], output: out)
+        #expect(args == [
+            "-v", "error", "-ss", "3", "-t", "4", "-i", src.path,
+            "-vf", "select='between(t\\,0.99\\,2.97)*not(between(t\\,1.49\\,2.01))'"
+                + ",setpts=PTS-STARTPTS,fps=25",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-frames:v", "50", "-an", out.path,
+        ])
+    }
+
+    /// MPEG-PS time-seek is byte-estimated and lands late, badly so near damage
+    /// (issue #43 de-risk) — a `.mpg` source seeks **two** keyframes back instead of
+    /// one; the span bound in the select discards the extra lead-in either way.
+    @Test func repairedSegmentSeeksTwoKeyframesBackOnMpegPS() {
+        let mpg = URL(fileURLWithPath: "/clips/in.mpg")
+        // PS shape: start_time 0.54, GOP 15 (0.6 s). Range [60,90): T0 = 2.94 abs.
+        let index = cleanIndex(count: 120, gop: 15, firstPts: 0.54)
+        let args = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: mpg, range: 60..<90, index: index,
+            zones: [DamageZone(start: 2.6, end: 3.0, affectsVideo: true)],
+            containerStart: 0.54, frameRate: "25/1",
+            encoder: ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p"], output: out)
+        // Anchor: keyframe 60, two back → 30 (pts 1.74, seek 1.2). Span rel [1.19, 2.37],
+        // zone rel (1.39, 1.81). Budget 30 = the 1.2 s span at 25 fps.
+        #expect(args == [
+            "-v", "error", "-ss", "1.2", "-t", "3.4", "-i", mpg.path,
+            "-vf", "select='between(t\\,1.19\\,2.37)*not(between(t\\,1.39\\,1.81))'"
+                + ",setpts=PTS-STARTPTS,fps=25",
+            "-c:v", "mpeg2video", "-pix_fmt", "yuv420p",
+            "-frames:v", "30", "-an", out.path,
+        ])
+    }
+
+    /// A zone reaching back to (or past) the span start would leave `fps` nothing to
+    /// hold — the window is clamped so the span's first frame is always kept, even
+    /// when it is itself damaged: a glitched held frame beats a shifted timeline.
+    @Test func repairedSegmentKeepsTheSpansFirstFrame() {
+        let args = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: src, range: 100..<150, index: cleanIndex(),
+            zones: [DamageZone(start: 3.8, end: 4.5, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1",
+            encoder: ["-c:v", "libx264"], output: out)
+        let vf = args[args.firstIndex(of: "-vf")! + 1]
+        // The raw window start (rel 0.79) would swallow the span head; the clamp holds
+        // it one frame past the span start so the frame at rel 1.0 survives as the hold.
+        #expect(vf.contains("not(between(t\\,1.03\\,1.51))"))
+    }
+
+    /// An MP4 repaired piece pins the track timescale like any re-encoded piece (#18/#24).
+    @Test func anMp4RepairedPieceCarriesTheTrackTimescale() {
+        let mp4Piece = URL(fileURLWithPath: "/tmp/seg.mp4")
+        let args = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: src, range: 100..<150, index: cleanIndex(),
+            zones: [DamageZone(start: 4.5, end: 5.0, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1",
+            encoder: ["-c:v", "libx264"], output: mp4Piece, trackTimescale: 25000)
+        #expect(args.firstIndex(of: "-video_track_timescale") != nil)
+    }
+
+    /// A repaired span's frame count is its slot budget — duration × fps, exact: holes
+    /// are filled, corrupt frames dropped and held over, and the fps fill always
+    /// reaches the budget interior (the span's right boundary is a clean keyframe that
+    /// decodes, and the fill pads to the last decoded frame — #47 de-risk).
+    @Test func repairedExpectationIsTheSpanSlotBudget() {
+        let e = BoundaryReencodeEngine.repairedSegmentExpectation(
+            range: 100..<150, index: cleanIndex(),
+            zones: [DamageZone(start: 4.5, end: 5.0, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1")
+        #expect(e.frames == 50)
+        #expect(e.shortfallAllowance == 0)
+    }
+
+    /// When the damage window runs through the **file end** (EOF truncation), the fill
+    /// stops at the last decoded frame — unknowable from the index (the truncated
+    /// packet sits in the index but never decodes) — so the expectation allows a
+    /// shortfall as deep as the trailing window.
+    @Test func repairedExpectationAllowsShortfallAtAnEofWindow() {
+        let index = cleanIndex(count: 100)   // ends at pts 3.96, T1 = 4.0
+        let e = BoundaryReencodeEngine.repairedSegmentExpectation(
+            range: 75..<100, index: index,
+            zones: [DamageZone(start: 3.5, end: 4.1, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1")
+        #expect(e.frames == 25)
+        // The last clean frame before the window (3.48) guarantees 13 frames; up to 12
+        // of the trailing window's slots may go unfilled.
+        #expect(e.shortfallAllowance == 12)
+    }
+
+    /// The allowance is EOF-only: a mid-file zone at the range's tail still fills to
+    /// budget (the data past the span decodes), and an EOF range whose zone ends before
+    /// the final slot leaves no trailing uncertainty.
+    @Test func shortfallAllowanceIsZeroOffTheEofWindow() {
+        // Same zone, but the range stops before the file end.
+        #expect(BoundaryReencodeEngine.repairedSegmentExpectation(
+            range: 75..<100, index: cleanIndex(count: 150),
+            zones: [DamageZone(start: 3.5, end: 4.1, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1").shortfallAllowance == 0)
+        // EOF range, interior zone.
+        #expect(BoundaryReencodeEngine.repairedSegmentExpectation(
+            range: 75..<100, index: cleanIndex(count: 100),
+            zones: [DamageZone(start: 3.2, end: 3.5, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1").shortfallAllowance == 0)
+    }
 }

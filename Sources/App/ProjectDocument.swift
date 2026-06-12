@@ -65,6 +65,11 @@ final class ProjectDocument: ReferenceFileDocument {
     /// of the session (and by the export engine) — ADR-0006's "cached" intent.
     private var frameIndexCache: [Clip.ID: FrameIndex] = [:]
 
+    /// Per-clip container start_time, cached alongside the frame index: the base of
+    /// every damage-zone time, which the planner needs to map zones onto frames
+    /// (issue #47) — including the synchronous copy-share refresh, which can't probe.
+    private var containerStartCache: [Clip.ID: Double] = [:]
+
     /// Where each clip's cut-editor was last closed, so reopening resumes there.
     /// Runtime-only view state — never an undoable document edit.
     private var lastViewedFrames: [Clip.ID: Int] = [:]
@@ -120,7 +125,8 @@ final class ProjectDocument: ReferenceFileDocument {
         for clip in project.clips {
             guard let index = frameIndexCache[clip.id] else { continue }
             shares[clip.id] = ExportPlanner.copyShare(
-                for: clip, target: project.targetClip, settings: project.output, index: index)
+                for: clip, target: project.targetClip, settings: project.output, index: index,
+                containerStart: containerStartCache[clip.id] ?? 0)
         }
         if shares != copyShares { copyShares = shares }
     }
@@ -191,6 +197,7 @@ final class ProjectDocument: ReferenceFileDocument {
     private func adoptRuntimeState(of originalID: Clip.ID, for copy: Clip) {
         urlCache[copy.id] = urlCache[originalID]
         frameIndexCache[copy.id] = frameIndexCache[originalID]
+        containerStartCache[copy.id] = containerStartCache[originalID]
         lastViewedFrames[copy.id] = lastViewedFrames[originalID]
         switch importStates[originalID] {
         case .probing, .indexing, nil:
@@ -220,6 +227,7 @@ final class ProjectDocument: ReferenceFileDocument {
             importStates[id] = nil
             urlCache[id] = nil
             frameIndexCache[id] = nil
+            containerStartCache[id] = nil
             lastViewedFrames[id] = nil
         }
     }
@@ -232,6 +240,7 @@ final class ProjectDocument: ReferenceFileDocument {
         importStates.removeAll()
         urlCache.removeAll()
         frameIndexCache.removeAll()
+        containerStartCache.removeAll()
         lastViewedFrames.removeAll()
     }
 
@@ -258,6 +267,7 @@ final class ProjectDocument: ReferenceFileDocument {
         for id in touched {
             urlCache[id] = newURL
             frameIndexCache[id] = nil
+            containerStartCache[id] = nil
             lastViewedFrames[id] = nil
             importStates[id] = .probing
         }
@@ -443,12 +453,18 @@ final class ProjectDocument: ReferenceFileDocument {
         }
         // A reopened project has no runtime indexes yet; build them in the background
         // (throttled like import) so the copy/re-encode shares appear without waiting
-        // for an export or a cut-editor open (issue #15).
+        // for an export or a cut-editor open (issue #15). The container start rides
+        // along — a damaged clip's share needs it to map zones (issue #47).
         for clip in project.clips where importStates[clip.id] == .ready {
             Task { @MainActor in
                 await importThrottle.acquire()
                 defer { Task { await importThrottle.release() } }
-                if (try? await frameIndex(for: clip)) != nil { refreshCopyShares() }
+                if (try? await frameIndex(for: clip)) != nil {
+                    if let url = url(for: clip), containerStartCache[clip.id] == nil {
+                        containerStartCache[clip.id] = await MediaProbe.containerStartTime(url: url)
+                    }
+                    refreshCopyShares()
+                }
             }
         }
     }
@@ -515,7 +531,13 @@ final class ProjectDocument: ReferenceFileDocument {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await frameIndex(for: clip)
-                let containerStart = await MediaProbe.containerStartTime(url: url)
+                let containerStart: Double
+                if let cached = containerStartCache[clip.id] {
+                    containerStart = cached
+                } else {
+                    containerStart = await MediaProbe.containerStartTime(url: url)
+                    containerStartCache[clip.id] = containerStart
+                }
                 // Each output track's leg comes from the clip's selected source for it:
                 // one of its own streams, an external file, or silence (ADR-0014). The
                 // shared resolver throws on a missing external file — the export refuses
@@ -555,6 +577,16 @@ final class ProjectDocument: ReferenceFileDocument {
                    let note = ConformEngine.assumedColorWarning(
                        clipName: clip.displayName,
                        source: conform.sourceVideo, target: conform.targetVideo) {
+                    warnings.append(note)
+                }
+                // Always repair, never silently (issues #47/#48): a clip's damage
+                // zones in the kept window come out repaired on both video paths —
+                // smart-render (repaired re-encode segments) and conform (the chain's
+                // select-before-fps) — say so.
+                if project.output.type != .audioOnly,
+                   let note = ExportPlanner.repairReport(
+                       clipName: clip.displayName, zones: clip.damageZones,
+                       windowStart: item.audioStart, windowEnd: item.audioEnd) {
                     warnings.append(note)
                 }
                 if cutOnly {
@@ -671,6 +703,7 @@ final class ProjectDocument: ReferenceFileDocument {
             // clean file, never a from-start full decode. Failures degrade to "none
             // found"; a damaged source must still import.
             let containerStart = await MediaProbe.containerStartTime(url: url)
+            containerStartCache[id] = containerStart
             let zones = await DamageDetector.detectZones(
                 url: url, scan: scan, containerStart: containerStart)
             if let i = project.clips.firstIndex(where: { $0.id == id }) {
