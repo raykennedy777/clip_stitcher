@@ -322,6 +322,21 @@ struct ExportPlannerTests {
         #expect(item.sourceDamaged)
     }
 
+    /// A conform-routed clip's verdict carries its video-affecting zones (issue #48) —
+    /// the chain drops those spans before its fps fill; audio-only gaps stay out.
+    @Test func conformedVerdictCarriesTheDamageZones() throws {
+        let zone = DamageZone(start: 1.6, end: 1.8, affectsVideo: true)
+        var source = clip(video: video(codec: "mpeg2video"))
+        source.damageZones = [zone, DamageZone(start: 2.0, end: 3.0, affectsVideo: false)]
+        let treatment = try ExportPlanner.videoTreatment(
+            for: source, target: clip(video: video()), index: index)
+        guard case .conform(let conform) = treatment else {
+            Issue.record("expected conform")
+            return
+        }
+        #expect(conform.damage == [zone])
+    }
+
     // MARK: repair report (#47)
 
     @Test func repairReportListsVideoZonesInTheKeptWindow() {

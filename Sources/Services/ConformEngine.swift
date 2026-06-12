@@ -7,19 +7,62 @@ import Foundation
 enum ConformEngine {
     /// The probed video specs a conformed clip is transformed between: its own source spec and
     /// the target clip's. Carried on an `ExportItem` to mark it for conform (ADR-0011).
+    /// `damage` is the clip's video-affecting damage zones (issue #48): the conform's
+    /// full re-encode already fills timeline holes (its `fps` stage), but it would bake
+    /// the decoder's glitched frames into clean output — the chain drops each zone's
+    /// span so the held frame is the last *good* one. Empty for a clean clip, whose
+    /// filter chain stays identical to before repair existed.
     struct VideoConform: Equatable {
         var sourceVideo: VideoProperties
         var targetVideo: VideoProperties
+        var damage: [DamageZone] = []
     }
 
     /// ffmpeg video filter-chain + encoder args that transform `source` → `target`. The
     /// chain runs deinterlace (if any) → scale → pad (only on a display-aspect mismatch) →
-    /// setsar → format → color conversion toward a tagged target (issue #35) → fps/interlace;
-    /// the encoder then pins the target codec, profile, level, interlace flags, color range,
-    /// and — for a fully color-tagged target — the primaries/transfer/matrix VUI triple.
-    static func conformVideoArgs(source: VideoProperties, target: VideoProperties) -> [String] {
-        let chain = filterChain(source: source, target: target).joined(separator: ",")
+    /// setsar → format → color conversion toward a tagged target (issue #35) → damage-zone
+    /// select (issue #48) → fps/interlace; the encoder then pins the target codec, profile,
+    /// level, interlace flags, color range, and — for a fully color-tagged target — the
+    /// primaries/transfer/matrix VUI triple.
+    ///
+    /// `damage`/`windowStart`/`windowEnd` repair a damaged clip (issue #48): each zone in
+    /// the kept window becomes a `select` drop before the fps stage, whose fill then
+    /// repeats the last good frame across it. Zone times and the window are both
+    /// container-start-relative, the same base the conform's input seek uses, so the
+    /// select windows are expressed relative to the seek (validated on all three formats
+    /// × three containers in the shell, exact counts and clean decodes).
+    static func conformVideoArgs(source: VideoProperties, target: VideoProperties,
+                                 damage: [DamageZone] = [], windowStart: Double? = nil,
+                                 windowEnd: Double? = nil) -> [String] {
+        let chain = filterChain(source: source, target: target,
+                                repair: repairSelect(damage: damage, windowStart: windowStart,
+                                                     windowEnd: windowEnd,
+                                                     sourceFrameRate: source.frameRate))
+            .joined(separator: ",")
         return ["-vf", chain] + encoderArgs(target: target)
+    }
+
+    /// The time-window select dropping each damage zone inside the kept window
+    /// (issue #48), or nil when nothing needs dropping. Windows get a quarter-frame
+    /// margin against float jitter and are clamped so the window's first source frame
+    /// always survives — the fps fill needs a frame to hold, and a glitched held frame
+    /// beats a shifted timeline when damage touches the window head.
+    static func repairSelect(damage: [DamageZone], windowStart: Double?, windowEnd: Double?,
+                             sourceFrameRate: String) -> String? {
+        let start = windowStart ?? 0
+        let interval = 1 / (frameRateValue(sourceFrameRate) ?? 25)
+        let quarter = interval / 4
+        let terms = damage
+            .filter { zone in
+                zone.affectsVideo && zone.end > start
+                    && (windowEnd.map { zone.start < $0 } ?? true)
+            }
+            .map { zone in
+                let from = max(zone.start - quarter, start + interval - quarter) - start
+                let to = zone.end + quarter - start
+                return "not(between(t\\,\(ExportEngine.timeString(from))\\,\(ExportEngine.timeString(to))))"
+            }
+        return terms.isEmpty ? nil : "select='\(terms.joined(separator: "*"))'"
     }
 
     /// The audio filter that conforms a clip's audio to the target's sample rate and channel
@@ -90,13 +133,14 @@ enum ConformEngine {
     static func conformArguments(
         source: URL, start: Double?, end: Double?,
         sourceVideo: VideoProperties, targetVideo: VideoProperties, output: URL,
-        trackTimescale: Int? = nil
+        trackTimescale: Int? = nil, damage: [DamageZone] = []
     ) -> [String] {
         var args = ["-v", "error"]
         if let start { args += ["-ss", ExportEngine.timeString(start)] }
         if let end { args += ["-t", ExportEngine.timeString(end - (start ?? 0))] }
         args += ["-i", source.path]
-        args += conformVideoArgs(source: sourceVideo, target: targetVideo)
+        args += conformVideoArgs(source: sourceVideo, target: targetVideo,
+                                 damage: damage, windowStart: start, windowEnd: end)
         // The export-wide MP4 pin (issue #24): without it the encoder-default 1/12800
         // track collapses next to a copy piece at the cross-clip concat.
         if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
@@ -135,7 +179,8 @@ enum ConformEngine {
         let args = conformArguments(source: source, start: start, end: end,
                                     sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
                                     output: piece,
-                                    trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil)
+                                    trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil,
+                                    damage: conform.damage)
         let parser = ProgressParser()
         let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
             if let t = parser.feed(chunk) {
@@ -149,7 +194,11 @@ enum ConformEngine {
         let expected = windowDuration.flatMap {
             expectedFrameCount(windowDuration: $0, targetFrameRate: conform.targetVideo.frameRate)
         }
-        try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected)
+        try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected,
+                                  shortfallAllowance: eofShortfallAllowance(
+                                      damage: conform.damage, windowStart: start,
+                                      windowEnd: windowEnd,
+                                      targetFrameRate: conform.targetVideo.frameRate))
         return piece
     }
 
@@ -162,11 +211,30 @@ enum ConformEngine {
         return Int((windowDuration * fps).rounded())
     }
 
+    /// How far below `duration × fps` a conformed piece may legitimately fall
+    /// (issue #48): when a damage zone reaches the kept window's end (EOF truncation),
+    /// the fps fill stops at the last decoded frame — nothing after it exists to hold —
+    /// and the container's reported duration can itself overshoot the decodable content
+    /// (the 1844's TS headers claim ~0.2 s of video past the truncated final frame), so
+    /// a zone ending within a second of the window end counts as trailing. 0 with no
+    /// trailing zone, keeping the ±1 gate exact everywhere else.
+    static func eofShortfallAllowance(damage: [DamageZone], windowStart: Double?,
+                                      windowEnd: Double?, targetFrameRate: String) -> Int {
+        guard let end = windowEnd, let fps = frameRateValue(targetFrameRate) else { return 0 }
+        let trailing = damage
+            .filter { $0.affectsVideo && $0.end >= end - 1.0 && $0.start < end }
+            .map(\.start)
+        guard let earliest = trailing.min() else { return 0 }
+        return max(0, Int(((end - max(earliest, windowStart ?? 0)) * fps).rounded()) + 1)
+    }
+
     /// Verifies a conformed piece against the acceptance bar (ADR-0011): its re-probed video
     /// must match the target spec, its frame count must be within ±1 of the kept window at the
-    /// target rate (the relaxed M2 assertion), and a full decode must succeed.
+    /// target rate (the relaxed M2 assertion — plus the EOF-damage shortfall allowance,
+    /// issue #48), and a full decode must succeed.
     private static func verifyConformed(
-        _ ffmpeg: URL, _ piece: URL, target: VideoProperties, expectedFrames: Int?
+        _ ffmpeg: URL, _ piece: URL, target: VideoProperties, expectedFrames: Int?,
+        shortfallAllowance: Int = 0
     ) async throws {
         let probed = try await MediaProbe.probe(url: piece).video
         guard let v = probed, MatchEvaluator.conformedVideoMatches(v, target) else {
@@ -175,9 +243,11 @@ enum ConformEngine {
         }
         if let expected = expectedFrames {
             let actual = try await FrameIndexer.frameCount(url: piece)
-            guard abs(actual - expected) <= 1 else {
+            guard actual <= expected + 1, actual >= expected - 1 - shortfallAllowance else {
                 throw ExportError.verificationFailed(
-                    "The conformed clip has \(actual) frames but the kept range at the target rate is ~\(expected) (±1).")
+                    "The conformed clip has \(actual) frames but the kept range at the target rate is ~\(expected) (±1"
+                    + (shortfallAllowance > 0 ? ", −\(shortfallAllowance) allowed at the damaged file end" : "")
+                    + ").")
             }
         }
         let decode = try await ProcessRunner.run(
@@ -227,7 +297,8 @@ enum ConformEngine {
 
     // MARK: - Filter chain
 
-    private static func filterChain(source: VideoProperties, target: VideoProperties) -> [String] {
+    private static func filterChain(source: VideoProperties, target: VideoProperties,
+                                    repair: String? = nil) -> [String] {
         let srcInterlaced = isInterlaced(source.fieldOrder)
         let tgtInterlaced = isInterlaced(target.fieldOrder)
         var filters: [String] = []
@@ -247,6 +318,10 @@ enum ConformEngine {
         if let stage = colorStage(source: source, target: target) {
             filters.append(stage)
         }
+
+        // Damage-zone drop (issue #48) immediately before the fps stage, whose fill
+        // then repeats the last good frame across each dropped span.
+        if let repair { filters.append(repair) }
 
         // Frame-rate / scan tail. Interlacing a progressive source needs the field-rate
         // (2× the target frame rate) feeding the interlace filter, which halves it back.

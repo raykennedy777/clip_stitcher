@@ -133,6 +133,16 @@ audio-only zone is a gap the audio rebuild already fills with silence; a video z
 what the export repair re-encodes across.
 _Avoid_: corruption range, error region, glitch
 
+**Repair / Repaired segment**:
+How an export crosses a damage zone (issues #47/#48): the zone's span is dropped by a
+time-window select and refilled by repeating the last good frame (the fps fill), so the
+source timeline length is preserved exactly. On the smart-render path each video zone
+forces a *repaired segment* — a re-encode extending to the surrounding copy-safe
+boundaries; on the conform path the select rides the existing chain just before its fps
+stage. Every repair is reported on export completion ("Repaired 3 damage zones at …"),
+never silent.
+_Avoid_: fix, heal, patch, error concealment
+
 ### Editing & UI
 
 **Timeline**:

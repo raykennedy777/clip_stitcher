@@ -38,16 +38,35 @@ enum ExportPlanner {
     /// conformed to its output track's format inside the rebuild chain (ADR-0014).
     /// On the smart-render path, throws `ExportError.invalidPlan` when the kept range
     /// collapses to nothing.
-    static func videoTreatment(for clip: Clip, target: Clip?, index: FrameIndex) throws -> VideoTreatment {
+    ///
+    /// `containerStart` maps the clip's recorded damage zones (issue #45) onto index
+    /// frames — each zone in range forces a repaired re-encode segment (issue #47).
+    /// A clip with no zones plans byte-identically to before repair existed.
+    static func videoTreatment(for clip: Clip, target: Clip?, index: FrameIndex,
+                               containerStart: Double = 0) throws -> VideoTreatment {
         if let target, let tv = target.video, let cv = clip.video,
            !MatchEvaluator.matches(clip, target: target) {
-            return .conform(ConformEngine.VideoConform(sourceVideo: cv, targetVideo: tv))
+            // The conform chain drops the clip's damaged spans before its fps fill
+            // (issue #48); a clean clip's chain is unchanged.
+            return .conform(ConformEngine.VideoConform(
+                sourceVideo: cv, targetVideo: tv,
+                damage: (clip.damageZones ?? []).filter(\.affectsVideo)))
         }
         let leadingCounts = CopySafeBoundaryDetector.leadingPictureCounts(
             keyframeFlags: index.keyframeFlags, dts: index.dts)
+        // Repair needs the source rate (the fps fill and slot budget); a clip whose
+        // rate doesn't parse plans as before — the verify gates still police the output.
+        let damage: [BoundaryReencodePlanner.DamageSpan]
+        if let zones = clip.damageZones, !zones.isEmpty,
+           let rate = clip.video?.frameRate, ConformEngine.frameRateValue(rate) != nil {
+            damage = BoundaryReencodePlanner.damageSpans(
+                zones: zones, pts: index.pts, dts: index.dts, containerStart: containerStart)
+        } else {
+            damage = []
+        }
         let segments = BoundaryReencodePlanner.plan(
             leadingCounts: leadingCounts, frameCount: index.count,
-            inFrame: clip.inPoint, outFrame: clip.outPoint)
+            inFrame: clip.inPoint, outFrame: clip.outPoint, damage: damage)
         guard !segments.isEmpty else { throw ExportError.invalidPlan }
         // Re-encode args matched to the source so the edges concat cleanly with the
         // copied middle (ADR-0009).

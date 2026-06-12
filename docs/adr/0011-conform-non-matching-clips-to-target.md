@@ -43,6 +43,10 @@ top of M2's `-xerror` decode check (ADR-0008), and fails the export loudly (nami
 dimension) rather than shipping a near-miss. The acceptance bar is the runtime guard. The exact
 frame-count assertion from M2 is relaxed for conformed pieces — output frames = `duration ×
 target_fps` (±1 for boundary rounding), since fps conversion legitimately changes the count.
+**Amended (issue #48 / ADR-0020):** when a damage zone reaches the kept window's end (EOF
+truncation), the ±1 gate additionally allows a shortfall as deep as the trailing zone — the fps
+fill stops at the last decoded frame, and the container's claimed duration can overshoot the
+decodable content (the 1844 capture's TS headers do, by ~0.2 s). Exact ±1 everywhere else.
 
 ## Consequences
 

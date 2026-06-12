@@ -289,4 +289,71 @@ struct ConformEngineTests {
         #expect(ConformEngine.mixFilter(.leftOnly, sourceChannels: 1) == nil)
         #expect(ConformEngine.mixFilter(.mono, sourceChannels: nil) == nil)
     }
+
+    // MARK: damage repair in the conform chain (#48)
+
+    /// Each zone in the kept window becomes a `select` drop sitting immediately before
+    /// the fps stage, expressed relative to the window's seek (zone times and the
+    /// window share the container-start base). Quarter-frame margins; recipe validated
+    /// on all three formats × three containers in the shell.
+    @Test func damageZonesBecomeASelectBeforeTheFpsStage() {
+        let args = ConformEngine.conformVideoArgs(
+            source: h264, target: hevc,
+            damage: [DamageZone(start: 24.0, end: 25.5, affectsVideo: true)],
+            windowStart: 10.0, windowEnd: 50.0)
+        #expect(args[1] == "scale=1440:1080,pad=1920:1080:240:0,setsar=1/1,format=yuv420p10le,"
+            + "select='not(between(t\\,13.99\\,15.51))',fps=50")
+    }
+
+    /// No zones — the chain is byte-identical to before repair existed; zones outside
+    /// the kept window (or audio-only) drop no frames either.
+    @Test func cleanAndOutOfWindowZonesLeaveTheChainUnchanged() {
+        let plain = ConformEngine.conformVideoArgs(source: h264, target: hevc)
+        #expect(ConformEngine.conformVideoArgs(source: h264, target: hevc,
+                                               damage: [], windowStart: 10, windowEnd: 50) == plain)
+        #expect(ConformEngine.conformVideoArgs(
+            source: h264, target: hevc,
+            damage: [DamageZone(start: 60.0, end: 61.0, affectsVideo: true),
+                     DamageZone(start: 5.0, end: 6.0, affectsVideo: true),
+                     DamageZone(start: 24.0, end: 25.0, affectsVideo: false)],
+            windowStart: 10, windowEnd: 50) == plain)
+    }
+
+    /// The conform's ±1 count gate relaxes only when a damage zone reaches the kept
+    /// window's end (EOF truncation): the fps fill stops at the last decoded frame, and
+    /// the container's claimed duration can overshoot the decodable content (the 1844's
+    /// TS headers do, by ~0.2 s) — so a zone ending within a second of the window end
+    /// counts as trailing, allowing a shortfall as deep as the zone.
+    @Test func conformCountGateRelaxesOnlyAtAnEofZone() {
+        // Trailing zone [990, 999.4] near window end 1000: up to ~10 s × 25 short.
+        #expect(ConformEngine.eofShortfallAllowance(
+            damage: [DamageZone(start: 990, end: 999.4, affectsVideo: true)],
+            windowStart: nil, windowEnd: 1000, targetFrameRate: "25/1") == 251)
+        // Interior zone: exact gate.
+        #expect(ConformEngine.eofShortfallAllowance(
+            damage: [DamageZone(start: 500, end: 510, affectsVideo: true)],
+            windowStart: nil, windowEnd: 1000, targetFrameRate: "25/1") == 0)
+        // Audio-only trailing gap: exact gate.
+        #expect(ConformEngine.eofShortfallAllowance(
+            damage: [DamageZone(start: 990, end: 999.4, affectsVideo: false)],
+            windowStart: nil, windowEnd: 1000, targetFrameRate: "25/1") == 0)
+        // No known window end: exact gate.
+        #expect(ConformEngine.eofShortfallAllowance(
+            damage: [DamageZone(start: 990, end: 999.4, affectsVideo: true)],
+            windowStart: nil, windowEnd: nil, targetFrameRate: "25/1") == 0)
+    }
+
+    /// A zone reaching back to (or past) the window start is clamped so the window's
+    /// first frame survives as the fps fill's hold material — a glitched held frame
+    /// beats a shifted timeline. An open window start anchors at 0.
+    @Test func repairSelectKeepsTheWindowsFirstFrame() {
+        #expect(ConformEngine.repairSelect(
+            damage: [DamageZone(start: 9.8, end: 12.0, affectsVideo: true)],
+            windowStart: 10.0, windowEnd: nil, sourceFrameRate: "25/1")
+            == "select='not(between(t\\,0.03\\,2.01))'")
+        #expect(ConformEngine.repairSelect(
+            damage: [DamageZone(start: 24.0, end: 25.5, affectsVideo: true)],
+            windowStart: nil, windowEnd: nil, sourceFrameRate: "25/1")
+            == "select='not(between(t\\,23.99\\,25.51))'")
+    }
 }
