@@ -246,6 +246,15 @@ struct ConformEngineTests {
             == "aresample=44100,aformat=channel_layouts=mono")
     }
 
+    /// The gap-fill variant (issue #44): the de-risked defensive resample — `async=1`
+    /// lays silence into timestamp gaps in place, `first_pts=0` anchors a window that
+    /// starts inside a dead zone. Pinned so the shipped leg can't drift from the
+    /// de-risked string (byte-identical to the plain conform on clean sources, #43).
+    @Test func audioFilterGapFillMatchesTheDeRiskedString() {
+        #expect(ConformEngine.audioFilter(sampleRate: 48000, channels: 2, fillGaps: true)
+            == "aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo")
+    }
+
     // MARK: channel mix (ADR-0019)
 
     /// The exact mix recipes validated in the shell (issue #38 de-risk, 2026-06) on

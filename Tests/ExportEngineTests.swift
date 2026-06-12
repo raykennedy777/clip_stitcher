@@ -139,21 +139,23 @@ struct ExportEngineTests {
     // MARK: - Audio re-encode
 
     @Test func audioInputArgsSeekAndLimitToTheClipRange() {
-        // both ends cut: fast seek to start, read (end - start) seconds.
+        // both ends cut: fast seek to start, read (end - start) seconds. Every audio
+        // input tolerates decode errors (issue #44 — the default ⅔ threshold aborted
+        // the run with a truncated output on the real capture's MP2 dead zone).
         let a = ExportEngine.audioInputArgs(source: src, start: 1654.8, end: 1727.6)
-        #expect(a == ["-ss", "1654.8", "-t", "72.8", "-i", "/tmp/clip.mp4"])
+        #expect(a == ["-max_error_rate", "1.0", "-ss", "1654.8", "-t", "72.8", "-i", "/tmp/clip.mp4"])
     }
 
     @Test func audioInputArgsOmitSeekForAnOpenStart() {
         // no head cut: read from the file start up to `end`.
         let a = ExportEngine.audioInputArgs(source: src, start: nil, end: 30.0)
-        #expect(a == ["-t", "30", "-i", "/tmp/clip.mp4"])
+        #expect(a == ["-max_error_rate", "1.0", "-t", "30", "-i", "/tmp/clip.mp4"])
     }
 
     @Test func audioInputArgsOmitDurationForAnOpenEnd() {
         // no tail cut: seek to start, read to the file end.
         let a = ExportEngine.audioInputArgs(source: src, start: 10.0, end: nil)
-        #expect(a == ["-ss", "10", "-i", "/tmp/clip.mp4"])
+        #expect(a == ["-max_error_rate", "1.0", "-ss", "10", "-i", "/tmp/clip.mp4"])
     }
 
     // MARK: - Kept window (issue #3: input -ss is measured from the container's
@@ -212,11 +214,11 @@ struct ExportEngineTests {
         #expect(args.contains("0:v:0") && args.contains("-c:v") && args.contains("copy"))
         #expect(args.contains("-c:a") && args.contains("aac"))
         // two audio inputs (indices 1 and 2 after the video input), each leg conformed to
-        // the track's format and forced to its exact kept length (1 s / 2 s at 48 kHz —
-        // ADR-0014), then concatenated.
+        // the track's format with the defensive gap-fill resample (issue #44) and forced
+        // to its exact kept length (1 s / 2 s at 48 kHz — ADR-0014), then concatenated.
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc == "[1:a:0]aresample=48000,aformat=channel_layouts=stereo,atrim=end_sample=48000,apad=whole_len=48000[c0t0];"
-                    + "[2:a:0]aresample=48000,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c1t0];"
+        #expect(fc == "[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,atrim=end_sample=48000,apad=whole_len=48000[c0t0];"
+                    + "[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c1t0];"
                     + "[c0t0][c1t0]concat=n=2:v=0:a=1[a0]")
         #expect(args.contains("[a0]"))
         #expect(args.last == "/tmp/out.ts")
@@ -232,9 +234,9 @@ struct ExportEngineTests {
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("[0:a:0]pan=stereo|c0=c0|c1=c0,aresample=48000,aformat=channel_layouts=stereo,"
+        #expect(fc.contains("[0:a:0]pan=stereo|c0=c0|c1=c0,aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,"
                           + "atrim=end_sample=48000,apad=whole_len=48000[c0t0]"))
-        #expect(fc.contains("[1:a:0]aresample=48000,aformat=channel_layouts=stereo,"
+        #expect(fc.contains("[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,"
                           + "atrim=end_sample=48000,apad=whole_len=48000[c1t0]"))
     }
 
@@ -253,9 +255,11 @@ struct ExportEngineTests {
         let args = ExportEngine.audioMuxArguments(videoInput: video, items: items, tracks: [stereoTrack, monoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("[2:a:0]aresample=48000,aformat=channel_layouts=mono,atrim=end_sample=96000,apad=whole_len=96000[c1t1]")
+        #expect(fc.contains("[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=mono,atrim=end_sample=96000,apad=whole_len=96000[c1t1]")
                 == false) // the second clip has no second source…
         #expect(fc.contains("anullsrc=r=48000:cl=mono,atrim=end_sample=96000[c1t1]")) // …so it is silence
+        // generated silence has no gaps to fill — the defensive resample stays off it
+        #expect(!fc.contains("anullsrc=r=48000:cl=mono,aresample"))
         #expect(fc.contains("[c0t0][c1t0]concat=n=2:v=0:a=1[a0]"))
         #expect(fc.contains("[c0t1][c1t1]concat=n=2:v=0:a=1[a1]"))
         // both rebuilt tracks mapped
@@ -276,7 +280,7 @@ struct ExportEngineTests {
         #expect(args.contains("/tmp/demo.mkv"))
         #expect(args.filter { $0 == "10" }.count == 2 && args.filter { $0 == "2" }.count == 2)
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("[2:a:1]aresample=48000,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c0t1]"))
+        #expect(fc.contains("[2:a:1]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c0t1]"))
     }
 
     @Test func audioMuxSharesOneInputAcrossTwoStreamsOfTheSameExternalFile() {

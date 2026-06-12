@@ -25,8 +25,19 @@ enum ConformEngine {
     /// The audio filter that conforms a clip's audio to the target's sample rate and channel
     /// layout before the sample-level concat (ADR-0011). Applied per conforming leg in the
     /// audio rebuild; matching clips need no filter. Idempotent when already on target.
-    static func audioFilter(sampleRate: Int, channels: Int) -> String {
-        "aresample=\(sampleRate),aformat=channel_layouts=\(channelLayout(channels))"
+    ///
+    /// `fillGaps` makes the leading resample defensive against damaged sources (issue #44):
+    /// `async=1` fills timestamp gaps with silence *in place* instead of closing them up
+    /// (a closed gap plays everything after it early — ~1.8 s of accumulated A/V drift on
+    /// the real Polsat capture), and `first_pts=0` anchors the stream so a window that
+    /// *starts* inside a dead zone is silence-led rather than shortened. On a clean source
+    /// the options are a proven no-op: the de-risked legs are byte-identical with and
+    /// without them on all three formats (issue #43). The export rebuild turns this on;
+    /// the preview's legs keep the plain conform.
+    static func audioFilter(sampleRate: Int, channels: Int, fillGaps: Bool = false) -> String {
+        let resample = fillGaps ? "aresample=\(sampleRate):async=1:first_pts=0"
+                                : "aresample=\(sampleRate)"
+        return resample + ",aformat=channel_layouts=\(channelLayout(channels))"
     }
 
     /// The channel-mix filter for one audio leg (ADR-0019), inserted **before** the

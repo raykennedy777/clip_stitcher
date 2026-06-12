@@ -362,8 +362,16 @@ enum ExportEngine {
     /// read duration. `-ss`/`-t` before `-i` are input options. An open start/end omits
     /// the corresponding flag (read from the file start / to the file end). `start`/`end`
     /// are input-seek seconds (`KeptWindow`), never absolute pts.
+    ///
+    /// `-max_error_rate 1.0` makes the run survive damaged sources (issue #44): at
+    /// ffmpeg's default threshold (⅔) a window dominated by undecodable audio packets
+    /// aborts with exit 69 and a silently *truncated* output — the real capture's 39 s
+    /// MP2 dead zone did exactly that. At 1.0 the decode errors are tolerated and the
+    /// gap-fill resample (`ConformEngine.audioFilter(fillGaps:)`) lays silence in their
+    /// place. A clean source decodes with zero errors, so the flag changes nothing there
+    /// (byte-identical legs in the issue #43 de-risk).
     static func audioInputArgs(source: URL, start: Double?, end: Double?) -> [String] {
-        var a: [String] = []
+        var a: [String] = ["-max_error_rate", "1.0"]
         if let start { a += ["-ss", timeString(start)] }
         if let end { a += ["-t", timeString(end - (start ?? 0))] }
         a += ["-i", source.path]
@@ -463,13 +471,17 @@ enum ExportEngine {
 
     /// One real audio leg's filter: the leg's channel mix when it has one (ADR-0019 —
     /// the mix shapes what *enters* the track, so it precedes the conform), conform to
-    /// the track's rate/layout, then force the exact kept length — trim the overshoot,
+    /// the track's rate/layout with the gap-fill resample (issue #44 — damaged spans
+    /// become silence in place instead of closing up or aborting the run; a no-op on
+    /// clean sources), then force the exact kept length — trim the overshoot,
     /// silence-pad the shortfall. The mix sits wholly before `atrim`/`apad`, so the
     /// sample-exact trimming the joins depend on is untouched (shell-verified: counts
-    /// are identical with and without a mix on all three formats).
+    /// are identical with and without a mix on all three formats). Silence legs
+    /// (`anullsrc`) never come through here — generated silence has no gaps to fill.
     private static func legFilter(track: AudioCodecPolicy.OutputAudioTrack, samples: Int?,
                                   mix: String? = nil) -> String {
-        var f = ConformEngine.audioFilter(sampleRate: track.sampleRate, channels: track.channels)
+        var f = ConformEngine.audioFilter(sampleRate: track.sampleRate, channels: track.channels,
+                                          fillGaps: true)
         if let mix { f = mix + "," + f }
         if let n = samples { f += ",atrim=end_sample=\(n),apad=whole_len=\(n)" }
         return f
