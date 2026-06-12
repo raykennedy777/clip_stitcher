@@ -251,6 +251,7 @@ final class ProjectDocument: ReferenceFileDocument {
             p.clips[i].duration = nil
             p.clips[i].frameCount = nil
             p.clips[i].fieldCoded = nil
+            p.clips[i].damageZones = nil
             touched.append(p.clips[i].id)
         }
         guard !touched.isEmpty else { return }
@@ -650,8 +651,10 @@ final class ProjectDocument: ReferenceFileDocument {
             // file once, and having the index cached at import is what lets the copy/
             // re-encode share show before any export or cut-editor open (issue #15). The
             // count comes off the index so the row, the cut-editor, and the planner can
-            // never disagree about frame numbering.
-            let index = try await FrameIndexer.buildIndex(url: url)
+            // never disagree about frame numbering. The read covers all streams (issue
+            // #45): the same pass feeds the damage detector's demux-anomaly stage.
+            let scan = try await FrameIndexer.scanAllStreams(url: url)
+            let index = scan.index
             frameIndexCache[id] = index
             if let i = project.clips.firstIndex(where: { $0.id == id }) {
                 var p = project
@@ -661,6 +664,18 @@ final class ProjectDocument: ReferenceFileDocument {
                 p.clips[i].fieldCoded = FieldCodingDetector.isFieldCoded(
                     packetPts: index.pts,
                     frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
+                commit(p)
+            }
+            // Damage detection (issue #45): cluster the demux anomalies, then a few
+            // bounded seek-anchored confirm decodes around them — zero decodes on a
+            // clean file, never a from-start full decode. Failures degrade to "none
+            // found"; a damaged source must still import.
+            let containerStart = await MediaProbe.containerStartTime(url: url)
+            let zones = await DamageDetector.detectZones(
+                url: url, scan: scan, containerStart: containerStart)
+            if let i = project.clips.firstIndex(where: { $0.id == id }) {
+                var p = project
+                p.clips[i].damageZones = zones
                 commit(p)
             }
             importStates[id] = .ready

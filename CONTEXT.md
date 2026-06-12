@@ -123,6 +123,16 @@ The per-clip map of frame number → timestamp + keyframe flag, built on import.
 frame accuracy on variable-frame-rate content.
 _Avoid_: frame table, seek table
 
+**Damage zone**:
+One damaged region of a clip's source, found at import (issue #45): a span in source
+time where reception dropouts corrupted or destroyed content, recorded on the clip and
+shown in the Source view. Detected from demux anomalies (timestamp gaps, timestamp-less
+packets, duplicate-DTS bursts — in any stream) confirmed by short seek-anchored decodes;
+never by a from-start full decode (corrupt flags avalanche on non-IDR sources). An
+audio-only zone is a gap the audio rebuild already fills with silence; a video zone is
+what the export repair re-encodes across.
+_Avoid_: corruption range, error region, glitch
+
 ### Editing & UI
 
 **Timeline**:

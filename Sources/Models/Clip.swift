@@ -113,6 +113,12 @@ struct Clip: Codable, Identifiable, Equatable {
     /// (and while probing).
     var fieldCoded: Bool? = nil
 
+    /// The source's damage zones found at import (issue #45), in source seconds from
+    /// the container start, sorted. Empty = scanned clean; `nil` = not scanned (a
+    /// save made before damage detection, or a clip still importing). A clip with no
+    /// zones behaves exactly as before detection existed.
+    var damageZones: [DamageZone]? = nil
+
     /// The clip's audio tracks regardless of save vintage: the probed list when
     /// present, else the legacy single track, else none.
     var allAudioTracks: [AudioProperties] {

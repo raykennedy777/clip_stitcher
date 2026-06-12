@@ -12,7 +12,10 @@ struct ProcessResult: Sendable {
 /// termination handler — safe only for small output (< ~64 KB pipe buffer), which
 /// covers the ffprobe queries and frame-to-file extraction used here. For large
 /// output (the frame index dump), pass `stdoutTo` to stream it straight to a file
-/// and avoid filling the pipe.
+/// and avoid filling the pipe. The same limit applies to **stderr**: a run whose
+/// diagnostics exceed the pipe buffer (a showinfo decode prints one line per
+/// frame) deadlocks ffmpeg mid-write — pass `stderrTo` to stream it to a file;
+/// the result's `stderr` is then empty.
 ///
 /// `onStdout` streams stdout incrementally instead (ffmpeg `-progress pipe:1`,
 /// issue #9): each chunk arrives on a FileHandle queue as the subprocess writes —
@@ -21,13 +24,25 @@ struct ProcessResult: Sendable {
 /// result's `stdout` is then empty.
 enum ProcessRunner {
     static func run(_ executable: URL, _ arguments: [String], stdoutTo fileURL: URL? = nil,
+                    stderrTo errFileURL: URL? = nil,
                     onStdout: (@Sendable (Data) -> Void)? = nil) async throws -> ProcessResult {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
 
-        let errPipe = Pipe()
-        process.standardError = errPipe
+        let errPipe: Pipe?
+        let errHandle: FileHandle?
+        if let errFileURL {
+            FileManager.default.createFile(atPath: errFileURL.path, contents: nil)
+            errHandle = try? FileHandle(forWritingTo: errFileURL)
+            process.standardError = errHandle
+            errPipe = nil
+        } else {
+            let pipe = Pipe()
+            process.standardError = pipe
+            errPipe = pipe
+            errHandle = nil
+        }
 
         let outHandle: FileHandle?
         let outPipe: Pipe?
@@ -59,7 +74,8 @@ enum ProcessRunner {
         let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProcessResult, Error>) in
                 process.terminationHandler = { proc in
-                    let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let err = errPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
+                    try? errHandle?.close()
                     var out = Data()
                     if let outPipe {
                         if let onStdout {
