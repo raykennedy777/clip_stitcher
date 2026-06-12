@@ -17,6 +17,12 @@ enum MediaProbe {
         /// Every audio stream, in container order.
         var audioTracks: [AudioProperties] = []
         var duration: Double?
+        /// The video stream's r_frame_rate, kept separately from
+        /// `VideoProperties.frameRate` (avg-first) for the field-coding check
+        /// (issue #46): on a PAFF capture avg_frame_rate is the *field* rate
+        /// (ffprobe derives it from packet count) while r_frame_rate carries the
+        /// codec's true display rate — the detector wants both candidates.
+        var videoCodecFrameRate: String? = nil
     }
 
     static func probe(url: URL) async throws -> Result {
@@ -73,7 +79,8 @@ enum MediaProbe {
         }
 
         let duration = decoded.format?.duration.flatMap(Double.init)
-        return Result(video: video, audio: audioTracks.first, audioTracks: audioTracks, duration: duration)
+        return Result(video: video, audio: audioTracks.first, audioTracks: audioTracks,
+                      duration: duration, videoCodecFrameRate: v?.r_frame_rate)
     }
 
     /// The first video stream's timebase as ffprobe reports it (e.g. "1/16000"), or nil

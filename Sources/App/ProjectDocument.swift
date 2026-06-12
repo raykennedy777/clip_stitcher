@@ -250,6 +250,7 @@ final class ProjectDocument: ReferenceFileDocument {
             p.clips[i].audioTracks = nil
             p.clips[i].duration = nil
             p.clips[i].frameCount = nil
+            p.clips[i].fieldCoded = nil
             touched.append(p.clips[i].id)
         }
         guard !touched.isEmpty else { return }
@@ -655,6 +656,11 @@ final class ProjectDocument: ReferenceFileDocument {
             if let i = project.clips.firstIndex(where: { $0.id == id }) {
                 var p = project
                 p.clips[i].frameCount = index.count
+                // Field-coded check (issue #46): measured packet cadence vs the probed
+                // display rate — the index's timestamps are already in hand here.
+                p.clips[i].fieldCoded = FieldCodingDetector.isFieldCoded(
+                    packetPts: index.pts,
+                    frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
                 commit(p)
             }
             importStates[id] = .ready

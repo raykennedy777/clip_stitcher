@@ -105,6 +105,14 @@ struct Clip: Codable, Identifiable, Equatable {
     var duration: Double? = nil
     var frameCount: Int? = nil
 
+    /// Set at import when the source stores each *field* as its own packet (PAFF —
+    /// two packets per displayed frame, issue #46). The frame index counts packets
+    /// as frames (ADR-0006), so frame numbers, cut points, and count verifications
+    /// are all off by 2× on such a file — the row warns that frame-accurate cutting
+    /// and export aren't supported for it yet. `nil` on saves made before the check
+    /// (and while probing).
+    var fieldCoded: Bool? = nil
+
     /// The clip's audio tracks regardless of save vintage: the probed list when
     /// present, else the legacy single track, else none.
     var allAudioTracks: [AudioProperties] {

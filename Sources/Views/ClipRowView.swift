@@ -66,6 +66,7 @@ struct ClipRowView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 statusLine
+                fieldCodedWarning
                 selectionLine
             }
 
@@ -164,6 +165,24 @@ struct ClipRowView: View {
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.caption).foregroundStyle(.red).lineLimit(2)
+        }
+    }
+
+    /// The field-coded (PAFF) warning (issue #46): the source stores two field
+    /// pictures per displayed frame, so the app's frame numbering — and with it
+    /// frame-accurate cutting and export — is off by 2× on this file. Plain
+    /// language; warn-only, nothing is blocked.
+    @ViewBuilder
+    private var fieldCodedWarning: some View {
+        if clip.fieldCoded == true {
+            Label("This file stores two half-pictures per frame — frame-accurate cutting and export aren’t supported for it yet.",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("source.clip.\(position - 1).fieldCoded")
+                .accessibilityLabel("Field-coded warning")
         }
     }
 
