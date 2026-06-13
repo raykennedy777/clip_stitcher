@@ -16,6 +16,15 @@ settings:
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "VidConform Dev"
     ENABLE_HARDENED_RUNTIME: YES
+  configs:
+    Debug:
+      # Hardened runtime enforces Library Validation: under the self-signed "VidConform Dev"
+      # cert (Team ID "not set") the test host refuses to load the xctest bundle and the
+      # Xcode debug dylib ("different Team IDs"), so `xcodebuild test` aborts at launch. Dev
+      # builds need neither (no notarization); Release still gets hardened runtime from base.
+      # The .app stays signed with the stable cert, so the TCC grant (issue: dev-signing) holds.
+      ENABLE_HARDENED_RUNTIME: NO
+      ENABLE_DEBUG_DYLIB: NO
 
 targets:
   VidConform:

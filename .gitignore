@@ -47,3 +47,6 @@ tmpgenc_screenshots/
 # Env
 .env
 .env.local
+
+# Claude Code transient state
+.claude/scheduled_tasks.lock
