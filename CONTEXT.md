@@ -143,6 +143,17 @@ stage. Every repair is reported on export completion ("Repaired 3 damage zones a
 never silent.
 _Avoid_: fix, heal, patch, error concealment
 
+**Clip Doctor**:
+The repair-only export: takes one damaged source file and produces a full-length repaired
+copy in the source's own codec and container — damage zones repaired, nothing trimmed,
+nothing conformed — intended as a clean replacement for the damaged original. Produced as a
+smart render of the whole file, so everything outside the repaired segments is bit-identical
+to the source; audio is rebuilt in the source's own codec with gap silence-fill. Every repair
+is verified by re-running damage detection on the output and showing the verdict — clean
+(zero zones) or a soft warning naming any zone that survived. Unlike the implicit repair every
+export performs, Clip Doctor proves the result rather than only reporting the repair attempt.
+_Avoid_: fix tool, restoration, error concealment
+
 ### Editing & UI
 
 **Timeline**:
