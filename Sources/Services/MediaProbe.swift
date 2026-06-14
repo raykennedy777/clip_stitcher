@@ -83,6 +83,47 @@ enum MediaProbe {
                       duration: duration, videoCodecFrameRate: v?.r_frame_rate)
     }
 
+    /// One source audio stream's repair-relevant facts (issue #52), in container order so
+    /// the array index is the `0:a:N` map index. `profile` (e.g. "HE-AAC") and `bitrate`
+    /// are not on `AudioProperties` — the Clip Doctor audio rebuild needs them to encode
+    /// each track back in its own codec at its own bitrate, and to keep an HE-AAC track
+    /// HE-AAC (the native `aac` encoder is LC-only).
+    struct AudioStreamDetail: Equatable, Sendable {
+        var codecName: String
+        var profile: String?
+        var sampleRate: Int
+        var channels: Int
+        /// Stream bit rate in bits/sec when the container reports it (TS broadcast
+        /// captures usually do); nil when it doesn't.
+        var bitrate: Int?
+    }
+
+    /// Every audio stream's repair-relevant facts in container order (issue #52). Uses the
+    /// same `-show_streams` JSON as `probe` (the flat stream list, so a TS doesn't double-
+    /// count). Returns `[]` on a probe failure — the caller treats that as "no audio".
+    static func audioStreamDetails(url: URL) async -> [AudioStreamDetail] {
+        guard let ffprobe = try? FFTools.ffprobeURL(),
+              let output = try? await ProcessRunner.run(ffprobe, [
+                  "-v", "quiet", "-print_format", "json", "-show_streams", url.path,
+              ]),
+              output.status == 0 else { return [] }
+        return (try? parseAudioStreamDetails(json: output.stdout)) ?? []
+    }
+
+    /// Maps the `-show_streams` JSON to the audio streams' repair facts. Pure, so the
+    /// codec/profile/bitrate mapping is unit-testable off canned ffprobe output.
+    static func parseAudioStreamDetails(json: Data) throws -> [AudioStreamDetail] {
+        let decoded = try JSONDecoder().decode(FFProbeOutput.self, from: json)
+        return decoded.streams.filter { $0.codec_type == "audio" }.map { s in
+            AudioStreamDetail(
+                codecName: s.codec_name ?? "unknown",
+                profile: s.profile,
+                sampleRate: Int(s.sample_rate ?? "") ?? 0,
+                channels: s.channels ?? 0,
+                bitrate: s.bit_rate.flatMap(Int.init))
+        }
+    }
+
     /// The first video stream's timebase as ffprobe reports it (e.g. "1/16000"), or nil
     /// when the file has none or the probe fails. Read off the issue-#18 timescale probe
     /// piece to learn the MP4 track timescale stream-copied pieces of a source inherit.
@@ -159,6 +200,7 @@ private struct FFStream: Decodable {
     var sample_rate: String?
     var channels: Int?
     var channel_layout: String?
+    var bit_rate: String?
     /// Container tags on the stream. Key case varies by container (Matroska reports
     /// lowercase, but not universally), so callers look up case-insensitively.
     var tags: [String: String]?

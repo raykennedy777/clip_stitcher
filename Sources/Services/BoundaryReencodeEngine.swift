@@ -227,6 +227,51 @@ enum BoundaryReencodeEngine {
         return den
     }
 
+    // MARK: - Bounded keyframe copy (#52)
+
+    /// How a copy segment's bit-exact span reaches its piece file.
+    enum CopyStrategy {
+        /// The segment-muxer cut at start_time-corrected DTS midpoints, **no input seek**
+        /// (`ExportEngine.cutArguments`/`remuxArguments` via `copySegmentPlan`). This is
+        /// the proven Milestone 1/2 cut/join path: it reads the source from frame 0 to EOF
+        /// and writes a discarded trailing segment for every copy span. One or two copy
+        /// spans per clip is fine; a whole-file repair plan's ~9 copy spans would re-read
+        /// the whole file ~9 times (~150 GB churn on a 4.8 h capture — the #52 finding).
+        case segmentMux
+        /// The bounded, input-seek, keyframe-to-keyframe copy (`boundedCopyArguments`): it
+        /// seeks straight to the span's first frame and reads only the span. Frame-exact on
+        /// a whole-file repair plan because every copy boundary is a copy-safe keyframe by
+        /// construction (proven frame-exact on the real 1844 capture, #51). Used by the
+        /// Clip Doctor repair-only export (issue #52); the verify gate still backstops it.
+        case boundedKeyframe
+    }
+
+    /// ffmpeg args for a **bounded, input-seek, keyframe-to-keyframe** stream copy of the
+    /// copy span `[range.lowerBound, range.upperBound)` into the segment pattern, keeping
+    /// segment `000` (issue #52). Seeks to the span's first frame (`-ss`, start_time-
+    /// relative like every other input seek — ffmpeg subtracts the container start_time),
+    /// stream-copies, and forces a single split after exactly `hi − lo` frames so segment
+    /// `000` is exactly the span. `-t span + margin` bounds the read a couple of seconds
+    /// past the span so ffmpeg stops near the split instead of decoding to EOF — the whole
+    /// point versus the segment-muxer path. Frame-exact on a repair plan: the span's first
+    /// frame is a copy-safe keyframe the seek lands on, and the split frame is the next
+    /// copy-safe keyframe (proven produced == planned on the real 1844 capture, #51).
+    /// `segmentPattern` must carry a `%03d`; the wanted piece is always `…000.<ext>`.
+    static func boundedCopyArguments(
+        source: URL, range: Range<Int>, index: FrameIndex, containerStart: Double,
+        segmentPattern: String
+    ) -> [String] {
+        let lo = range.lowerBound, hi = range.upperBound
+        let seek = max(0, index.pts[lo] - containerStart)
+        let spanEnd = hi < index.pts.count ? index.pts[hi] : (index.pts.last ?? index.pts[lo])
+        let span = max(0, spanEnd - index.pts[lo])
+        var args = ["-v", "error", "-ss", ExportEngine.timeString(seek), "-i", source.path]
+        args += ["-map", "0:v:0", "-c", "copy", "-f", "segment"]
+        args += ["-segment_frames", String(hi - lo), "-reset_timestamps", "1"]
+        args += ["-t", ExportEngine.timeString(span + 2.0), segmentPattern]
+        return args
+    }
+
     /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
     /// `SegmentPlan` so its validated segment-muxer cut/remux can stream-copy the span
     /// bit-exact. A bound that is a clip boundary (frame 0 / no out-cut keyframe) gets no
@@ -267,7 +312,7 @@ enum BoundaryReencodeEngine {
         _ ffmpeg: URL, source: URL, plan: [PlannedSegment], index: FrameIndex,
         encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
         trackTimescale: Int? = nil, containerStart: Double = 0, frameRate: String? = nil,
-        sourceDamaged: Bool = false,
+        sourceDamaged: Bool = false, copyStrategy: CopyStrategy = .segmentMux,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
@@ -318,7 +363,16 @@ enum BoundaryReencodeEngine {
             let expected: Double?
             switch segment.kind {
             case .reEncode: expected = interval.map { Double(segment.range.count) * $0 }
-            case .copy: expected = sourceSpan
+            case .copy:
+                switch copyStrategy {
+                // The segment-muxer cut reads the whole source span; the bounded copy
+                // reads only its own span (#52), so the bar tracks that instead.
+                case .segmentMux: expected = sourceSpan
+                case .boundedKeyframe:
+                    let lo = segment.range.lowerBound, hi = segment.range.upperBound
+                    expected = (lo < index.pts.count && hi < index.pts.count)
+                        ? index.pts[hi] - index.pts[lo] : sourceSpan
+                }
             }
             let onOutTime: @Sendable (Double) -> Void = { t in
                 onProgress(ExportProgress.withinClip(
@@ -341,6 +395,16 @@ enum BoundaryReencodeEngine {
                     source: source, range: segment.range, index: index,
                     encoder: encoder, output: piece, trackTimescale: pieceTimescale),
                     onOutTime: onOutTime)
+            case .copy where copyStrategy == .boundedKeyframe:
+                // Whole-file repair (#52): seek straight to the span and copy only it.
+                // The span is keyframe-bounded by construction, so segment 000 is exactly
+                // the range — no DTS-midpoint cut, no discarded full-file read.
+                let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
+                try await run(ffmpeg, boundedCopyArguments(
+                    source: source, range: segment.range, index: index,
+                    containerStart: containerStart, segmentPattern: pattern), onOutTime: onOutTime)
+                piece = work.appendingPathComponent(String(
+                    format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)", 0))
             case .copy:
                 let copyPlan = copySegmentPlan(
                     copyRange: segment.range, outCutKeyframe: segment.outCutKeyframe, index: index)
