@@ -52,6 +52,41 @@ Action panel buttons:
 | `source.audioSettings` | Audio Settings… |
 | `source.setTarget` | Set as Target Clip |
 | `source.relink` | Relink… |
+| `source.clipDoctor` | Clip Doctor… (enabled only for a single clip with a video damage zone that isn't field-coded) |
+
+Clip Doctor banner (issue #55) — a non-modal suggestion above the timeline, present
+only while a freshly-detected damaged clip has an undismissed suggestion:
+
+| Identifier | Element |
+| --- | --- |
+| `source.doctorBanner` | The banner container |
+| `source.doctorBanner.open` | Clip Doctor… button — selects the clip and opens the sheet |
+| `source.doctorBanner.dismiss` | The × dismiss button |
+
+### Clip Doctor sheet (`ClipDoctorView`, issue #53)
+
+Opened from `source.clipDoctor` or the banner. Controls vary by phase (configuring →
+running → finished):
+
+| Identifier | Element |
+| --- | --- |
+| `clipDoctor.sheet` | The sheet container |
+| `clipDoctor.destination` | Repaired-copy path (`AXStaticText`, full path in `AXValue`) |
+| `clipDoctor.change` | Change… destination button (configuring only) |
+| `clipDoctor.omitted` | Notice listing non-AV streams not carried (present only when the source has any) |
+| `clipDoctor.repair` | Repair / **Replace** button (label is Replace when the destination already exists) |
+| `clipDoctor.progress` | Determinate progress bar (running only) |
+| `clipDoctor.cancel` | Cancel button (running only — cancels the engine, leaves no output) |
+| `clipDoctor.verdict` | The verdict headline (finished only; full message in `AXValue`) |
+| `clipDoctor.status` | Failure message (failed only; message in `AXValue`) |
+| `clipDoctor.reveal` | Reveal in Finder (finished only) |
+| `clipDoctor.useRepaired` | Use Repaired File in This Project — relinks the clip (finished only) |
+| `clipDoctor.done` | Done (finished only) |
+
+A headless run needs no panel: the destination defaults to the `_repaired` sibling, so
+`source.clipDoctor` → `clipDoctor.repair` → poll for the sibling file → read
+`clipDoctor.verdict`. Over the raw AX API `AXValue` text reads back via
+`AXValueDescription`, as with the row badge.
 
 Clip rows: `source.clip.<index>` (0-based timeline order) is an AX *container*
 (`AXGroup`) — its children keep their own identifiers. Each row's role badge is

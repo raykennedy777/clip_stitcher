@@ -168,4 +168,52 @@ struct ClipDoctorEngineTests {
         #expect(v.outcome == .inconclusive)
         #expect(v.message.contains("could not be re-scanned"))
     }
+
+    // MARK: - Non-AV stream notice (ADR-0021: video + audio only)
+
+    @Test func noOtherStreamsHasNoNotice() {
+        #expect(ClipDoctorEngine.omittedStreamsNotice([]) == nil)
+    }
+
+    @Test func oneSubtitleStreamReadsSingular() {
+        let notice = ClipDoctorEngine.omittedStreamsNotice([
+            MediaProbe.OtherStream(kind: "subtitle", codecName: "dvb_teletext")])
+        #expect(notice == "1 subtitle stream won’t be carried into the repaired copy — Clip Doctor copies video and audio only.")
+    }
+
+    @Test func manyKindsAreCountedAndListedInContainerOrder() {
+        let notice = ClipDoctorEngine.omittedStreamsNotice([
+            MediaProbe.OtherStream(kind: "subtitle", codecName: "dvb_subtitle"),
+            MediaProbe.OtherStream(kind: "subtitle", codecName: "dvb_teletext"),
+            MediaProbe.OtherStream(kind: "data", codecName: "bin_data"),
+        ])
+        #expect(notice?.hasPrefix("2 subtitle streams and 1 data stream won’t be carried") == true)
+    }
+
+    // MARK: - Non-AV stream parsing
+
+    @Test func parseNonAVStreamsKeepsOnlyNonAV() throws {
+        let json = Data("""
+        {"streams":[
+          {"codec_type":"video","codec_name":"h264"},
+          {"codec_type":"audio","codec_name":"aac"},
+          {"codec_type":"subtitle","codec_name":"dvb_teletext"},
+          {"codec_type":"data","codec_name":"bin_data"}
+        ]}
+        """.utf8)
+        let streams = try MediaProbe.parseNonAVStreams(json: json)
+        #expect(streams == [
+            MediaProbe.OtherStream(kind: "subtitle", codecName: "dvb_teletext"),
+            MediaProbe.OtherStream(kind: "data", codecName: "bin_data"),
+        ])
+    }
+
+    // MARK: - Import-banner suggestion text (issue #55)
+
+    @Test func bannerNamesTheClipAndZoneCount() {
+        #expect(ClipDoctorEngine.suggestionBannerText(clipName: "1844", zoneCount: 1)
+                == "“1844” has a damage zone. Clip Doctor can repair it.")
+        #expect(ClipDoctorEngine.suggestionBannerText(clipName: "1844", zoneCount: 9)
+                == "“1844” has 9 damage zones. Clip Doctor can repair it.")
+    }
 }

@@ -150,6 +150,54 @@ enum ClipDoctorEngine {
                        message: "Repaired “\(clipName)”, but \(survivingZones.count) \(noun) after re-scan at \(times) — the file was kept for review.")
     }
 
+    /// The sheet's non-AV-stream notice (ADR-0021, issue #53): the engine carries video
+    /// and audio only, so subtitle/teletext/data/attachment streams are dropped — say so
+    /// rather than dropping them silently. `nil` when the source has none. Counts per kind
+    /// in container order so the wording is deterministic.
+    static func omittedStreamsNotice(_ streams: [MediaProbe.OtherStream]) -> String? {
+        guard !streams.isEmpty else { return nil }
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for stream in streams {
+            let kind = displayKind(stream.kind)
+            if counts[kind] == nil { order.append(kind) }
+            counts[kind, default: 0] += 1
+        }
+        let phrases = order.map { kind -> String in
+            let n = counts[kind] ?? 0
+            return "\(n) \(kind) \(n == 1 ? "stream" : "streams")"
+        }
+        return "\(listPhrase(phrases)) won’t be carried into the repaired copy — Clip Doctor copies video and audio only."
+    }
+
+    /// The import banner's suggestion line (issue #55): names the freshly-detected
+    /// damage and offers Clip Doctor. Pure so the wording stays banned-word-clean and
+    /// testable; positions live on the row's damage line, not here.
+    static func suggestionBannerText(clipName: String, zoneCount: Int) -> String {
+        let zones = zoneCount == 1 ? "a damage zone" : "\(zoneCount) damage zones"
+        return "“\(clipName)” has \(zones). Clip Doctor can repair it."
+    }
+
+    /// ffprobe's `codec_type` as a reader-facing word. Unknown kinds pass through.
+    private static func displayKind(_ codecType: String) -> String {
+        switch codecType {
+        case "subtitle": return "subtitle"
+        case "data": return "data"
+        case "attachment": return "attachment"
+        default: return codecType
+        }
+    }
+
+    /// Joins phrases into a list: "a", "a and b", "a, b and c".
+    private static func listPhrase(_ phrases: [String]) -> String {
+        switch phrases.count {
+        case 0: return ""
+        case 1: return phrases[0]
+        case 2: return "\(phrases[0]) and \(phrases[1])"
+        default: return phrases.dropLast().joined(separator: ", ") + " and \(phrases.last!)"
+        }
+    }
+
     // MARK: - Orchestration
 
     /// Repairs one damaged source into a sibling `_repaired` file in the source container,

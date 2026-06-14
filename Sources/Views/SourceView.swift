@@ -11,6 +11,8 @@ struct SourceView: View {
     /// The clips an open Audio Settings sheet edits, in timeline order; empty when
     /// the sheet is closed. More than one only under the same-source gate.
     @State private var audioSettingsClips: [Clip.ID] = []
+    /// The clip an open Clip Doctor sheet repairs (issue #53); nil when closed.
+    @State private var doctorTarget: DoctorTarget?
 
     /// What a presented file picker is for. A single `.fileImporter` serves both jobs —
     /// stacking two of the same presentation modifier on one view silently breaks all but
@@ -20,9 +22,21 @@ struct SourceView: View {
         case relink(Set<Clip.ID>)
     }
 
+    /// The Clip Doctor sheet's target, wrapped so `.sheet(item:)` can drive it off a
+    /// `Clip.ID` (issue #53).
+    private struct DoctorTarget: Identifiable { let id: Clip.ID }
+
     var body: some View {
         HStack(spacing: 0) {
-            clipList
+            VStack(spacing: 0) {
+                doctorBanner
+                clipList
+            }
+            // The Clip Doctor sheet lives on this column, not the root — two `.sheet`
+            // presenters on one view can clash like the duplicated `.fileImporter` did.
+            .sheet(item: $doctorTarget) { target in
+                ClipDoctorView(document: document, clipID: target.id)
+            }
             Divider()
             actionPanel
         }
@@ -107,6 +121,8 @@ struct SourceView: View {
                         Button("Duplicate") { duplicate(targets) }
                         Button("Audio Settings…") { presentAudioSettings(for: targets) }
                             .disabled(!allSameSource(targets))
+                        Button("Clip Doctor…") { presentDoctor(for: clip.id) }
+                            .disabled(!canDoctor(clip))
                         Divider()
                         Button("Delete", role: .destructive) { delete(targets) }
                     }
@@ -205,6 +221,10 @@ struct SourceView: View {
                 importPurpose = .relink(selection)
                 importing = true
             }
+            action("Clip Doctor…", systemImage: "bandage", id: "source.clipDoctor",
+                   enabled: canDoctorSelection) {
+                if let id = selection.first { presentDoctor(for: id) }
+            }
 
             Spacer()
         }
@@ -281,6 +301,79 @@ struct SourceView: View {
 
     private func presentAudioSettings(for ids: Set<Clip.ID>) {
         audioSettingsClips = document.project.clips.map(\.id).filter { ids.contains($0) }
+    }
+
+    // MARK: - Clip Doctor (issue #53/#55)
+
+    /// Clip Doctor repairs one clip's **video** damage. Enabled for a clip with a
+    /// video-affecting damage zone, not field-coded (that's issue #54's path — the
+    /// engine refuses it), and whose source is reachable. An audio-only gap needs no
+    /// doctor: every export already silence-fills it (issue #44).
+    private func canDoctor(_ clip: Clip) -> Bool {
+        clip.fieldCoded != true
+            && (clip.damageZones?.contains(where: \.affectsVideo) ?? false)
+            && document.importStates[clip.id] != .sourceMissing
+            && document.url(for: clip) != nil
+    }
+
+    /// Clip Doctor is single-clip only.
+    private var canDoctorSelection: Bool {
+        guard selection.count == 1, let id = selection.first,
+              let clip = document.project.clips.first(where: { $0.id == id }) else { return false }
+        return canDoctor(clip)
+    }
+
+    /// Selects the clip and opens its Clip Doctor sheet, clearing any pending banner
+    /// suggestion for it (issue #55 — the user is now acting on it).
+    private func presentDoctor(for id: Clip.ID) {
+        selection = [id]
+        document.dismissDoctorSuggestion(id)
+        doctorTarget = DoctorTarget(id: id)
+    }
+
+    /// The clip a Clip Doctor banner is currently offered for (issue #55): the first
+    /// still-valid suggestion in the queue. A suggestion is skipped if the clip went
+    /// away or no longer qualifies (e.g. relinked clean).
+    private var doctorBannerClip: Clip? {
+        for id in document.doctorSuggestions {
+            if let clip = document.project.clips.first(where: { $0.id == id }), canDoctor(clip) {
+                return clip
+            }
+        }
+        return nil
+    }
+
+    /// A non-modal, dismissible banner above the timeline suggesting Clip Doctor for a
+    /// freshly-detected damaged clip (issue #55). One at a time — a burst of imports
+    /// surfaces the next once this is dismissed or opened. The row damage badge stays
+    /// the always-present marker.
+    @ViewBuilder
+    private var doctorBanner: some View {
+        if let clip = doctorBannerClip {
+            HStack(spacing: 12) {
+                Image(systemName: "bandage")
+                    .foregroundStyle(.orange)
+                Text(ClipDoctorEngine.suggestionBannerText(
+                    clipName: clip.displayName, zoneCount: (clip.damageZones ?? []).count))
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Clip Doctor…") { presentDoctor(for: clip.id) }
+                    .accessibilityIdentifier("source.doctorBanner.open")
+                Button {
+                    document.dismissDoctorSuggestion(clip.id)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Dismiss")
+                .accessibilityIdentifier("source.doctorBanner.dismiss")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.orange.opacity(0.12))
+            .accessibilityIdentifier("source.doctorBanner")
+        }
     }
 
     private func move(by delta: Int) {

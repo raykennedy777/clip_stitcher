@@ -124,6 +124,37 @@ enum MediaProbe {
         }
     }
 
+    /// A source stream Clip Doctor does **not** carry into the repaired file (ADR-0021,
+    /// issue #53): the engine models only video + audio, so subtitle/teletext/data/
+    /// attachment streams are dropped. Surfaced in the sheet so the omission is never
+    /// silent. `kind` is ffprobe's `codec_type` ("subtitle", "data", …).
+    struct OtherStream: Equatable, Sendable {
+        var kind: String
+        var codecName: String?
+    }
+
+    /// Every non-video, non-audio stream in container order (issue #53). Uses the same
+    /// `-show_streams` JSON as `probe`/`audioStreamDetails`. Returns `[]` on a probe
+    /// failure — a notice the caller can simply omit, never a blocker.
+    static func nonAVStreams(url: URL) async -> [OtherStream] {
+        guard let ffprobe = try? FFTools.ffprobeURL(),
+              let output = try? await ProcessRunner.run(ffprobe, [
+                  "-v", "quiet", "-print_format", "json", "-show_streams", url.path,
+              ]),
+              output.status == 0 else { return [] }
+        return (try? parseNonAVStreams(json: output.stdout)) ?? []
+    }
+
+    /// Maps the `-show_streams` JSON to the streams Clip Doctor won't carry — anything
+    /// that is neither video nor audio. Pure, so the mapping is unit-testable off canned
+    /// ffprobe output.
+    static func parseNonAVStreams(json: Data) throws -> [OtherStream] {
+        let decoded = try JSONDecoder().decode(FFProbeOutput.self, from: json)
+        return decoded.streams
+            .filter { $0.codec_type != "video" && $0.codec_type != "audio" && $0.codec_type != nil }
+            .map { OtherStream(kind: $0.codec_type ?? "data", codecName: $0.codec_name) }
+    }
+
     /// The first video stream's timebase as ffprobe reports it (e.g. "1/16000"), or nil
     /// when the file has none or the probe fails. Read off the issue-#18 timescale probe
     /// piece to learn the MP4 track timescale stream-copied pieces of a source inherit.

@@ -43,6 +43,12 @@ final class ProjectDocument: ReferenceFileDocument {
     @Published var copyShares: [Clip.ID: ExportPlanner.CopyShare] = [:]
     /// Runtime-only export progress/outcome, surfaced by the Output view.
     @Published var exportStatus: ExportStatus = .idle
+    /// Clips whose import-time damage detection just finished with repairable damage
+    /// (issue #55) — the Source view shows a one-time, dismissible banner suggesting
+    /// Clip Doctor for the first still-valid entry. Runtime-only; field-coded clips
+    /// (issue #54's path) and audio-only gaps are never enqueued. A FIFO queue so a
+    /// burst of imports surfaces one banner at a time, never a modal pile-up.
+    @Published var doctorSuggestions: [Clip.ID] = []
     /// True once the user confirmed a cancel (issue #32) — disables the cancel button
     /// while the asynchronous termination plays out. Reset when an export starts.
     @Published var exportCancelRequested = false
@@ -230,6 +236,7 @@ final class ProjectDocument: ReferenceFileDocument {
             containerStartCache[id] = nil
             lastViewedFrames[id] = nil
         }
+        doctorSuggestions.removeAll { ids.contains($0) }
     }
 
     func clearAll() {
@@ -242,6 +249,7 @@ final class ProjectDocument: ReferenceFileDocument {
         frameIndexCache.removeAll()
         containerStartCache.removeAll()
         lastViewedFrames.removeAll()
+        doctorSuggestions.removeAll()
     }
 
     /// Rebinds every selected clip to a new source file in one undo step (issue #12 —
@@ -271,6 +279,9 @@ final class ProjectDocument: ReferenceFileDocument {
             lastViewedFrames[id] = nil
             importStates[id] = .probing
         }
+        // Re-detection on the new source will re-suggest if it's damaged; drop any
+        // stale suggestion for these clips meanwhile (issue #55).
+        doctorSuggestions.removeAll { touched.contains($0) }
         commit(p)
         for id in touched {
             Task { await importClip(id: id, url: newURL) }
@@ -478,6 +489,37 @@ final class ProjectDocument: ReferenceFileDocument {
         let built = try await FrameIndexer.buildIndex(url: url)
         frameIndexCache[clip.id] = built
         return built
+    }
+
+    // MARK: - Clip Doctor (issue #53, ADR-0021)
+
+    /// The inputs Clip Doctor needs for one clip, reusing the import-time caches: the
+    /// resolved source URL, the cached (or just-built) frame index, and the cached (or
+    /// just-probed) container start_time — the same `frameIndexCache`/`containerStartCache`
+    /// the export reads, so an already-imported clip needs no re-index or re-probe. Throws
+    /// when the source can't be resolved.
+    @MainActor
+    func doctorInputs(for clip: Clip) async throws -> (url: URL, index: FrameIndex, containerStart: Double) {
+        guard let url = url(for: clip) else {
+            throw FFError.indexFailed("Source file not found.")
+        }
+        let index = try await frameIndex(for: clip)
+        let containerStart: Double
+        if let cached = containerStartCache[clip.id] {
+            containerStart = cached
+        } else {
+            containerStart = await MediaProbe.containerStartTime(url: url)
+            containerStartCache[clip.id] = containerStart
+        }
+        return (url, index, containerStart)
+    }
+
+    /// Drops a clip from the Clip Doctor suggestion queue (issue #55) — the user
+    /// dismissed its banner or opened its repair sheet, so it shouldn't suggest again
+    /// for this detection.
+    @MainActor
+    func dismissDoctorSuggestion(_ id: Clip.ID) {
+        doctorSuggestions.removeAll { $0 == id }
     }
 
     // MARK: - Export (Milestone 2: frame-exact boundary re-encode)
@@ -710,6 +752,13 @@ final class ProjectDocument: ReferenceFileDocument {
                 var p = project
                 p.clips[i].damageZones = zones
                 commit(p)
+                // Suggest Clip Doctor for a freshly damaged, repairable clip (issue
+                // #55): only a video-affecting zone (audio-only gaps are already
+                // silence-filled by every export, issue #44) on a non-field-coded
+                // source (field-coded is issue #54's path, refused by the engine).
+                if zones.contains(where: \.affectsVideo), p.clips[i].fieldCoded != true {
+                    doctorSuggestions.append(id)
+                }
             }
             importStates[id] = .ready
             refreshCopyShares()
