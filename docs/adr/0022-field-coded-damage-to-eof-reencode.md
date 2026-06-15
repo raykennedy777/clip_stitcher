@@ -1,0 +1,88 @@
+# Field-coded (PAFF) repair is a damage-to-EOF MBAFF re-encode, not a smart-render splice
+
+ADR-0021 left field-coded (PAFF) sources as the open fork: Clip Doctor's first real input
+(the 18:42 Polsat capture) is PAFF, and whether the field-aware repaired-segment recipe could
+splice cleanly in TS had to be decided in the shell before Swift. ADR-0020 kept PAFF
+warn-only for the same reason. **It does not splice. A no-IDR PAFF source cannot be
+smart-render repaired in this toolchain** — proven exhaustively on a real PAFF slice (issue
+#54, Phase 1). So Clip Doctor repairs a field-coded source by copying the clean head
+byte-for-byte up to the keyframe before the first damage, then **re-encoding everything from
+there to EOF as MBAFF H.264** — the *damage-to-EOF* repair. It keeps exactly one copy→re-encode
+transition (the entry), drops + frame-fills every damage zone in the one continuous tail, and
+preserves scan order, resolution, rate, and SAR. High-quality (CRF 18, visually lossless) but
+**not bit-for-bit identical** for the re-encoded portion, and slow on a long capture — so the
+sheet warns up front and requires an explicit opt-in (issue #54), distinct from the silent
+progressive Repair.
+
+## Why smart-render is structurally impossible for no-IDR PAFF (do not re-litigate)
+
+1. **No localized in-place repair exists.** A pure-copy hole-fill fails: there is no
+   all-intra/IDR frame to freeze on, and a copy-domain drop-splice ships overlapping/fabricated
+   DTS (passes a naive decode grep, fails a strict DTS-monotonicity check). Ruled out by
+   *structure*, not tuning.
+2. **The MBAFF→PAFF resume seam is a hard container-layer wall.** A bracketed 3-piece splice
+   (copy head + MBAFF damage window + copy tail) always fails at the resume seam: the resuming
+   PAFF span's B-field DTS collides with the preceding MBAFF segment's DTS, the demuxer sets
+   `AV_PKT_FLAG_CORRUPT`, and `-xerror` aborts. No hardening fixed it (forced-IDR, ref/level
+   match, SPS/PPS repeat, AUD insertion, discontinuity/genpts/igndts/copyts). **At most one
+   copy↔re-encode transition is allowed, and it must be the entry, never a resume.**
+3. **This ffmpeg build has no PAFF-capable H.264 encoder.** libx264 is MBAFF-only (one packet
+   per frame, `mb_adaptive=1`); `fake-interlaced` is progressive-flagged; h264_videotoolbox is
+   progressive-only. So a matched-PAFF repair segment can't be produced, which forces the MBAFF
+   island and the unfixable resume seam above.
+
+The only repairs that decode `-xerror` clean from start to EOF *and* show monotonic DTS are
+**damage-to-EOF** (chosen — preserves the clean head losslessly, saves time proportional to how
+late the first damage sits) and a **full re-encode** (rejected — re-encodes the lossless head
+too; damage-to-EOF degenerates to it only when the damage is early).
+
+## How it is built
+
+- **Plan transform** (`ClipDoctorEngine.damageToEOFPlan`): the whole-file smart-render plan is
+  collapsed to one copy `[0, seam)` + one re-encode `[seam, EOF)` carrying every video-affecting
+  zone. **The seam is snapped to the keyframe at/before the planner's first-repair start.** The
+  planner's start is a leading-picture-adjusted copy *end* (`keyframe − n_leading`), correct for
+  a segment-muxer DTS cut but not a keyframe; `-segment_frames` there would split at the *next*
+  keyframe and overlap the tail, so the seam must land on a real keyframe where the head's copy
+  ends and the tail's forced IDR begins — adjacent, no overlap, no gap.
+- **MBAFF tail encoder** (`BoundaryReencodeEngine.mbaffRepairVideoArgs`): `libx264 +ildct+ilme`,
+  `-top` from `field_order`, **`-crf 18` fixed** (visually lossless, ~1.33× source bitrate — a
+  fixed engine constant, not a user control), `-forced-idr 1` + `open_gop=0` for the clean entry
+  IDR, `ref=5:level=4.0` matching the source's out-of-spec 5-ref cadence, `b-pyramid=0` (the
+  issue-#2 MKV/TS duplicate-PTS collapse), `keyint=25:scenecut=0`, `dump_extra` to
+  repeat SPS/PPS into the stream.
+- **Audio, staging, and the auto-verify verdict are unchanged from ADR-0021.**
+
+## Verification gates this changes
+
+- **The PAFF piece bypasses the standard `verifyPiece` gate** (`fieldCoded` flag), keeping only
+  the from-start `-xerror` decode-to-EOF check. The frame-count check can't reconcile a PAFF
+  copy head (two field packets per displayed frame) with the MBAFF tail (one), and
+  `timestampDefect` reads the head's 0.02 s field cadence as duplicates against the tail's
+  0.04 s median — both false-fail a correct piece. The decode check catches the one failure
+  mode this repair can have (a corrupt copy→MBAFF entry seam), and the **post-mux re-scan**
+  (ADR-0021's headline verdict) is the real correctness backstop: duration preserved, zero
+  zones.
+- **The concat seam-closing duration directive is omitted for the PAFF head.** It is
+  `pts[hi] − pts[lo]`, exact only for a presentation-ordered uniform index; PAFF's
+  reorder-interleaved sub-frame field PTS make it over-estimate the head's display span and open
+  a gap at the seam that the re-scan reads as fresh damage. The reset-timestamp copy head's own
+  container duration is its true span, so the demuxer places the tail on it.
+- **The "non monotonically increasing dts to muxer" line the null muxer prints on field-coded
+  rescale is benign** (exit 0, de-risked); real DTS is monotonic once muxed to the container.
+  Verify DTS by muxing to the real container, never by trusting the `-f null -` warning.
+- **The "corrupt-to-EOF avalanche" on a from-start decode is a reference-state artifact**, not
+  the true damage extent — a seek-anchored decode from a nearby clean keyframe recovers in ~1
+  GOP. Detection must not treat it as real downstream damage.
+
+## Consequences
+
+- **Field-coded clips are now full Clip Doctor inputs.** The Source action button, context menu,
+  and import banner enable them; the row's field-coded warning now says only cutting/joining
+  remain unsupported (Clip Doctor can repair). `DoctorError.fieldCoded` is removed.
+- **Time cost is surfaced, measured-backed:** ~1 h typical for the 4.8 h capture, up to ~5 h on
+  a slow/busy Mac (~4.5× realtime typical, down to ~1×); the sheet scales the estimate off the
+  clip duration and shows a live time-remaining label during the run.
+- **Damage-to-EOF degenerates to a full re-encode when the first damage is early** (the
+  acceptance file's first zone is at 883 s of 17 265 s → ~95% re-encoded). That is accepted: the
+  saving is real for a file damaged late, and there is no cheaper structurally-possible repair.

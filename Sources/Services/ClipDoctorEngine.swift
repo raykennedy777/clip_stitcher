@@ -20,8 +20,14 @@ import Foundation
 ///      **same volume** and **atomically moved** into place only on success — the source
 ///      is never touched, and an existing destination is not clobbered without intent.
 ///
-/// Scope: the **progressive** path (issue #52). Field-coded (PAFF) sources take the full
-/// interlaced re-encode (issue #54) and are refused here.
+/// Two video paths share this orchestration. A **progressive** source is smart-rendered
+/// (issue #52): copy the untouched footage byte-for-byte, re-encode only the damaged
+/// stretches. A **field-coded (PAFF)** source can't be smart-render spliced — a no-IDR
+/// PAFF stream has no resume seam (ADR-0022) — so it takes the **damage-to-EOF** repair:
+/// copy the clean head byte-for-byte up to the keyframe before the first damage, then
+/// re-encode everything from there to EOF as MBAFF H.264 (issue #54). Everything after the
+/// video piece — the in-codec gap-filled audio, the staged atomic move, and the auto-verify
+/// — is identical for both.
 enum ClipDoctorEngine {
     /// One source audio track to rebuild (issue #52), resolved from the source's probe.
     struct AudioTrack: Equatable {
@@ -60,14 +66,11 @@ enum ClipDoctorEngine {
     }
 
     enum DoctorError: LocalizedError {
-        case fieldCoded
         case destinationExists(URL)
         case destinationIsSource
 
         var errorDescription: String? {
             switch self {
-            case .fieldCoded:
-                return "Clip Doctor doesn’t support field-coded (interlaced PAFF) sources yet."
             case .destinationExists(let url):
                 return "A repaired file already exists at \(url.lastPathComponent); it was not replaced."
             case .destinationIsSource:
@@ -85,6 +88,39 @@ enum ClipDoctorEngine {
         let stem = source.deletingPathExtension().lastPathComponent
         return source.deletingLastPathComponent()
             .appendingPathComponent("\(stem)_repaired").appendingPathExtension(ext)
+    }
+
+    /// Rewrites the whole-file smart-render plan into the field-coded **damage-to-EOF**
+    /// shape (issue #54, ADR-0022). A no-IDR PAFF source cannot be smart-render spliced:
+    /// the MBAFF→PAFF resume seam is a hard container-layer wall (proven), so the only
+    /// repair that decodes clean from start to EOF keeps exactly **one** copy→re-encode
+    /// transition — the entry. The head is stream-copied byte-for-byte up to the seam, then
+    /// everything from the seam to the file end is one MBAFF re-encode carrying every
+    /// video-affecting zone (each dropped + frame-filled by the tail encode).
+    ///
+    /// The seam must sit on a real **keyframe**: the head copy ends there (a TS stream copy
+    /// can only split at a keyframe) and the MBAFF tail re-encodes from it as a forced IDR
+    /// (the clean entry). The planner's first-repair start is a *leading-picture-adjusted*
+    /// copy end (`keyframe − n_leading`) — correct for a segment-muxer DTS cut, but not a
+    /// keyframe, so `-segment_frames` there would split at the *next* keyframe and overlap
+    /// the tail (the seam then decodes with a DTS discontinuity the re-scan reads as fresh
+    /// damage). Snapping to the keyframe at or before it lands the seam exactly where the
+    /// head ends and the tail's IDR begins — adjacent, no overlap, no gap. A clip damaged
+    /// before its first keyframe has no head copy and converges on a full re-encode —
+    /// correct, just no longer minimal. Pure, so the transform is unit-tested without ffmpeg.
+    static func damageToEOFPlan(_ segments: [PlannedSegment], index: FrameIndex,
+                                zones: [DamageZone]) -> [PlannedSegment] {
+        guard let firstRepair = segments.firstIndex(where: { $0.kind == .reEncode }) else {
+            return segments   // no damage in range — defensive; the caller only routes damaged clips.
+        }
+        let seam = index.keyframeIndex(atOrBefore: segments[firstRepair].range.lowerBound)
+        var plan: [PlannedSegment] = []
+        if seam > 0 {
+            plan.append(PlannedSegment(kind: .copy, range: 0..<seam, outCutKeyframe: nil))
+        }
+        plan.append(PlannedSegment(kind: .reEncode, range: seam..<index.count,
+                                   outCutKeyframe: nil, damage: zones.filter(\.affectsVideo)))
+        return plan
     }
 
     /// Resolves one probed audio stream to a repair track (issue #52): the source codec's
@@ -170,6 +206,37 @@ enum ClipDoctorEngine {
         return "\(listPhrase(phrases)) won’t be carried into the repaired copy — Clip Doctor copies video and audio only."
     }
 
+    /// The up-front notice + opt-in text for a **field-coded (PAFF)** repair (issue #54,
+    /// ADR-0022). Unlike the progressive smart-render repair — which stream-copies the
+    /// untouched footage byte-for-byte — a field-coded source can't be spliced, so the clip
+    /// is re-encoded in full from the first damage to the end: high-quality but not
+    /// bit-for-bit identical, and slow on a long capture. The sheet shows this before Repair
+    /// runs and requires an explicit opt-in. Time estimate scales off the clip duration (the
+    /// measured throughput is ~4.5× realtime typical, down to ~1× on a slow/busy Mac).
+    /// Banned-word clean (no fix/heal/patch/error concealment). Pure for unit tests.
+    static func fieldCodedReencodeNotice(clipName: String, duration: Double?) -> String {
+        let base = "“\(clipName)” stores two half-pictures per frame, so it can’t be repaired in place — "
+            + "the whole clip is re-encoded from the first damage to the end. The result is "
+            + "high-quality but not bit-for-bit identical to the source."
+        guard let duration, duration > 0 else { return base }
+        return base + " Expect roughly \(roughDurationPhrase(duration / 4.5)) on this Mac, "
+            + "and up to about \(roughDurationPhrase(duration)) on a slow or busy one."
+    }
+
+    /// A rounded, no-false-precision duration phrase for the re-encode estimate (HIG):
+    /// "a minute or two", whole minutes, then half-hour steps.
+    private static func roughDurationPhrase(_ seconds: Double) -> String {
+        if seconds < 90 { return "a minute or two" }
+        if seconds < 3300 {
+            let m = max(2, Int((seconds / 60).rounded()))
+            return "\(m) minutes"
+        }
+        let halfHours = max(2, Int((seconds / 1800).rounded()))
+        let h = halfHours / 2
+        if halfHours % 2 == 1 { return "\(h)½ hours" }
+        return h == 1 ? "an hour" : "\(h) hours"
+    }
+
     /// The import banner's suggestion line (issue #55): names the freshly-detected
     /// damage and offers Clip Doctor. Pure so the wording stays banned-word-clean and
     /// testable; positions live on the row's damage line, not here.
@@ -214,8 +281,8 @@ enum ClipDoctorEngine {
         destination: URL? = nil, overwrite: Bool = false,
         progress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> Result {
-        guard clip.fieldCoded != true else { throw DoctorError.fieldCoded }
         guard let video = clip.video else { throw ExportError.invalidPlan }
+        let fieldCoded = clip.fieldCoded == true
 
         let dest = destination ?? repairedSibling(of: source)
         guard dest.standardizedFileURL != source.standardizedFileURL else {
@@ -236,8 +303,20 @@ enum ClipDoctorEngine {
         wholeFile.outPoint = nil
         let treatment = try ExportPlanner.videoTreatment(
             for: wholeFile, target: nil, index: index, containerStart: containerStart)
-        guard case .smartRender(let segments, let encoder) = treatment else {
+        guard case .smartRender(let segments, let progressiveEncoder) = treatment else {
             throw ExportError.invalidPlan   // target nil never yields .conform; defensive.
+        }
+        // A field-coded (PAFF) source can't be smart-render spliced (ADR-0022): collapse
+        // the interleaved copy/repair plan to one copy head + one MBAFF re-encode to EOF,
+        // and swap the source-matched progressive encoder for the MBAFF repair encoder.
+        let plan: [PlannedSegment]
+        let encoder: [String]
+        if fieldCoded {
+            plan = damageToEOFPlan(segments, index: index, zones: clip.damageZones ?? [])
+            encoder = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: video.fieldOrder)
+        } else {
+            plan = segments
+            encoder = progressiveEncoder
         }
 
         // Resolve the source's audio tracks for an in-codec rebuild (order preserved).
@@ -260,10 +339,10 @@ enum ClipDoctorEngine {
         //    re-encode segments, concatenated and self-verified (frame count / decode /
         //    timestamps) by `produceVideoPiece` before it ships (ADR-0008).
         let videoPiece = try await BoundaryReencodeEngine.produceVideoPiece(
-            ffmpeg, source: source, plan: segments, index: index, encoder: encoder,
+            ffmpeg, source: source, plan: plan, index: index, encoder: encoder,
             work: work, ext: ext, clipIndex: 0, codec: video.codec,
             containerStart: containerStart, frameRate: video.frameRate,
-            sourceDamaged: true, copyStrategy: .boundedKeyframe,
+            sourceDamaged: true, copyStrategy: .boundedKeyframe, fieldCoded: fieldCoded,
             onProgress: { w in progress(0.85 * w) })
 
         // 2. Mux the repaired video with the in-codec, gap-filled audio into the staged file.
@@ -299,14 +378,29 @@ enum ClipDoctorEngine {
 
     /// Runs ffmpeg, turning a non-zero exit into `ExportError.cutFailed` with its stderr;
     /// streams `-progress` out_time to `onOutTime` (issue #9).
+    ///
+    /// stderr is drained to a temp **file**, never the default in-memory pipe (issue #54).
+    /// The audio mux reads the whole source with `-max_error_rate 1.0`, and on a damaged
+    /// multi-hour capture the decoders flood stderr (mmco/ref-frame/corrupt-packet lines)
+    /// even at `-v error`. `ProcessRunner` only drains a stderr pipe at termination, so once
+    /// that flood overruns the ~64 KB OS pipe buffer ffmpeg blocks mid-write and the run
+    /// deadlocks at 0% CPU — which froze the real 4.8 h repair (the slice/1844 stay under the
+    /// buffer, so it never showed until the full file). Streaming stderr to a file removes the
+    /// backpressure; the file is read back only to report a failure.
     private static func runFFmpeg(_ ffmpeg: URL, _ args: [String],
                                   onOutTime: @escaping @Sendable (Double) -> Void) async throws {
+        let errFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vidconform-doctor-stderr-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: errFile) }
         let parser = ProgressParser()
-        let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
+        let result = try await ProcessRunner.run(
+            ffmpeg, ExportProgress.progressArguments(args), stderrTo: errFile
+        ) { chunk in
             if let t = parser.feed(chunk) { onOutTime(t) }
         }
         guard result.status == 0 else {
-            throw ExportError.cutFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
+            let stderr = (try? String(contentsOf: errFile, encoding: .utf8)) ?? ""
+            throw ExportError.cutFailed(stderr.isEmpty ? "exit \(result.status)" : stderr)
         }
     }
 }

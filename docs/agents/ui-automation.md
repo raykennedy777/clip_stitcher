@@ -52,7 +52,7 @@ Action panel buttons:
 | `source.audioSettings` | Audio Settings… |
 | `source.setTarget` | Set as Target Clip |
 | `source.relink` | Relink… |
-| `source.clipDoctor` | Clip Doctor… (enabled only for a single clip with a video damage zone that isn't field-coded) |
+| `source.clipDoctor` | Clip Doctor… (enabled for a single clip with a video damage zone, field-coded included) |
 
 Clip Doctor banner (issue #55) — a non-modal suggestion above the timeline, present
 only while a freshly-detected damaged clip has an undismissed suggestion:
@@ -74,8 +74,11 @@ running → finished):
 | `clipDoctor.destination` | Repaired-copy path (`AXStaticText`, full path in `AXValue`) |
 | `clipDoctor.change` | Change… destination button (configuring only) |
 | `clipDoctor.omitted` | Notice listing non-AV streams not carried (present only when the source has any) |
-| `clipDoctor.repair` | Repair / **Replace** button (label is Replace when the destination already exists) |
+| `clipDoctor.reencodeNotice` | Field-coded (PAFF) re-encode warning + time estimate (present only for a field-coded source; message in `AXValue`) |
+| `clipDoctor.reencodeOptIn` | Toggle that must be on before Repair enables, for a field-coded source (issue #54) |
+| `clipDoctor.repair` | Repair / **Replace** button (label is Replace when the destination already exists; disabled until `clipDoctor.reencodeOptIn` for a field-coded source) |
 | `clipDoctor.progress` | Determinate progress bar (running only) |
+| `clipDoctor.eta` | Time-remaining label beside the progress percent (running only, once estimable; text in `AXValue`) |
 | `clipDoctor.cancel` | Cancel button (running only — cancels the engine, leaves no output) |
 | `clipDoctor.verdict` | The verdict headline (finished only; full message in `AXValue`) |
 | `clipDoctor.status` | Failure message (failed only; message in `AXValue`) |
@@ -85,8 +88,9 @@ running → finished):
 
 A headless run needs no panel: the destination defaults to the `_repaired` sibling, so
 `source.clipDoctor` → `clipDoctor.repair` → poll for the sibling file → read
-`clipDoctor.verdict`. Over the raw AX API `AXValue` text reads back via
-`AXValueDescription`, as with the row badge.
+`clipDoctor.verdict`. For a **field-coded** source, toggle `clipDoctor.reencodeOptIn` on
+first — `clipDoctor.repair` is disabled until then. Over the raw AX API `AXValue` text reads
+back via `AXValueDescription`, as with the row badge.
 
 Clip rows: `source.clip.<index>` (0-based timeline order) is an AX *container*
 (`AXGroup`) — its children keep their own identifiers. Each row's role badge is

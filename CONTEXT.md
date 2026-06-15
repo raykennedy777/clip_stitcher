@@ -146,13 +146,32 @@ _Avoid_: fix, heal, patch, error concealment
 **Clip Doctor**:
 The repair-only export: takes one damaged source file and produces a full-length repaired
 copy in the source's own codec and container — damage zones repaired, nothing trimmed,
-nothing conformed — intended as a clean replacement for the damaged original. Produced as a
-smart render of the whole file, so everything outside the repaired segments is bit-identical
-to the source; audio is rebuilt in the source's own codec with gap silence-fill. Every repair
-is verified by re-running damage detection on the output and showing the verdict — clean
-(zero zones) or a soft warning naming any zone that survived. Unlike the implicit repair every
-export performs, Clip Doctor proves the result rather than only reporting the repair attempt.
+nothing conformed — intended as a clean replacement for the damaged original. A **progressive**
+source is produced as a smart render of the whole file, so everything outside the repaired
+segments is bit-identical to the source; a **field-coded (PAFF)** source takes the
+*damage-to-EOF* path instead (it can't be spliced). Audio is rebuilt in the source's own codec
+with gap silence-fill in both. Every repair is verified by re-running damage detection on the
+output and showing the verdict — clean (zero zones) or a soft warning naming any zone that
+survived. Unlike the implicit repair every export performs, Clip Doctor proves the result
+rather than only reporting the repair attempt.
 _Avoid_: fix tool, restoration, error concealment
+
+**Field-coded (PAFF)**:
+A source that stores each displayed frame as two field pictures (top + bottom), ~2 packets per
+frame, so the app's packet-based frame index runs at 2× the display rate — frame-accurate
+cutting and joining are off by 2× and stay unsupported. Clip Doctor *can* repair a field-coded
+source (issue #54), via damage-to-EOF.
+_Avoid_: interlaced (ambiguous — MBAFF is also interlaced), PAFF without the plain-language gloss
+
+**Damage-to-EOF**:
+How Clip Doctor repairs a field-coded source: copy the clean head byte-for-byte up to the
+keyframe before the first damage, then re-encode everything from there to the file end as MBAFF
+H.264 in one continuous segment (every damage zone dropped + frame-filled). A no-IDR PAFF stream
+has no clean resume seam, so a localized splice is impossible (ADR-0022) — this keeps exactly
+one copy→re-encode transition (the entry). High-quality (CRF 18) but not bit-for-bit identical
+for the re-encoded portion, so it is slower than a smart render and the sheet warns up front and
+requires an explicit opt-in.
+_Avoid_: full re-encode (only true when the damage is early), transcode
 
 ### Editing & UI
 

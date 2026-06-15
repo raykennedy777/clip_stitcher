@@ -306,12 +306,12 @@ struct SourceView: View {
     // MARK: - Clip Doctor (issue #53/#55)
 
     /// Clip Doctor repairs one clip's **video** damage. Enabled for a clip with a
-    /// video-affecting damage zone, not field-coded (that's issue #54's path — the
-    /// engine refuses it), and whose source is reachable. An audio-only gap needs no
-    /// doctor: every export already silence-fills it (issue #44).
+    /// video-affecting damage zone whose source is reachable — including a field-coded
+    /// (PAFF) clip, which takes the full damage-to-EOF re-encode (issue #54, opt-in in the
+    /// sheet). An audio-only gap needs no doctor: every export already silence-fills it
+    /// (issue #44).
     private func canDoctor(_ clip: Clip) -> Bool {
-        clip.fieldCoded != true
-            && (clip.damageZones?.contains(where: \.affectsVideo) ?? false)
+        (clip.damageZones?.contains(where: \.affectsVideo) ?? false)
             && document.importStates[clip.id] != .sourceMissing
             && document.url(for: clip) != nil
     }

@@ -216,4 +216,106 @@ struct ClipDoctorEngineTests {
         #expect(ClipDoctorEngine.suggestionBannerText(clipName: "1844", zoneCount: 9)
                 == "“1844” has 9 damage zones. Clip Doctor can repair it.")
     }
+
+    // MARK: - Field-coded (PAFF) damage-to-EOF plan + encoder (issue #54)
+
+    /// A 2495-frame index with keyframes every 12 frames (a closed-GOP stand-in), so the
+    /// transform's keyframe snap is exercised against a known grid.
+    private func keyframeGridIndex(count: Int = 2495, gop: Int = 12) -> FrameIndex {
+        let pts = (0..<count).map { Double($0) * 0.04 }
+        let flags = (0..<count).map { $0 % gop == 0 }
+        return FrameIndex(pts: pts, keyframeFlags: flags)
+    }
+
+    /// A whole-file plan that copies the clean head, repairs around an interior zone, then
+    /// copies the tail collapses to: copy head to the seam keyframe, one re-encode to EOF.
+    /// The seam snaps back to the keyframe at/before the planner's leading-picture-adjusted
+    /// first-repair start (746 → keyframe 744 on a 12-frame grid).
+    @Test func damageToEOFCopiesToTheSeamKeyframeThenReencodesToTheEnd() {
+        let index = keyframeGridIndex()
+        let zones = [DamageZone(start: 30.0, end: 31.0, affectsVideo: true)]
+        let segments: [PlannedSegment] = [
+            PlannedSegment(kind: .copy, range: 0..<746, outCutKeyframe: 756),
+            PlannedSegment(kind: .reEncode, range: 746..<860, damage: zones),
+            PlannedSegment(kind: .copy, range: 860..<2495),
+        ]
+        let plan = ClipDoctorEngine.damageToEOFPlan(segments, index: index, zones: zones)
+        #expect(plan.count == 2)
+        #expect(plan[0].kind == .copy)
+        #expect(plan[0].range == 0..<744)                     // snapped to the keyframe ≤ 746
+        #expect(plan[1].kind == .reEncode)
+        #expect(plan[1].range == 744..<2495)                  // one re-encode from the seam to EOF
+        #expect(plan[1].outCutKeyframe == nil)
+        #expect(plan[1].damage == zones)                      // carries every video zone
+    }
+
+    /// Several zones all fold into the single tail re-encode; only video-affecting zones
+    /// are carried, and the seam is the keyframe before the first repair.
+    @Test func damageToEOFFoldsEveryVideoZoneIntoOneTailSegment() {
+        let index = keyframeGridIndex()
+        let z1 = DamageZone(start: 30.0, end: 31.0, affectsVideo: true)
+        let z2 = DamageZone(start: 60.0, end: 61.0, affectsVideo: true)
+        let audioOnly = DamageZone(start: 90.0, end: 91.0, affectsVideo: false)
+        let segments: [PlannedSegment] = [
+            PlannedSegment(kind: .copy, range: 0..<744, outCutKeyframe: 744),
+            PlannedSegment(kind: .reEncode, range: 744..<860, damage: [z1]),
+            PlannedSegment(kind: .copy, range: 860..<1500),
+            PlannedSegment(kind: .reEncode, range: 1500..<1600, damage: [z2]),
+            PlannedSegment(kind: .copy, range: 1600..<2495),
+        ]
+        let plan = ClipDoctorEngine.damageToEOFPlan(segments, index: index, zones: [z1, z2, audioOnly])
+        #expect(plan.count == 2)
+        #expect(plan[0].range == 0..<744)
+        #expect(plan[1].range == 744..<2495)
+        #expect(plan[1].damage == [z1, z2])                   // audio-only zone dropped
+    }
+
+    /// Damage before the first keyframe leaves no head copy — the repair is a single full
+    /// re-encode (correct, just no longer minimal).
+    @Test func damageToEOFWithNoCleanHeadIsAFullReencode() {
+        let index = keyframeGridIndex()
+        let zones = [DamageZone(start: 0.0, end: 0.2, affectsVideo: true)]
+        let segments: [PlannedSegment] = [
+            PlannedSegment(kind: .reEncode, range: 0..<2495, damage: zones),
+        ]
+        let plan = ClipDoctorEngine.damageToEOFPlan(segments, index: index, zones: zones)
+        #expect(plan.count == 1)
+        #expect(plan[0].kind == .reEncode)
+        #expect(plan[0].range == 0..<2495)
+    }
+
+    /// `-top` follows the source scan order: top-field-first stays 1, bottom-field-first 0.
+    @Test func mbaffRepairArgsCarryTheInterlaceFlagsCrf18AndTopFromFieldOrder() {
+        let tff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt")
+        #expect(tff.contains("libx264"))
+        #expect(tff[tff.firstIndex(of: "-flags")! + 1] == "+ildct+ilme")
+        #expect(tff[tff.firstIndex(of: "-top")! + 1] == "1")
+        #expect(tff[tff.firstIndex(of: "-crf")! + 1] == "18")        // fixed, visually lossless
+        #expect(tff[tff.firstIndex(of: "-forced-idr")! + 1] == "1")  // clean IDR entry seam
+        let params = tff[tff.firstIndex(of: "-x264-params")! + 1]
+        #expect(params.contains("ref=5") && params.contains("open_gop=0") && params.contains("b-pyramid=0"))
+        #expect(tff[tff.firstIndex(of: "-bsf:v")! + 1] == "dump_extra")
+
+        let bff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "bb")
+        #expect(bff[bff.firstIndex(of: "-top")! + 1] == "0")
+    }
+
+    /// The field-coded re-encode notice states full re-encode + not bit-identical, scales
+    /// its estimate off the clip duration, and stays banned-word clean.
+    @Test func fieldCodedNoticeWarnsFullReencodeAndScalesTheEstimate() {
+        // A 4.8 h capture: ~1 h typical, up to ~5 h worst (the measured band).
+        let long = ClipDoctorEngine.fieldCodedReencodeNotice(clipName: "1842", duration: 17_280)
+        #expect(long.contains("not bit-for-bit identical"))
+        #expect(long.contains("an hour"))
+        #expect(long.contains("5 hours"))
+        // No banned repair words.
+        for banned in ["fix", "heal", "patch", "error concealment"] {
+            #expect(!long.lowercased().contains(banned))
+        }
+        // Short clip rounds to a small phrase; missing duration omits the estimate.
+        #expect(ClipDoctorEngine.fieldCodedReencodeNotice(clipName: "x", duration: 100)
+            .contains("a minute or two"))
+        #expect(!ClipDoctorEngine.fieldCodedReencodeNotice(clipName: "x", duration: nil)
+            .contains("Expect"))
+    }
 }

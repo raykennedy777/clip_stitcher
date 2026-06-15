@@ -45,9 +45,10 @@ final class ProjectDocument: ReferenceFileDocument {
     @Published var exportStatus: ExportStatus = .idle
     /// Clips whose import-time damage detection just finished with repairable damage
     /// (issue #55) — the Source view shows a one-time, dismissible banner suggesting
-    /// Clip Doctor for the first still-valid entry. Runtime-only; field-coded clips
-    /// (issue #54's path) and audio-only gaps are never enqueued. A FIFO queue so a
-    /// burst of imports surfaces one banner at a time, never a modal pile-up.
+    /// Clip Doctor for the first still-valid entry. Runtime-only; audio-only gaps are
+    /// never enqueued (every export silence-fills them), but field-coded clips now are
+    /// (issue #54's full re-encode path). A FIFO queue so a burst of imports surfaces one
+    /// banner at a time, never a modal pile-up.
     @Published var doctorSuggestions: [Clip.ID] = []
     /// True once the user confirmed a cancel (issue #32) — disables the cancel button
     /// while the asynchronous termination plays out. Reset when an export starts.
@@ -753,10 +754,10 @@ final class ProjectDocument: ReferenceFileDocument {
                 p.clips[i].damageZones = zones
                 commit(p)
                 // Suggest Clip Doctor for a freshly damaged, repairable clip (issue
-                // #55): only a video-affecting zone (audio-only gaps are already
-                // silence-filled by every export, issue #44) on a non-field-coded
-                // source (field-coded is issue #54's path, refused by the engine).
-                if zones.contains(where: \.affectsVideo), p.clips[i].fieldCoded != true {
+                // #55): any video-affecting zone (audio-only gaps are already
+                // silence-filled by every export, issue #44). Field-coded sources are
+                // included — they take the full damage-to-EOF re-encode (issue #54).
+                if zones.contains(where: \.affectsVideo) {
                     doctorSuggestions.append(id)
                 }
             }

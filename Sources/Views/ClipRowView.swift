@@ -171,12 +171,13 @@ struct ClipRowView: View {
 
     /// The field-coded (PAFF) warning (issue #46): the source stores two field
     /// pictures per displayed frame, so the app's frame numbering — and with it
-    /// frame-accurate cutting and export — is off by 2× on this file. Plain
-    /// language; warn-only, nothing is blocked.
+    /// frame-accurate cutting and joining — is off by 2× on this file. Clip Doctor can
+    /// still repair it (issue #54, a full re-encode); only cutting/joining stay out.
+    /// Plain language; warn-only, nothing is blocked.
     @ViewBuilder
     private var fieldCodedWarning: some View {
         if clip.fieldCoded == true {
-            Label("This file stores two half-pictures per frame — frame-accurate cutting and export aren’t supported for it yet.",
+            Label("This file stores two half-pictures per frame — frame-accurate cutting and joining aren’t supported for it yet (Clip Doctor can still repair it).",
                   systemImage: "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.orange)

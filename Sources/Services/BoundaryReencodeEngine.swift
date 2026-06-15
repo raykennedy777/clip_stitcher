@@ -38,6 +38,37 @@ enum BoundaryReencodeEngine {
         return args
     }
 
+    /// libx264 encode args for the **field-coded (PAFF) damage-to-EOF repair** (issue #54,
+    /// ADR-0022). A no-IDR PAFF source cannot be smart-render spliced — the MBAFF→PAFF
+    /// resume seam is a hard container-layer wall, and this ffmpeg build has no PAFF-capable
+    /// H.264 encoder — so Clip Doctor copies the clean head byte-for-byte and re-encodes
+    /// everything from the first damage to EOF as **MBAFF** H.264 (one continuous segment).
+    /// This is the encoder for that single tail re-encode; the copy head carries the
+    /// source's own field pictures untouched.
+    ///
+    /// The recipe was de-risked end-to-end on a real PAFF slice (decodes `-xerror` to EOF
+    /// clean, seam clean, `field_order` preserved, strict-DTS clean once muxed):
+    ///   - `+ildct+ilme` + `-top` (from `field_order`: `tt`/`tb` ⇒ top-field-first ⇒ 1,
+    ///     `bb`/`bt` ⇒ 0) keep the output interlaced TFF/BFF matching the source scan;
+    ///   - **`-crf 18` is a fixed engine constant**, not a user control — visually lossless
+    ///     (VMAF ≈ 99, ~1.33× source bitrate), well above the app's crf-23 default, the
+    ///     quality a repair-only export owes a broadcast capture;
+    ///   - `-forced-idr 1` + `open_gop=0` make the tail's first frame a clean IDR so the
+    ///     single copy→MBAFF *entry* seam re-initialises the decoder;
+    ///   - `ref=5:level=4.0` matches the source's out-of-spec 5-ref-at-L4.0 cadence,
+    ///     `b-pyramid=0` avoids the MKV/TS duplicate-PTS collapse (issue #2), `keyint=25`
+    ///     keeps seekable GOPs, `scenecut=0` keeps them regular;
+    ///   - `dump_extra` repeats SPS/PPS into the stream so the entry seam re-inits cleanly.
+    static func mbaffRepairVideoArgs(fieldOrder: String?) -> [String] {
+        let top = (fieldOrder == "bb" || fieldOrder == "bt") ? "0" : "1"
+        return [
+            "-c:v", "libx264", "-flags", "+ildct+ilme", "-top", top,
+            "-preset", "medium", "-crf", "18", "-forced-idr", "1",
+            "-x264-params", "ref=5:keyint=25:scenecut=0:open_gop=0:b-pyramid=0:level=4.0",
+            "-bsf:v", "dump_extra",
+        ]
+    }
+
     /// ffmpeg args to re-encode the partial-GOP presentation range `[range.lowerBound,
     /// range.upperBound)` into `output`. To avoid decoding the whole file, it input-seeks
     /// to the keyframe at/before the range start (which the decoder emits as `n = 0`),
@@ -313,6 +344,7 @@ enum BoundaryReencodeEngine {
         encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
         trackTimescale: Int? = nil, containerStart: Double = 0, frameRate: String? = nil,
         sourceDamaged: Bool = false, copyStrategy: CopyStrategy = .segmentMux,
+        fieldCoded: Bool = false,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
@@ -438,10 +470,29 @@ enum BoundaryReencodeEngine {
         } else {
             let joined = work.appendingPathComponent("c\(clipIndex)_joined.\(ext)")
             let listFile = work.appendingPathComponent("c\(clipIndex)_concat.txt")
-            try ExportEngine.concatListContents(pieces: pieces, durations: segmentSpans(plan, index: index))
+            // The seam-closing duration directive is `pts[hi] − pts[lo]`, exact only when
+            // the index is presentation-ordered and uniform. A field-coded (PAFF) copy
+            // head's field packets are reorder-interleaved with sub-frame PTS, so that
+            // span over-estimates the head's true display duration and the directive opens
+            // a gap at the copy→MBAFF seam (the re-scan then reads the gap as damage). The
+            // PAFF copy head is reset-timestamp and its container duration *is* its true
+            // span, so omit the directive and let the demuxer place the tail on it.
+            let durations = fieldCoded ? [] : segmentSpans(plan, index: index)
+            try ExportEngine.concatListContents(pieces: pieces, durations: durations)
                 .write(to: listFile, atomically: true, encoding: .utf8)
             try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
             result = joined
+        }
+        // A field-coded (PAFF) damage-to-EOF piece (issue #54) can't go through the
+        // standard gate: its frame count mixes the PAFF copy head (2 field packets per
+        // displayed frame) with the MBAFF tail (1 packet per frame), and the head's 0.02 s
+        // field cadence reads as duplicates against the tail's 0.04 s median in
+        // `timestampDefect` — both false-fail. The decode check is the one that catches
+        // what matters here (a corrupt copy→MBAFF entry seam), so that is the whole gate;
+        // duration and zero-zones are confirmed by the engine's post-mux re-scan.
+        if fieldCoded {
+            try await verifyFieldCodedPiece(ffmpeg, result)
+            return result
         }
         // Per-segment expected output counts: a copy or plain re-encode produces
         // exactly its frame range; a repaired segment produces its slot budget
@@ -524,10 +575,18 @@ enum BoundaryReencodeEngine {
            let last = plan.lastIndex(where: { !$0.damage.isEmpty }) {
             outputCounts[last] -= expectedFrames - actual
         }
+        // stderr to a file, not the default pipe: a damaged source's piece decodes with a
+        // per-frame warning flood that overruns the OS pipe buffer and deadlocks the
+        // `-xerror` pass at 0% CPU on a multi-hour repair (`ProcessRunner` only drains a
+        // stderr pipe at termination — issue #54).
+        let errFile = piece.deletingLastPathComponent()
+            .appendingPathComponent("verify-stderr-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: errFile) }
         let decode = try await ProcessRunner.run(
-            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"],
+            stderrTo: errFile)
         guard decode.status == 0 else {
-            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
+            let detail = (try? String(contentsOf: errFile, encoding: .utf8)).flatMap {
                 $0.isEmpty ? nil : $0
             } ?? "decode exited \(decode.status)"
             throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
@@ -536,6 +595,37 @@ enum BoundaryReencodeEngine {
         if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts,
                                                      outputCounts: outputCounts) {
             throw ExportError.verificationFailed("The cut produced irregular timestamps: \(reason)")
+        }
+    }
+
+    /// Verifies a **field-coded (PAFF) damage-to-EOF** piece before it ships (issue #54).
+    /// Just the decode check from `verifyPiece` — a full `-xerror` decode pass from start
+    /// to EOF, which catches the one failure mode this repair can have: a corrupt
+    /// copy→MBAFF entry seam (the proven-impossible resume seam can't occur, there is only
+    /// the one entry transition). The frame-count and timestamp checks are deliberately
+    /// dropped: a PAFF copy head packs two field packets per displayed frame while the
+    /// MBAFF tail packs one, so neither the packet count nor the head's 0.02 s field
+    /// cadence reconciles with the tail under `verifyPiece`'s display-frame accounting —
+    /// both would false-fail a correct piece. The "non monotonically increasing dts to
+    /// muxer" line the null muxer prints on field-coded rescale is benign (exit 0,
+    /// de-risked); real DTS is monotonic once muxed to the container. Duration preservation
+    /// and a zero-zones verdict are confirmed by the engine's post-mux re-scan.
+    private static func verifyFieldCodedPiece(_ ffmpeg: URL, _ piece: URL) async throws {
+        // stderr to a file, not the default pipe: a clean field-coded piece still emits the
+        // benign mmco/5-ref warnings on every frame, so a multi-hour piece floods stderr
+        // past the OS pipe buffer and `-xerror -f null -` deadlocks at 0% CPU mid-decode
+        // (issue #54 — `ProcessRunner` only drains a stderr pipe at termination).
+        let errFile = piece.deletingLastPathComponent()
+            .appendingPathComponent("verify-stderr-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: errFile) }
+        let decode = try await ProcessRunner.run(
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"],
+            stderrTo: errFile)
+        guard decode.status == 0 else {
+            let detail = (try? String(contentsOf: errFile, encoding: .utf8)).flatMap {
+                $0.isEmpty ? nil : $0
+            } ?? "decode exited \(decode.status)"
+            throw ExportError.verificationFailed("A decode check failed on the repaired video.\n\(detail)")
         }
     }
 

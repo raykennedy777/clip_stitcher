@@ -9,7 +9,7 @@ import AppKit
 final class ClipDoctorModel: ObservableObject {
     enum Phase {
         case configuring
-        case running(progress: Double)
+        case running(progress: Double, eta: String?)
         case finished(ClipDoctorEngine.Result)
         case failed(String)
     }
@@ -27,8 +27,16 @@ final class ClipDoctorModel: ObservableObject {
     /// when the source has none (probed lazily when the sheet appears).
     @Published private(set) var omittedStreamsNotice: String?
     @Published private(set) var phase: Phase = .configuring
+    /// A field-coded (PAFF) source is re-encoded in full (issue #54) — slower and not
+    /// bit-identical — so the sheet requires an explicit opt-in before Repair runs, set
+    /// by the configuration toggle. Always false (and unused) for a progressive source.
+    @Published var fieldCodedAcknowledged = false
 
     private var task: Task<Void, Never>?
+    /// Wall-clock start of the running repair and its damped estimator, for the
+    /// time-remaining label (issue #54) — the same infra the main export uses.
+    private var repairStartedAt = Date()
+    private var etaEstimator = ExportProgress.ETAEstimator()
 
     init(document: ProjectDocument, clipID: Clip.ID) {
         self.document = document
@@ -60,9 +68,32 @@ final class ClipDoctorModel: ObservableObject {
     }
 
     var progress: Double {
-        if case .running(let p) = phase { return p }
+        if case .running(let p, _) = phase { return p }
         return 0
     }
+
+    /// The damped "About X remaining" label while running — nil until there's enough
+    /// signal, or when not running (issue #54).
+    var eta: String? {
+        if case .running(_, let eta) = phase { return eta }
+        return nil
+    }
+
+    /// Whether the source needs the field-coded re-encode (issue #54): full re-encode,
+    /// not smart render. Drives the up-front notice and the explicit opt-in.
+    var isFieldCoded: Bool { clip?.fieldCoded == true }
+
+    /// The up-front field-coded re-encode notice (issue #54), nil for a progressive
+    /// source. Shown before Repair runs; the user must also acknowledge it.
+    var fieldCodedReencodeNotice: String? {
+        guard let clip, isFieldCoded else { return nil }
+        return ClipDoctorEngine.fieldCodedReencodeNotice(
+            clipName: clip.displayName, duration: clip.duration)
+    }
+
+    /// Whether Repair may start: always true for a progressive source; a field-coded
+    /// source needs the explicit opt-in first (issue #54).
+    var canRepair: Bool { !isFieldCoded || fieldCodedAcknowledged }
 
     var result: ClipDoctorEngine.Result? {
         if case .finished(let r) = phase { return r }
@@ -102,7 +133,9 @@ final class ClipDoctorModel: ObservableObject {
         guard let clip else { phase = .failed("Source file not found."); return }
         let overwrite = destinationExists
         let dest = destination
-        phase = .running(progress: 0)
+        repairStartedAt = Date()
+        etaEstimator = ExportProgress.ETAEstimator()
+        phase = .running(progress: 0, eta: nil)
         task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -125,10 +158,14 @@ final class ClipDoctorModel: ObservableObject {
         }
     }
 
-    /// Keeps the progress bar monotonic — progress arrives from a background reader.
+    /// Keeps the progress bar monotonic — progress arrives from a background reader —
+    /// and refreshes the damped time-remaining label (issue #54), mirroring the main
+    /// export's ETA path.
     private func advance(_ p: Double) {
-        guard case .running(let shown) = phase, p > shown else { return }
-        phase = .running(progress: p)
+        guard case .running(let shown, _) = phase, p > shown else { return }
+        let remaining = etaEstimator.update(
+            fraction: p, elapsed: Date().timeIntervalSince(repairStartedAt))
+        phase = .running(progress: p, eta: ExportProgress.etaLabel(remaining: remaining, fraction: p))
     }
 
     /// Cancels the running repair — `ProcessRunner` terminates the live ffmpeg, the

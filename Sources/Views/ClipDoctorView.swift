@@ -55,6 +55,25 @@ struct ClipDoctorView: View {
 
     private var configuration: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Field-coded (PAFF) sources are re-encoded in full (issue #54): say so up
+            // front, with a time estimate, and require an explicit opt-in before Repair.
+            if let notice = model.fieldCodedReencodeNotice {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("clipDoctor.reencodeNotice")
+                        .accessibilityValue(Text(notice))
+                    Toggle("Re-encode the whole clip and continue", isOn: $model.fieldCodedAcknowledged)
+                        .disabled(model.isRunning)
+                        .accessibilityIdentifier("clipDoctor.reencodeOptIn")
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("Repaired copy")
                     .font(.subheadline.weight(.semibold))
@@ -93,10 +112,18 @@ struct ClipDoctorView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: model.progress)
                         .accessibilityIdentifier("clipDoctor.progress")
-                    Text(model.progress, format: .percent.precision(.fractionLength(0)))
-                        .font(.callout)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text(model.progress, format: .percent.precision(.fractionLength(0)))
+                            .monospacedDigit()
+                        if let eta = model.eta {
+                            Text("·")
+                            Text(eta)
+                                .accessibilityIdentifier("clipDoctor.eta")
+                                .accessibilityValue(Text(eta))
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -187,6 +214,7 @@ struct ClipDoctorView: View {
                 Button(model.destinationExists ? "Replace" : "Repair") { model.repair() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(!model.canRepair)
                     .accessibilityIdentifier("clipDoctor.repair")
             case .running:
                 Spacer()
