@@ -75,6 +75,30 @@ too; damage-to-EOF degenerates to it only when the damage is early).
   the true damage extent — a seek-anchored decode from a nearby clean keyframe recovers in ~1
   GOP. Detection must not treat it as real downstream damage.
 
+## Layering: the specialization stays in Clip Doctor (issue #58)
+
+A code review of this work asked whether the damage-to-EOF specialization should move *up*
+into the shared planner. Two pieces were examined and both were **deliberately kept where they
+are**:
+
+- **Damage-to-EOF is not an `ExportPlanner.VideoTreatment` case.** `VideoTreatment` is the
+  join/conform export's verdict (`smartRender` | `conform`), switched over by `planItem` and
+  `copyShare`. That path **can never field-code** — a field-coded source can't be cut or joined,
+  only doctored — so a `.damageToEOF` case would force those call sites to handle a verdict they
+  can never receive: a dead branch in a general-purpose type carrying a Clip-Doctor-only concept.
+  Damage-to-EOF is a Clip Doctor word (see CONTEXT.md), so the transform lives in
+  `ClipDoctorEngine`. The one real risk the review named — the plan and its MBAFF encoder being
+  set in separate statements and drifting apart — is closed by `ClipDoctorEngine.fieldCodedRepair`,
+  which returns the `(plan, encoder)` pair atomically.
+- **The verify-bypass stays a caller-supplied flag, not a plan-shape inference.** `verifyPiece`'s
+  frame-count and timestamp gates are skipped for the field-coded piece via a `fieldCoded` flag
+  threaded into `produceVideoPiece`. The review suggested deriving the skip from the plan's
+  segment shape instead, but the gates false-fail for a reason invisible in the plan: the copy
+  head is PAFF (two field packets per displayed frame) while the MBAFF tail is one — a *media
+  format* property of the source. A progressive repair plan has the identical copy-head +
+  re-encode-tail shape and its gates **must** still run, so shape can't distinguish the two. The
+  flag names the true cause; it is kept.
+
 ## Consequences
 
 - **Field-coded clips are now full Clip Doctor inputs.** The Source action button, context menu,

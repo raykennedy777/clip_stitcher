@@ -558,6 +558,26 @@ enum BoundaryReencodeEngine {
     ///      *source's* timestamp pattern instead — a faithful copy of an irregular source
     ///      is correct output, not a defect (issue #19, plan-aware
     ///      `ExportEngine.timestampDefect`).
+    /// A full `-xerror` decode pass from the piece's start to EOF — the one check shared by
+    /// `verifyPiece` (run before its frame-count/timestamp gates) and `verifyFieldCodedPiece`
+    /// (its whole gate). It catches a corrupt seam (e.g. orphaned leading pictures, or a bad
+    /// copy→MBAFF entry) that a frame count alone would pass over. A damaged source's piece
+    /// decodes with a per-frame warning flood even at `-v error`; `ProcessRunner` drains
+    /// stderr live into a bounded tail (issue #59), so the `-f null -` pass no longer backs up
+    /// the OS pipe and deadlocks at 0% CPU on a multi-hour repair — the failure detail is the
+    /// tail's final fatal lines. `failureLabel` opens the thrown message so each caller names
+    /// what failed (a cut vs the repaired video).
+    private static func decodeCheck(_ ffmpeg: URL, _ piece: URL, failureLabel: String) async throws {
+        let decode = try await ProcessRunner.run(
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
+        guard decode.status == 0 else {
+            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
+                $0.isEmpty ? nil : $0
+            } ?? "decode exited \(decode.status)"
+            throw ExportError.verificationFailed("\(failureLabel)\n\(detail)")
+        }
+    }
+
     private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedCounts: [Int],
                                     shortfallAllowance: Int = 0,
                                     plan: [PlannedSegment], sourcePts: [Double]) async throws {
@@ -575,18 +595,7 @@ enum BoundaryReencodeEngine {
            let last = plan.lastIndex(where: { !$0.damage.isEmpty }) {
             outputCounts[last] -= expectedFrames - actual
         }
-        // A damaged source's piece decodes with a per-frame warning flood; `ProcessRunner`
-        // drains stderr live into a bounded tail (issue #59), so the in-memory pipe no longer
-        // backs up and deadlocks the `-xerror` pass at 0% CPU on a multi-hour repair — the
-        // failure detail is the tail's final fatal lines.
-        let decode = try await ProcessRunner.run(
-            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
-        guard decode.status == 0 else {
-            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
-                $0.isEmpty ? nil : $0
-            } ?? "decode exited \(decode.status)"
-            throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
-        }
+        try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the cut.")
         let pts = try await FrameIndexer.buildIndex(url: piece).pts
         if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts,
                                                      outputCounts: outputCounts) {
@@ -607,18 +616,7 @@ enum BoundaryReencodeEngine {
     /// de-risked); real DTS is monotonic once muxed to the container. Duration preservation
     /// and a zero-zones verdict are confirmed by the engine's post-mux re-scan.
     private static func verifyFieldCodedPiece(_ ffmpeg: URL, _ piece: URL) async throws {
-        // A clean field-coded piece still emits the benign mmco/5-ref warnings on every
-        // frame, a multi-hour flood; `ProcessRunner` drains stderr live into a bounded tail
-        // (issue #59), so `-xerror -f null -` no longer backs up the pipe and deadlocks at
-        // 0% CPU mid-decode — the failure detail is the tail's final fatal lines.
-        let decode = try await ProcessRunner.run(
-            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
-        guard decode.status == 0 else {
-            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
-                $0.isEmpty ? nil : $0
-            } ?? "decode exited \(decode.status)"
-            throw ExportError.verificationFailed("A decode check failed on the repaired video.\n\(detail)")
-        }
+        try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the repaired video.")
     }
 
     /// The clip's mean frame interval in seconds — exact under CFR; a timestamp-dirty

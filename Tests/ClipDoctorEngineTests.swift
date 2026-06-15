@@ -284,6 +284,24 @@ struct ClipDoctorEngineTests {
         #expect(plan[0].range == 0..<2495)
     }
 
+    /// The field-coded specialization pairs the damage-to-EOF plan with the MBAFF tail
+    /// encoder atomically (issue #58): the plan is the `damageToEOFPlan` collapse and the
+    /// encoder is `mbaffRepairVideoArgs`, so a caller can't mismatch a damage-to-EOF plan
+    /// with the source-matched progressive args.
+    @Test func fieldCodedRepairPairsTheDamageToEOFPlanWithTheMbaffEncoder() {
+        let index = keyframeGridIndex()
+        let zones = [DamageZone(start: 30.0, end: 31.0, affectsVideo: true)]
+        let segments: [PlannedSegment] = [
+            PlannedSegment(kind: .copy, range: 0..<746, outCutKeyframe: 756),
+            PlannedSegment(kind: .reEncode, range: 746..<860, damage: zones),
+            PlannedSegment(kind: .copy, range: 860..<2495),
+        ]
+        let (plan, encoder) = ClipDoctorEngine.fieldCodedRepair(
+            from: segments, index: index, zones: zones, fieldOrder: "tt")
+        #expect(plan == ClipDoctorEngine.damageToEOFPlan(segments, index: index, zones: zones))
+        #expect(encoder == BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt"))
+    }
+
     /// `-top` follows the source scan order: top-field-first stays 1, bottom-field-first 0.
     @Test func mbaffRepairArgsCarryTheInterlaceFlagsCrf18AndTopFromFieldOrder() {
         let tff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt")

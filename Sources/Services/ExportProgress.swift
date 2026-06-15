@@ -131,10 +131,18 @@ enum ExportProgress {
             let m = max(1, Int((remaining / 60).rounded(.up)))
             return m == 1 ? "About a minute remaining" : "About \(m) minutes remaining"
         }
-        let halfHours = max(2, Int((remaining / 1800).rounded()))
+        return "About \(halfHourPhrase(remaining)) remaining"
+    }
+
+    /// A duration rounded to half-hour steps as a bare phrase: "an hour", "2 hours",
+    /// "1½ hours" (HIG: round numbers, no false precision). The floor is one hour — callers
+    /// reach this only above their own minute band. Shared by the live ETA label and Clip
+    /// Doctor's up-front field-coded estimate so the two can't round the same span differently.
+    static func halfHourPhrase(_ seconds: Double) -> String {
+        let halfHours = max(2, Int((seconds / 1800).rounded()))
         let h = halfHours / 2
-        if halfHours % 2 == 1 { return "About \(h)½ hours remaining" }
-        return h == 1 ? "About an hour remaining" : "About \(h) hours remaining"
+        if halfHours % 2 == 1 { return "\(h)½ hours" }
+        return h == 1 ? "an hour" : "\(h) hours"
     }
 }
 

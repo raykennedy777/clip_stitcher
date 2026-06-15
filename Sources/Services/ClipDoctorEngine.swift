@@ -123,6 +123,22 @@ enum ClipDoctorEngine {
         return plan
     }
 
+    /// The field-coded (PAFF) repair specialization (issue #54, ADR-0022): the planner's
+    /// generic whole-file smart-render plan collapsed to the damage-to-EOF shape, **paired
+    /// with** the MBAFF tail encoder that re-encodes from the seam. They are returned together
+    /// so a caller can't pair a damage-to-EOF plan with the source-matched progressive encoder
+    /// (or vice versa) and ship a broken tail. Damage-to-EOF is a Clip-Doctor-only concept — it
+    /// never reaches the join/conform export's `ExportPlanner.VideoTreatment` verdict, which
+    /// only ever sees smart-render or conform — so the specialization lives here rather than as
+    /// a planner treatment case (the layering decision recorded in ADR-0022). Pure; unit-tested.
+    static func fieldCodedRepair(
+        from segments: [PlannedSegment], index: FrameIndex, zones: [DamageZone],
+        fieldOrder: String?
+    ) -> (plan: [PlannedSegment], encoder: [String]) {
+        (damageToEOFPlan(segments, index: index, zones: zones),
+         BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: fieldOrder))
+    }
+
     /// Resolves one probed audio stream to a repair track (issue #52): the source codec's
     /// ffmpeg encoder (HE-AAC → AudioToolbox `aac_at` so the profile survives — the native
     /// `aac` encoder is LC-only), the source bitrate when known (a per-channel default
@@ -224,17 +240,16 @@ enum ClipDoctorEngine {
     }
 
     /// A rounded, no-false-precision duration phrase for the re-encode estimate (HIG):
-    /// "a minute or two", whole minutes, then half-hour steps.
+    /// "a minute or two", whole minutes, then half-hour steps. The half-hour ladder is
+    /// `ExportProgress.halfHourPhrase` — the same rounding the live ETA label uses, so the
+    /// up-front field-coded estimate and the progress readout can't drift apart.
     private static func roughDurationPhrase(_ seconds: Double) -> String {
         if seconds < 90 { return "a minute or two" }
         if seconds < 3300 {
             let m = max(2, Int((seconds / 60).rounded()))
             return "\(m) minutes"
         }
-        let halfHours = max(2, Int((seconds / 1800).rounded()))
-        let h = halfHours / 2
-        if halfHours % 2 == 1 { return "\(h)½ hours" }
-        return h == 1 ? "an hour" : "\(h) hours"
+        return ExportProgress.halfHourPhrase(seconds)
     }
 
     /// The import banner's suggestion line (issue #55): names the freshly-detected
@@ -312,8 +327,9 @@ enum ClipDoctorEngine {
         let plan: [PlannedSegment]
         let encoder: [String]
         if fieldCoded {
-            plan = damageToEOFPlan(segments, index: index, zones: clip.damageZones ?? [])
-            encoder = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: video.fieldOrder)
+            (plan, encoder) = fieldCodedRepair(
+                from: segments, index: index, zones: clip.damageZones ?? [],
+                fieldOrder: video.fieldOrder)
         } else {
             plan = segments
             encoder = progressiveEncoder
