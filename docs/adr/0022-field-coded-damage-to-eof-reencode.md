@@ -75,6 +75,24 @@ too; damage-to-EOF degenerates to it only when the damage is early).
   the true damage extent — a seek-anchored decode from a nearby clean keyframe recovers in ~1
   GOP. Detection must not treat it as real downstream damage.
 
+## Field order is measured, not assumed (issue #60)
+
+The MBAFF tail's `-top` flag must match the source scan order, or the whole damage-to-EOF tail
+is field-reversed (combing/judder on motion) — and the auto-verify re-scan does *not* inspect
+field order, so it would still report **clean**. The encoder originally derived `-top` straight
+from the probed `field_order`, defaulting anything that wasn't an explicit `bb`/`bt` (including a
+missing or `unknown` label) to top-first. That fails silently-wrong for a bottom-first source
+whose label is absent.
+
+So: a **definite** probed `field_order` (`tt`/`tb`/`bb`/`bt`) is trusted as-is — the fast path,
+no extra decode, and the case the real labelled captures take. When it is missing/`unknown`/
+unrecognised, the order is **measured** with a short `idet` pass and only used when one polarity
+clearly dominates a mostly-interlaced sample (≥ 90 %); otherwise the repair **refuses**
+(`DoctorError.fieldOrderUndetermined`) rather than guess — consistent with the conservative
+H.264-only guard (issue #57). De-risked in the shell on the real PAFF capture: `idet` reports TFF
+unanimously (501/501 at the head, 801/801 mid-file), matching the metadata `tt`; the summary logs
+at `-v info` (suppressed at `-v error`) and lands in `ProcessRunner`'s trailing tail.
+
 ## Layering: the specialization stays in Clip Doctor (issue #58)
 
 A code review of this work asked whether the damage-to-EOF specialization should move *up*

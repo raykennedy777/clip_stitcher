@@ -68,6 +68,10 @@ enum ClipDoctorEngine {
     enum DoctorError: LocalizedError {
         case destinationExists(URL)
         case destinationIsSource
+        /// A field-coded source whose scan order is neither labelled nor measurable (issue
+        /// #60): repairing it would risk re-encoding the damage-to-EOF tail with the wrong
+        /// field polarity (combing on motion), which the auto-verify can't catch — so refuse.
+        case fieldOrderUndetermined
 
         var errorDescription: String? {
             switch self {
@@ -75,6 +79,9 @@ enum ClipDoctorEngine {
                 return "A repaired file already exists at \(url.lastPathComponent); it was not replaced."
             case .destinationIsSource:
                 return "The repaired file would overwrite the source; refusing."
+            case .fieldOrderUndetermined:
+                return "This clip’s field order couldn’t be determined, so it can’t be safely repaired — "
+                    + "repairing it could reverse the fields. It needs a known top- or bottom-field-first scan order."
             }
         }
     }
@@ -137,6 +144,67 @@ enum ClipDoctorEngine {
     ) -> (plan: [PlannedSegment], encoder: [String]) {
         (damageToEOFPlan(segments, index: index, zones: zones),
          BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: fieldOrder))
+    }
+
+    // MARK: - Field order detection (#60)
+
+    /// Whether a probed `field_order` is a definite scan order the repair can trust without
+    /// measuring (issue #60): ffprobe's four interlaced labels. `nil`, `"unknown"`,
+    /// `"progressive"` (a field-coded source mislabelled), or any unrecognised token is **not**
+    /// definite — the MBAFF tail's `-top` must be *measured* with `idet` rather than defaulting
+    /// to top-first, which would field-reverse a bottom-first source's whole damage-to-EOF tail.
+    static func isDefiniteFieldOrder(_ fieldOrder: String?) -> Bool {
+        switch fieldOrder {
+        case "tt", "tb", "bb", "bt": return true
+        default: return false
+        }
+    }
+
+    /// ffmpeg `idet` field-order detection pass (issue #60): decode a short run of frames
+    /// through the interlace detector so it tallies TFF vs BFF. `-v info` so the filter prints
+    /// its cumulative summary (it logs at info level — `-v error` suppresses it, de-risked); a
+    /// damaged source's per-frame decoder warnings are auto-deduplicated by ffmpeg and bounded
+    /// by the frame budget, and `ProcessRunner`'s tail keeps the trailing summary regardless.
+    /// Run only when the source's own `field_order` is indeterminate (`isDefiniteFieldOrder`
+    /// false) — a labelled source keeps the metadata fast path. De-risked on the real PAFF
+    /// capture: `idet` reports TFF unanimously (501/501, 801/801), matching the metadata `tt`.
+    static func fieldOrderDetectionArguments(source: URL, frames: Int = 500) -> [String] {
+        ["-v", "info", "-i", source.path, "-vf", "idet",
+         "-frames:v", String(frames), "-an", "-f", "null", "-"]
+    }
+
+    /// One `idet` "Multi frame detection" tally.
+    struct IdetTally: Equatable { var tff, bff, progressive, undetermined: Int }
+
+    /// The cumulative tally from an `idet` pass's stderr (issue #60): the **last** "Multi frame
+    /// detection" line — idet's multi-frame analysis is steadier than its single-frame one, and
+    /// the final such line is the cumulative total (earlier ones are running subtotals). `nil`
+    /// when no summary is present (too few frames decoded, or a failed pass).
+    static func parseIdetTally(_ stderr: String) -> IdetTally? {
+        let lines = stderr.split(whereSeparator: \.isNewline)
+        guard let line = lines.last(where: { $0.contains("Multi frame detection:") }) else { return nil }
+        func count(_ key: String) -> Int? {
+            guard let r = line.range(of: key) else { return nil }
+            let rest = line[r.upperBound...].drop { $0 == ":" || $0 == " " }
+            return Int(rest.prefix { $0.isNumber })
+        }
+        guard let tff = count("TFF"), let bff = count("BFF"),
+              let prog = count("Progressive"), let und = count("Undetermined") else { return nil }
+        return IdetTally(tff: tff, bff: bff, progressive: prog, undetermined: und)
+    }
+
+    /// The scan order an `idet` tally implies, or `nil` when the measurement is inconclusive
+    /// (issue #60). Decisive only when the interlaced frames clearly dominate the sample **and**
+    /// one polarity clearly dominates the interlaced frames (≥ 90 %) — otherwise refuse rather
+    /// than guess a `-top` that could field-reverse the whole tail. Returns `"tt"` (TFF) or
+    /// `"bb"` (BFF), the two orders the MBAFF `-top` flag distinguishes.
+    static func fieldOrderFromIdet(_ tally: IdetTally) -> String? {
+        let interlaced = tally.tff + tally.bff
+        let total = interlaced + tally.progressive + tally.undetermined
+        guard total >= 100, interlaced * 2 >= total else { return nil }   // a real, mostly-interlaced sample
+        let winner = max(tally.tff, tally.bff)
+        guard winner * 10 >= interlaced * 9 else { return nil }            // one polarity ≥ 90 %
+        return tally.tff >= tally.bff ? "tt" : "bb"
     }
 
     /// Resolves one probed audio stream to a repair track (issue #52): the source codec's
@@ -327,9 +395,13 @@ enum ClipDoctorEngine {
         let plan: [PlannedSegment]
         let encoder: [String]
         if fieldCoded {
+            // The MBAFF tail's `-top` follows the source scan order. Trust a definite probed
+            // `field_order`; otherwise measure it with `idet` rather than assume top-first
+            // (issue #60) — and refuse if even that is inconclusive, since a wrong polarity
+            // field-reverses the whole tail and the auto-verify can't catch it.
+            let order = try await resolveFieldOrder(ffmpeg, source: source, declared: video.fieldOrder)
             (plan, encoder) = fieldCodedRepair(
-                from: segments, index: index, zones: clip.damageZones ?? [],
-                fieldOrder: video.fieldOrder)
+                from: segments, index: index, zones: clip.damageZones ?? [], fieldOrder: order)
         } else {
             plan = segments
             encoder = progressiveEncoder
@@ -390,6 +462,24 @@ enum ClipDoctorEngine {
         progress(1.0)
         return Result(output: dest, verdict: verdict,
                       repairedZoneCount: (clip.damageZones ?? []).count)
+    }
+
+    /// Resolves the source's scan order for the MBAFF tail's `-top` flag (issue #60). A
+    /// definite probed `field_order` (`tt`/`tb`/`bb`/`bt`) is trusted as-is — the fast path, no
+    /// extra decode, the case the real labelled captures take. Otherwise the order is *measured*
+    /// with a short `idet` pass rather than silently defaulting to top-first, which would
+    /// field-reverse a bottom-first source's whole damage-to-EOF tail (combing on motion) while
+    /// the auto-verify — which doesn't inspect field order — still reported clean. If even
+    /// `idet` is inconclusive the repair refuses (`DoctorError.fieldOrderUndetermined`),
+    /// consistent with the conservative H.264-only guard (issue #57), rather than guess.
+    private static func resolveFieldOrder(_ ffmpeg: URL, source: URL, declared: String?) async throws -> String {
+        if let declared, isDefiniteFieldOrder(declared) { return declared }
+        let result = try await ProcessRunner.run(ffmpeg, fieldOrderDetectionArguments(source: source))
+        let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+        guard let tally = parseIdetTally(stderr), let order = fieldOrderFromIdet(tally) else {
+            throw DoctorError.fieldOrderUndetermined
+        }
+        return order
     }
 
     /// Runs ffmpeg, turning a non-zero exit into `ExportError.cutFailed` with its stderr;

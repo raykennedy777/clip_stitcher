@@ -318,6 +318,61 @@ struct ClipDoctorEngineTests {
         #expect(bff[bff.firstIndex(of: "-top")! + 1] == "0")
     }
 
+    // MARK: - Field order detection (issue #60)
+
+    /// Only ffprobe's four interlaced labels are trusted without measuring; anything else
+    /// (missing, unknown, progressive, garbage) must be measured with idet.
+    @Test func definiteFieldOrderIsOnlyTheFourInterlacedLabels() {
+        for ok in ["tt", "tb", "bb", "bt"] {
+            #expect(ClipDoctorEngine.isDefiniteFieldOrder(ok))
+        }
+        for notOk in [nil, "", "unknown", "progressive", "TT", "interlaced"] {
+            #expect(!ClipDoctorEngine.isDefiniteFieldOrder(notOk))
+        }
+    }
+
+    /// The idet pass logs at info level (its summary is suppressed at -v error, de-risked),
+    /// runs the interlace detector over a bounded frame budget, and decodes to the null muxer.
+    @Test func fieldOrderDetectionArgsRunIdetAtInfoLevelWithAFrameBudget() {
+        let args = ClipDoctorEngine.fieldOrderDetectionArguments(source: URL(fileURLWithPath: "/x/y.ts"), frames: 500)
+        #expect(args[args.firstIndex(of: "-v")! + 1] == "info")
+        #expect(args[args.firstIndex(of: "-vf")! + 1] == "idet")
+        #expect(args[args.firstIndex(of: "-frames:v")! + 1] == "500")
+        #expect(args.suffix(2) == ["-f", "null"] || args.contains("null"))
+        #expect(args.contains("-an"))
+    }
+
+    /// Parses the cumulative "Multi frame detection" line — and takes the *last* one when idet
+    /// printed running subtotals (the real capture's exact summary block).
+    @Test func parseIdetTallyTakesTheLastMultiFrameLine() {
+        let stderr = """
+        [Parsed_idet_0 @ 0x1] Repeated Fields: Neither:     0 Top:     0 Bottom:     0
+        [Parsed_idet_0 @ 0x1] Single frame detection: TFF:     0 BFF:     0 Progressive:     0 Undetermined:     0
+        [Parsed_idet_0 @ 0x1] Multi frame detection: TFF:     0 BFF:     0 Progressive:     0 Undetermined:     0
+        frame=  202 fps=198 q=-0.0 size=N/A time=00:00:08.04
+        [Parsed_idet_0 @ 0x2] Single frame detection: TFF:   501 BFF:     0 Progressive:     0 Undetermined:     0
+        [Parsed_idet_0 @ 0x2] Multi frame detection: TFF:   498 BFF:     1 Progressive:     2 Undetermined:     0
+        """
+        let tally = ClipDoctorEngine.parseIdetTally(stderr)
+        #expect(tally == ClipDoctorEngine.IdetTally(tff: 498, bff: 1, progressive: 2, undetermined: 0))
+        #expect(ClipDoctorEngine.parseIdetTally("no idet here\nframe=10") == nil)
+    }
+
+    /// A dominant polarity over a mostly-interlaced sample decides; a split tally, a
+    /// mostly-progressive sample, or too few frames is inconclusive (refuse, don't guess).
+    @Test func fieldOrderFromIdetDecidesOnlyOnAClearDominantPolarity() {
+        // The real capture: unanimous TFF.
+        #expect(ClipDoctorEngine.fieldOrderFromIdet(.init(tff: 501, bff: 0, progressive: 0, undetermined: 0)) == "tt")
+        // A clear BFF source.
+        #expect(ClipDoctorEngine.fieldOrderFromIdet(.init(tff: 2, bff: 480, progressive: 5, undetermined: 3)) == "bb")
+        // Split between polarities → inconclusive.
+        #expect(ClipDoctorEngine.fieldOrderFromIdet(.init(tff: 260, bff: 240, progressive: 0, undetermined: 0)) == nil)
+        // Mostly progressive (contradicts field-coded) → inconclusive.
+        #expect(ClipDoctorEngine.fieldOrderFromIdet(.init(tff: 40, bff: 10, progressive: 400, undetermined: 50)) == nil)
+        // Too few frames decoded → inconclusive.
+        #expect(ClipDoctorEngine.fieldOrderFromIdet(.init(tff: 30, bff: 0, progressive: 0, undetermined: 0)) == nil)
+    }
+
     /// The field-coded re-encode notice states full re-encode + not bit-identical, scales
     /// its estimate off the clip duration, and stays banned-word clean.
     @Test func fieldCodedNoticeWarnsFullReencodeAndScalesTheEstimate() {
