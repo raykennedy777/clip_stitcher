@@ -575,18 +575,14 @@ enum BoundaryReencodeEngine {
            let last = plan.lastIndex(where: { !$0.damage.isEmpty }) {
             outputCounts[last] -= expectedFrames - actual
         }
-        // stderr to a file, not the default pipe: a damaged source's piece decodes with a
-        // per-frame warning flood that overruns the OS pipe buffer and deadlocks the
-        // `-xerror` pass at 0% CPU on a multi-hour repair (`ProcessRunner` only drains a
-        // stderr pipe at termination — issue #54).
-        let errFile = piece.deletingLastPathComponent()
-            .appendingPathComponent("verify-stderr-\(UUID().uuidString).log")
-        defer { try? FileManager.default.removeItem(at: errFile) }
+        // A damaged source's piece decodes with a per-frame warning flood; `ProcessRunner`
+        // drains stderr live into a bounded tail (issue #59), so the in-memory pipe no longer
+        // backs up and deadlocks the `-xerror` pass at 0% CPU on a multi-hour repair — the
+        // failure detail is the tail's final fatal lines.
         let decode = try await ProcessRunner.run(
-            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"],
-            stderrTo: errFile)
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
         guard decode.status == 0 else {
-            let detail = (try? String(contentsOf: errFile, encoding: .utf8)).flatMap {
+            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
                 $0.isEmpty ? nil : $0
             } ?? "decode exited \(decode.status)"
             throw ExportError.verificationFailed("A decode check failed on the cut.\n\(detail)")
@@ -611,18 +607,14 @@ enum BoundaryReencodeEngine {
     /// de-risked); real DTS is monotonic once muxed to the container. Duration preservation
     /// and a zero-zones verdict are confirmed by the engine's post-mux re-scan.
     private static func verifyFieldCodedPiece(_ ffmpeg: URL, _ piece: URL) async throws {
-        // stderr to a file, not the default pipe: a clean field-coded piece still emits the
-        // benign mmco/5-ref warnings on every frame, so a multi-hour piece floods stderr
-        // past the OS pipe buffer and `-xerror -f null -` deadlocks at 0% CPU mid-decode
-        // (issue #54 — `ProcessRunner` only drains a stderr pipe at termination).
-        let errFile = piece.deletingLastPathComponent()
-            .appendingPathComponent("verify-stderr-\(UUID().uuidString).log")
-        defer { try? FileManager.default.removeItem(at: errFile) }
+        // A clean field-coded piece still emits the benign mmco/5-ref warnings on every
+        // frame, a multi-hour flood; `ProcessRunner` drains stderr live into a bounded tail
+        // (issue #59), so `-xerror -f null -` no longer backs up the pipe and deadlocks at
+        // 0% CPU mid-decode — the failure detail is the tail's final fatal lines.
         let decode = try await ProcessRunner.run(
-            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"],
-            stderrTo: errFile)
+            ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
         guard decode.status == 0 else {
-            let detail = (try? String(contentsOf: errFile, encoding: .utf8)).flatMap {
+            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
                 $0.isEmpty ? nil : $0
             } ?? "decode exited \(decode.status)"
             throw ExportError.verificationFailed("A decode check failed on the repaired video.\n\(detail)")

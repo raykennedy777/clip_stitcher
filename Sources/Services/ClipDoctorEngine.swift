@@ -379,28 +379,22 @@ enum ClipDoctorEngine {
     /// Runs ffmpeg, turning a non-zero exit into `ExportError.cutFailed` with its stderr;
     /// streams `-progress` out_time to `onOutTime` (issue #9).
     ///
-    /// stderr is drained to a temp **file**, never the default in-memory pipe (issue #54).
     /// The audio mux reads the whole source with `-max_error_rate 1.0`, and on a damaged
     /// multi-hour capture the decoders flood stderr (mmco/ref-frame/corrupt-packet lines)
-    /// even at `-v error`. `ProcessRunner` only drains a stderr pipe at termination, so once
-    /// that flood overruns the ~64 KB OS pipe buffer ffmpeg blocks mid-write and the run
-    /// deadlocks at 0% CPU — which froze the real 4.8 h repair (the slice/1844 stay under the
-    /// buffer, so it never showed until the full file). Streaming stderr to a file removes the
-    /// backpressure; the file is read back only to report a failure.
+    /// even at `-v error` — historically enough to overrun the ~64 KB OS pipe buffer and
+    /// deadlock the run at 0% CPU, which froze the real 4.8 h repair (issue #54). `ProcessRunner`
+    /// now drains stderr live into a bounded tail (issue #59), so the in-memory pipe is safe
+    /// again; the failure detail is the tail's final fatal lines.
     private static func runFFmpeg(_ ffmpeg: URL, _ args: [String],
                                   onOutTime: @escaping @Sendable (Double) -> Void) async throws {
-        let errFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-doctor-stderr-\(UUID().uuidString).log")
-        defer { try? FileManager.default.removeItem(at: errFile) }
         let parser = ProgressParser()
         let result = try await ProcessRunner.run(
-            ffmpeg, ExportProgress.progressArguments(args), stderrTo: errFile
+            ffmpeg, ExportProgress.progressArguments(args)
         ) { chunk in
             if let t = parser.feed(chunk) { onOutTime(t) }
         }
         guard result.status == 0 else {
-            let stderr = (try? String(contentsOf: errFile, encoding: .utf8)) ?? ""
-            throw ExportError.cutFailed(stderr.isEmpty ? "exit \(result.status)" : stderr)
+            throw ExportError.cutFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
         }
     }
 }

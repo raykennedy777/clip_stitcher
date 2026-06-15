@@ -313,9 +313,11 @@ enum DamageDetector {
 
     /// One seek-anchored confirm decode: video only, showinfo for per-frame
     /// timestamps, stderr carries the decoder's damage reports. A `nil` duration
-    /// reads to the file's end (the EOF window). stderr streams to a temp file —
-    /// showinfo prints a line per frame, and past the ~64 KB pipe buffer ffmpeg
-    /// deadlocks mid-write (caught on the HEVC fixture's 600-frame EOF window).
+    /// reads to the file's end (the EOF window). stderr streams to a temp **file**
+    /// because `parseConfirmDecode` reads *every* per-frame showinfo line — the whole
+    /// stream is data here, not a failure tail, so it must not go through
+    /// `ProcessRunner`'s bounded in-memory stderr tail (issue #59), which would drop the
+    /// early frames of a long EOF window and corrupt the decoded-frame list.
     /// Errors (a kill, a missing binary) return no frames — the candidate then
     /// records as an audio-only zone rather than failing the import.
     private static func confirmDecode(_ ffmpeg: URL, url: URL, seek: Double,
