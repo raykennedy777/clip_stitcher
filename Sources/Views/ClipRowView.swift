@@ -172,7 +172,7 @@ struct ClipRowView: View {
     /// The field-coded (PAFF) warning (issue #46): the source stores two field
     /// pictures per displayed frame, so the app's frame numbering — and with it
     /// frame-accurate cutting and joining — is off by 2× on this file. Clip Doctor can
-    /// still repair it (issue #54, a full re-encode); only cutting/joining stay out.
+    /// still repair it (issue #54, a damage-to-EOF re-encode); only cutting/joining stay out.
     /// Plain language; warn-only, nothing is blocked.
     @ViewBuilder
     private var fieldCodedWarning: some View {

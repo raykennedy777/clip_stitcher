@@ -47,7 +47,7 @@ final class ProjectDocument: ReferenceFileDocument {
     /// (issue #55) — the Source view shows a one-time, dismissible banner suggesting
     /// Clip Doctor for the first still-valid entry. Runtime-only; audio-only gaps are
     /// never enqueued (every export silence-fills them), but field-coded clips now are
-    /// (issue #54's full re-encode path). A FIFO queue so a burst of imports surfaces one
+    /// (issue #54's damage-to-EOF path). A FIFO queue so a burst of imports surfaces one
     /// banner at a time, never a modal pile-up.
     @Published var doctorSuggestions: [Clip.ID] = []
     /// True once the user confirmed a cancel (issue #32) — disables the cancel button

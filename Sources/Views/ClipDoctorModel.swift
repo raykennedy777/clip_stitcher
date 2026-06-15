@@ -79,7 +79,7 @@ final class ClipDoctorModel: ObservableObject {
         return nil
     }
 
-    /// Whether the source needs the field-coded re-encode (issue #54): full re-encode,
+    /// Whether the source needs the field-coded re-encode (issue #54): damage-to-EOF,
     /// not smart render. Drives the up-front notice and the explicit opt-in.
     var isFieldCoded: Bool { clip?.fieldCoded == true }
 
