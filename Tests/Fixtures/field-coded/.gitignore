@@ -1,0 +1,6 @@
+# No copyrighted media may ever be committed (ADR-0023). This folder caches a PAFF slice
+# cut on demand from a private broadcast capture for the field-coded repair integration
+# test (issue #61); the bytes are copyrighted, so every file here is unstageable — only
+# this .gitignore is tracked. Ignore everything, keep the rule itself.
+*
+!.gitignore
