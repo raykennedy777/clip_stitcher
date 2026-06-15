@@ -75,6 +75,24 @@ too; damage-to-EOF degenerates to it only when the damage is early).
   the true damage extent — a seek-anchored decode from a nearby clean keyframe recovers in ~1
   GOP. Detection must not treat it as real downstream damage.
 
+## Field-coded repair is H.264-only (issue #57)
+
+The damage-to-EOF route copies the source-codec head byte-for-byte but always re-encodes the
+tail as **MBAFF H.264** (`mbaffRepairVideoArgs` hardcodes libx264, and this recipe was only ever
+de-risked on H.264 PAFF). The cadence detector that flags a source field-coded is, however,
+**codec-agnostic** — it keys off the ~2-packets-per-displayed-frame cadence regardless of codec.
+So an MPEG-2 or HEVC source flagged field-coded would concat a `<source-codec>` head with an
+H.264 tail into one track: a mid-file codec switch most players can't decode past the seam.
+
+The repair therefore **refuses** a non-H.264 field-coded source
+(`DoctorError.unsupportedFieldCodedCodec`) rather than ship the broken concat — and the button/
+banner gating (`SourceView.canDoctor`, the import suggestion in `ProjectDocument`) applies the
+same `ClipDoctorEngine.canRepairFieldCoded` predicate so such a clip is never offered a repair it
+can't do. Real-world captures here are H.264, so the trigger is narrow, but the engine no longer
+fails open for it. A whole-file single-codec re-encode for other codecs was considered and
+deferred: ADR-0022's recipe is H.264-proven only, and refuse-for-now is the conservative match to
+the field-order stance (issue #60).
+
 ## Field order is measured, not assumed (issue #60)
 
 The MBAFF tail's `-top` flag must match the source scan order, or the whole damage-to-EOF tail

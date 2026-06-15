@@ -755,9 +755,13 @@ final class ProjectDocument: ReferenceFileDocument {
                 commit(p)
                 // Suggest Clip Doctor for a freshly damaged, repairable clip (issue
                 // #55): any video-affecting zone (audio-only gaps are already
-                // silence-filled by every export, issue #44). Field-coded sources are
-                // included — they take the full damage-to-EOF re-encode (issue #54).
-                if zones.contains(where: \.affectsVideo) {
+                // silence-filled by every export, issue #44). Field-coded H.264 sources
+                // are included — they take the damage-to-EOF re-encode (issue #54); a
+                // non-H.264 field-coded clip can't be repaired (mixed-codec tail) and
+                // isn't suggested (issue #57).
+                let clip = p.clips[i]
+                if zones.contains(where: \.affectsVideo),
+                   clip.fieldCoded != true || ClipDoctorEngine.canRepairFieldCoded(codec: clip.video?.codec) {
                     doctorSuggestions.append(id)
                 }
             }

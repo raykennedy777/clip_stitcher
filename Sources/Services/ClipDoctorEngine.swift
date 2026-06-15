@@ -72,6 +72,10 @@ enum ClipDoctorEngine {
         /// #60): repairing it would risk re-encoding the damage-to-EOF tail with the wrong
         /// field polarity (combing on motion), which the auto-verify can't catch — so refuse.
         case fieldOrderUndetermined
+        /// A field-coded source whose codec isn't H.264 (issue #57): the damage-to-EOF tail is
+        /// always MBAFF H.264, so a non-H.264 head would concat into a mixed-codec track. Refuse
+        /// rather than ship something most players can't decode past the seam.
+        case unsupportedFieldCodedCodec(String?)
 
         var errorDescription: String? {
             switch self {
@@ -82,6 +86,10 @@ enum ClipDoctorEngine {
             case .fieldOrderUndetermined:
                 return "This clip’s field order couldn’t be determined, so it can’t be safely repaired — "
                     + "repairing it could reverse the fields. It needs a known top- or bottom-field-first scan order."
+            case .unsupportedFieldCodedCodec(let codec):
+                let named = codec.map { "\(displayCodecName($0)) " } ?? ""
+                return "Field-coded \(named)clips can’t be repaired yet — Clip Doctor’s field-coded repair "
+                    + "currently supports H.264 sources only."
             }
         }
     }
@@ -144,6 +152,19 @@ enum ClipDoctorEngine {
     ) -> (plan: [PlannedSegment], encoder: [String]) {
         (damageToEOFPlan(segments, index: index, zones: zones),
          BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: fieldOrder))
+    }
+
+    /// Whether Clip Doctor can repair a **field-coded** source of this codec (issue #57).
+    /// The damage-to-EOF route copies the source-codec head byte-for-byte but re-encodes the
+    /// tail as **MBAFF H.264** (`mbaffRepairVideoArgs` hardcodes libx264, and ADR-0022's recipe
+    /// was only de-risked on H.264 PAFF). A non-H.264 field-coded source would therefore concat
+    /// a `<source-codec>` head with an H.264 tail into one track — a mid-file codec switch most
+    /// players can't decode past the seam. So field-coded repair is H.264-only; the cadence
+    /// detector that flags a source field-coded is codec-agnostic, so this guard is what stops
+    /// an MPEG-2/HEVC field-coded clip from shipping a broken mixed-codec output. (Progressive
+    /// repair is a same-codec smart render and has no such limit.)
+    static func canRepairFieldCoded(codec: String?) -> Bool {
+        codec == "h264"
     }
 
     // MARK: - Field order detection (#60)
@@ -328,6 +349,17 @@ enum ClipDoctorEngine {
         return "“\(clipName)” has \(zones). Clip Doctor can repair it."
     }
 
+    /// An ffprobe `codec_name` as a reader-facing word for a notice (issue #57). The handful
+    /// of names Clip Doctor surfaces; an unknown name is upper-cased rather than guessed.
+    private static func displayCodecName(_ codec: String) -> String {
+        switch codec {
+        case "h264": return "H.264"
+        case "hevc": return "HEVC"
+        case "mpeg2video": return "MPEG-2"
+        default: return codec.uppercased()
+        }
+    }
+
     /// ffprobe's `codec_type` as a reader-facing word. Unknown kinds pass through.
     private static func displayKind(_ codecType: String) -> String {
         switch codecType {
@@ -366,6 +398,14 @@ enum ClipDoctorEngine {
     ) async throws -> Result {
         guard let video = clip.video else { throw ExportError.invalidPlan }
         let fieldCoded = clip.fieldCoded == true
+        // The field-coded route re-encodes its tail as MBAFF H.264 while byte-copying the
+        // source-codec head, so a non-H.264 field-coded source would ship a mixed-codec concat
+        // (issue #57). The cadence-based detector is codec-agnostic, so refuse here rather than
+        // produce something most players can't decode past the seam. Progressive repair is
+        // same-codec and unaffected.
+        if fieldCoded, !canRepairFieldCoded(codec: video.codec) {
+            throw DoctorError.unsupportedFieldCodedCodec(video.codec)
+        }
 
         let dest = destination ?? repairedSibling(of: source)
         guard dest.standardizedFileURL != source.standardizedFileURL else {

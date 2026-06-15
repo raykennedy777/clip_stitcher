@@ -318,6 +318,28 @@ struct ClipDoctorEngineTests {
         #expect(bff[bff.firstIndex(of: "-top")! + 1] == "0")
     }
 
+    // MARK: - H.264-only field-coded guard (issue #57)
+
+    /// The damage-to-EOF tail is always MBAFF H.264, so only an H.264 field-coded source can
+    /// be repaired without a mixed-codec concat; MPEG-2/HEVC/unknown are refused. (Progressive
+    /// repair is same-codec and not gated by this.)
+    @Test func fieldCodedRepairIsH264Only() {
+        #expect(ClipDoctorEngine.canRepairFieldCoded(codec: "h264"))
+        for other in ["hevc", "mpeg2video", "vc1", nil] {
+            #expect(!ClipDoctorEngine.canRepairFieldCoded(codec: other))
+        }
+    }
+
+    /// The refusal names H.264 and the source codec, and stays banned-word clean.
+    @Test func unsupportedFieldCodedCodecMessageNamesH264() {
+        let msg = ClipDoctorEngine.DoctorError.unsupportedFieldCodedCodec("hevc").errorDescription ?? ""
+        #expect(msg.contains("H.264"))
+        #expect(msg.contains("HEVC"))
+        for banned in ["fix", "heal", "patch", "error concealment"] {
+            #expect(!msg.lowercased().contains(banned))
+        }
+    }
+
     // MARK: - Field order detection (issue #60)
 
     /// Only ffprobe's four interlaced labels are trusted without measuring; anything else

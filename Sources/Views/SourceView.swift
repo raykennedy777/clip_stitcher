@@ -307,13 +307,15 @@ struct SourceView: View {
 
     /// Clip Doctor repairs one clip's **video** damage. Enabled for a clip with a
     /// video-affecting damage zone whose source is reachable — including a field-coded
-    /// (PAFF) clip, which takes the full damage-to-EOF re-encode (issue #54, opt-in in the
-    /// sheet). An audio-only gap needs no doctor: every export already silence-fills it
-    /// (issue #44).
+    /// (PAFF) clip, which takes the damage-to-EOF re-encode (issue #54, opt-in in the
+    /// sheet). A field-coded clip whose codec isn't H.264 is excluded: that route's tail is
+    /// MBAFF H.264, so a non-H.264 head can't repair without a mixed-codec output (issue #57).
+    /// An audio-only gap needs no doctor: every export already silence-fills it (issue #44).
     private func canDoctor(_ clip: Clip) -> Bool {
         (clip.damageZones?.contains(where: \.affectsVideo) ?? false)
             && document.importStates[clip.id] != .sourceMissing
             && document.url(for: clip) != nil
+            && (clip.fieldCoded != true || ClipDoctorEngine.canRepairFieldCoded(codec: clip.video?.codec))
     }
 
     /// Clip Doctor is single-clip only.
