@@ -39,3 +39,82 @@ struct FrameIndexerParseTests {
         #expect(index.count == 2)
     }
 }
+
+/// The all-streams scan (issue #45): one demux pass widened to every audio/video stream
+/// (`codec_type,stream_index,pts_time,dts_time,flags` CSV), so import gets the frame index
+/// and the damage detector's per-stream packet timing from a single read.
+struct FrameIndexerAllStreamsTests {
+    /// Groups packets by stream in container order, keeps only audio/video (a TS also
+    /// carries teletext/data whose sparse timing would read as fake gaps), and assembles
+    /// the frame index from the video stream — identical to what `parseIndex` would build
+    /// from the same packets, so the two reads can never disagree about frame numbering.
+    @Test func groupsAudioAndVideoAndIndexesTheVideoStream() {
+        let csv = """
+        video,0,0.00,0.00,K__
+        audio,1,0.00,0.00,K__
+        data,2,0.00,0.00,___
+        video,0,0.12,0.04,___
+        video,0,0.04,0.08,___
+        video,0,0.08,0.12,___
+        audio,1,0.04,0.04,___
+        """
+        let scan = FrameIndexer.parseAllStreams(csv: csv)
+        // The data stream is dropped; video then audio, in container order.
+        #expect(scan.streams.map(\.streamIndex) == [0, 1])
+        #expect(scan.streams[0].isVideo)
+        #expect(!scan.streams[1].isVideo)
+        #expect(scan.streams[0].packets.count == 4)
+        #expect(scan.streams[1].packets.count == 2)
+        // The index is the video stream's packets sorted into presentation order.
+        #expect(scan.index.count == 4)
+        #expect(scan.index.pts == [0.00, 0.04, 0.08, 0.12])
+        #expect(scan.index.keyframeFlags == [true, false, false, false])
+        // Identical to assembling the index from the video stream's packets directly.
+        let direct = FrameIndexer.makeIndex(scan.streams[0].packets)
+        #expect(scan.index.pts == direct.pts && scan.index.dts == direct.dts
+                && scan.index.keyframeFlags == direct.keyframeFlags)
+    }
+
+    /// The index is built from the **lowest-numbered** video stream even when a
+    /// higher-numbered video stream demuxes first.
+    @Test func indexesTheLowestNumberedVideoStream() {
+        let csv = """
+        video,3,9.00,9.00,K__
+        video,0,0.00,0.00,K__
+        video,0,0.04,0.04,___
+        video,3,9.04,9.04,___
+        """
+        let scan = FrameIndexer.parseAllStreams(csv: csv)
+        #expect(scan.streams.map(\.streamIndex) == [3, 0])   // demux order preserved
+        #expect(scan.index.pts == [0.00, 0.04])              // but the index is stream 0's
+    }
+
+    /// Malformed lines (too few fields, an unparsable stream index, a blank line) are
+    /// skipped rather than crashing the scan.
+    @Test func skipsMalformedLines() {
+        let csv = "video,0,0.00,0.00,K__\nvideo,0,0.04\n\nvideo,x,0.08,0.08,___\n"
+        let scan = FrameIndexer.parseAllStreams(csv: csv)
+        #expect(scan.streams.count == 1)
+        #expect(scan.index.count == 1)
+    }
+}
+
+/// `makeIndex` is the shared index-assembly core (the same rules `parseIndex` and
+/// `parseAllStreams` both feed into): fill a missing pts from the dts, a missing dts from
+/// the pts, skip a packet that carries neither, then sort into presentation order.
+struct FrameIndexMakeIndexTests {
+    @Test func fillsGapsSkipsTimestamplessAndSortsByPts() {
+        let packets = [
+            FrameIndexer.PacketStamp(pts: 0.00, dts: 0.00, keyframe: true),
+            FrameIndexer.PacketStamp(pts: nil, dts: 0.04),    // pts filled from dts
+            FrameIndexer.PacketStamp(pts: 0.08, dts: nil),    // dts filled from pts
+            FrameIndexer.PacketStamp(pts: nil, dts: nil),     // skipped: no timestamp
+            FrameIndexer.PacketStamp(pts: 0.12, dts: 0.06),   // out of order
+        ]
+        let index = FrameIndexer.makeIndex(packets)
+        #expect(index.count == 4)
+        #expect(index.pts == [0.00, 0.04, 0.08, 0.12])
+        #expect(index.dts == [0.00, 0.04, 0.08, 0.06])
+        #expect(index.keyframeFlags == [true, false, false, false])
+    }
+}

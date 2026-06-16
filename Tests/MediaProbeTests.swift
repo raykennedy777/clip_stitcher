@@ -96,6 +96,50 @@ struct MediaProbeTests {
         #expect(result.audioTracks.count == 1)
     }
 
+    // MARK: audio stream details (Clip Doctor repair audio rebuild, #52)
+
+    /// `parseAudioStreamDetails` keeps only the audio streams, in container order, and
+    /// carries the codec/profile/sample-rate/channels/bitrate the in-codec rebuild needs —
+    /// notably the profile (HE-AAC must stay HE-AAC) and the source bitrate when reported.
+    @Test func parseAudioStreamDetailsKeepsAudioWithRepairFacts() throws {
+        let json = Data("""
+        {"streams":[
+          {"codec_type":"video","codec_name":"h264"},
+          {"codec_type":"audio","codec_name":"aac","profile":"HE-AAC",
+           "sample_rate":"48000","channels":2,"bit_rate":"95970"},
+          {"codec_type":"audio","codec_name":"mp2",
+           "sample_rate":"48000","channels":2,"bit_rate":"384000"},
+          {"codec_type":"subtitle","codec_name":"dvb_teletext"}
+        ]}
+        """.utf8)
+        let details = try MediaProbe.parseAudioStreamDetails(json: json)
+        #expect(details == [
+            MediaProbe.AudioStreamDetail(codecName: "aac", profile: "HE-AAC",
+                                         sampleRate: 48000, channels: 2, bitrate: 95970),
+            MediaProbe.AudioStreamDetail(codecName: "mp2", profile: nil,
+                                         sampleRate: 48000, channels: 2, bitrate: 384000),
+        ])
+    }
+
+    /// Missing fields take the same defaults as the rest of the probe: unknown codec, a
+    /// zero sample-rate/channels, and — crucially — a nil bitrate (not zero) so the repair
+    /// can fall back to a per-channel default rather than encoding at 0 bits/sec.
+    @Test func parseAudioStreamDetailsDefaultsMissingFieldsAndNilsAbsentBitrate() throws {
+        let json = Data("""
+        {"streams":[ {"codec_type":"audio"} ]}
+        """.utf8)
+        let details = try MediaProbe.parseAudioStreamDetails(json: json)
+        #expect(details == [
+            MediaProbe.AudioStreamDetail(codecName: "unknown", profile: nil,
+                                         sampleRate: 0, channels: 0, bitrate: nil),
+        ])
+    }
+
+    @Test func parseAudioStreamDetailsIsEmptyWithoutAnyAudio() throws {
+        let json = Data(#"{"streams":[ {"codec_type":"video","codec_name":"h264"} ]}"#.utf8)
+        #expect(try MediaProbe.parseAudioStreamDetails(json: json) == [])
+    }
+
     // MARK: container start_time CSV (issue #3)
 
     @Test func parseStartTimeReadsTheOffsetSeconds() {
