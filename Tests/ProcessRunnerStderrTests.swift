@@ -87,3 +87,71 @@ struct ProcessRunnerStderrTests {
         #expect(result.stderr.isEmpty)
     }
 }
+
+/// `ProcessRunner.run`'s I/O modes and cancellation surfacing — the paths the stderr-tail
+/// suite above doesn't touch: redirecting stdout/stderr straight to a file (the large-output
+/// and whole-stream-on-disk cases), and turning a cancel-triggered terminate() into a thrown
+/// `CancellationError` rather than a bogus success (issue #32). `/bin/sh`, no ffmpeg bundle.
+struct ProcessRunnerIOModeTests {
+    private static let sh = URL(fileURLWithPath: "/bin/sh")
+    private static func tempFile(_ ext: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("pr66-\(UUID().uuidString).\(ext)")
+    }
+
+    /// `stdoutTo` streams stdout straight to the file; the result's in-memory `stdout` is
+    /// then empty (the data lives on disk).
+    @Test func stdoutToRedirectsToTheFileLeavingResultStdoutEmpty() async throws {
+        let out = Self.tempFile("txt")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let result = try await ProcessRunner.run(
+            Self.sh, ["-c", "printf 'hello stdout\\n'"], stdoutTo: out)
+        #expect(result.status == 0)
+        #expect(result.stdout.isEmpty)
+        #expect(try String(contentsOf: out, encoding: .utf8) == "hello stdout\n")
+    }
+
+    /// `stdoutTo` is the large-output path: it streams to disk, so it captures far more than
+    /// the ~64 KB pipe buffer the default in-termination capture is limited to (the frame
+    /// index dump's reason for existing). 200 KB lands whole.
+    @Test func stdoutToCapturesOutputPastThePipeBuffer() async throws {
+        let out = Self.tempFile("bin")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let result = try await ProcessRunner.run(
+            Self.sh, ["-c", "yes AAAAAAAA | head -c 200000"], stdoutTo: out)
+        #expect(result.status == 0)
+        #expect(result.stdout.isEmpty)
+        let size = try FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int
+        #expect(size == 200000)
+    }
+
+    /// `stderrTo` writes the **whole** stderr stream to the file (unlike the bounded in-memory
+    /// tail) — the path `DamageDetector` uses to parse a per-frame `showinfo` dump. The result's
+    /// in-memory `stderr` is then empty, and a 400 KB stream lands whole (not trimmed to 256 KB).
+    @Test func stderrToWritesTheWholeUnboundedStreamToTheFile() async throws {
+        let err = Self.tempFile("txt")
+        defer { try? FileManager.default.removeItem(at: err) }
+        let result = try await ProcessRunner.run(
+            Self.sh, ["-c", "yes 'showinfo per-frame line' | head -c 400000 1>&2; exit 5"],
+            stderrTo: err)
+        #expect(result.status == 5)
+        #expect(result.stderr.isEmpty)   // file mode bypasses the in-memory tail
+        let size = try FileManager.default.attributesOfItem(atPath: err.path)[.size] as? Int
+        #expect(size == 400000)          // the whole stream, not the 256 KB bounded tail
+    }
+
+    /// A cancelled run surfaces as `CancellationError`, not as the tool failing: cancelling
+    /// the awaiting task terminates the subprocess, and the exit status after terminate() is
+    /// indistinguishable from a real error — so `run` rethrows cancellation (issue #32) rather
+    /// than returning a bogus `ProcessResult`.
+    @Test func aCancelledRunSurfacesAsCancellationNotAToolFailure() async throws {
+        let run = Task<ProcessResult, Error> {
+            try await ProcessRunner.run(Self.sh, ["-c", "sleep 30"])
+        }
+        // Let the subprocess actually start before cancelling, so this exercises the
+        // terminate()-then-checkCancellation path rather than a pre-launch cancel.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        run.cancel()
+        await #expect(throws: CancellationError.self) { try await run.value }
+    }
+}
