@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The pure core of the Clip Doctor repair-only export (issue #52, ADR-0021): the bounded
 /// keyframe-copy command shape, the source-codec audio rebuild mux, the audio-track

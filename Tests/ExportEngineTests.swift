@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the pure argument-building core of the Milestone 1 export engine — the
 /// ffmpeg invocations that cut each clip's video at its clean cut points, concat the
@@ -69,7 +69,7 @@ struct ExportEngineTests {
     }
 
     @Test func mpeg2IntoMkvGetsThePtsRefillFilter() {
-        // Matroska refuses the BBC capture's no-PTS packets on stream copy (issue #2);
+        // Matroska refuses the broadcast capture's no-PTS packets on stream copy (issue #2);
         // the setts filter refills exactly those from DTS — same rule as the frame index.
         let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mkv")
         #expect(bsf == ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"])
@@ -470,7 +470,7 @@ struct ExportEngineTests {
 
     // MARK: plan-aware gate (issue #19): copy spans verify against the source's pattern
 
-    /// 25fps source with the BBC capture's signature anomaly: a duplicated PTS at
+    /// 25fps source with the broadcast capture's signature anomaly: a duplicated PTS at
     /// frame `dupAt`, then a double-slot gap two frames later that re-syncs.
     private func dirtySource(count: Int, dupAt: Int) -> [Double] {
         var pts: [Double] = []
@@ -499,7 +499,7 @@ struct ExportEngineTests {
     @Test func theReMaterializedAnomalyMayDriftUpToThreeIntervals() {
         // The mpegts round-trip refills the duplicate's lost pts from dts, displacing
         // the anomaly by up to the B-frame reorder depth (measured 2 on the real
-        // BBC fixture; ±3 is the documented bound).
+        // broadcast fixture; ±3 is the documented bound).
         let src = dirtySource(count: 120, dupAt: 50)
         let plan = [PlannedSegment(kind: .copy, range: 0..<100),
                     PlannedSegment(kind: .reEncode, range: 100..<110)]

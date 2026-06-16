@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the audio codec policy — which codec the rebuilt audio encodes to
 /// (ADR-0010) and the extensions that follow from it. Moved verbatim from the export

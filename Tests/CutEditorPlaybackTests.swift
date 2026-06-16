@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Where a play session stops (the QA finding on issue #7's verification pass:
 /// pressing Play at or past the out point looked like a dead button, because the

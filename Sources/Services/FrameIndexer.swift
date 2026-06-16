@@ -43,7 +43,7 @@ enum FrameIndexer {
     static func buildIndex(url: URL) async throws -> FrameIndex {
         let ffprobe = try FFTools.ffprobeURL()
         let dump = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-index-\(UUID().uuidString).csv")
+            .appendingPathComponent("clipstitcher-index-\(UUID().uuidString).csv")
         defer { try? FileManager.default.removeItem(at: dump) }
 
         let output = try await ProcessRunner.run(ffprobe, [
@@ -133,7 +133,7 @@ enum FrameIndexer {
     static func scanAllStreams(url: URL) async throws -> AllStreamsScan {
         let ffprobe = try FFTools.ffprobeURL()
         let dump = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-scan-\(UUID().uuidString).csv")
+            .appendingPathComponent("clipstitcher-scan-\(UUID().uuidString).csv")
         defer { try? FileManager.default.removeItem(at: dump) }
 
         let output = try await ProcessRunner.run(ffprobe, [

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins the source-row badge logic (issue #31 / ADR-0018): the target row always keeps
 /// its Target badge, separate + cut-only marks every other row "Cut only", and every

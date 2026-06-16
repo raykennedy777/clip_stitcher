@@ -47,9 +47,8 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
      "Track 1", "Track 2"… when the container has no names.
    - **Audio stream settings** (reachable from both Source and the cut-editor): add/remove a
      clip's audio tracks and pick each track's source — another stream of the clip's own
-     file, or an external audio file. (TMPGEnc's equivalent for reference: per-track file
-     name + stream picker with Browse / Use Same Source as Video / Delete Audio Source, plus
-     an Add Audio slot.)
+     file, or an external audio file. (Reference shape: per-track file name + stream picker
+     with Browse / Use Same Source as Video / Delete Audio Source, plus an Add Audio slot.)
    - **Open question:** what to do when an external audio source's length differs from the
      clip's video.
    Touches the audio rebuild (ADR-0010) and MatchEvaluator's audio dimensions — needs its
@@ -76,8 +75,8 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
   (`-flags +ildct+ilme -top 1`), verified in the shell (ADR-0009). The real open-GOP risk is the
   leading-picture seam, which is codec-orthogonal — handled by copying only between
   leading-picture-free keyframes.
-- **Audio alignment at cuts.** TMPGEnc exposes "audio gap correction"; expect to handle A/V
-  offset at join boundaries.
+- **Audio alignment at cuts.** Expect to handle A/V offset at join boundaries (audio gap
+  correction).
 - **Notarization with bundled binaries.** Confirm the signing/notarization flow early so it
   doesn't surprise at ship time (ADR-0002).
 - **Frame-index cost** on multi-hour files. Keep the import pass async + cached (ADR-0006).

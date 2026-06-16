@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins the pure halves of the keyframe prefetch (issue #34): which keyframes get
 /// warmed around a landing (nearest first, alternating directions, bounded), and the

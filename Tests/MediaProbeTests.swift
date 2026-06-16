@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises MediaProbe's pure parsers against canned ffprobe output — the JSON
 /// stream/format probe and the two CSV facts (container start time, video timebase) —

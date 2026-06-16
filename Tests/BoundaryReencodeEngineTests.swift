@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the pure ffmpeg argument builders for the Milestone 2 boundary re-encode
 /// (ADR-0009). The recipes themselves were validated frame-exact against real

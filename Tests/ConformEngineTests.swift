@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the pure conform argument builder (ADR-0011): given a source clip's probed
 /// properties and the target clip's, it emits the ffmpeg filter chain + encoder args that
@@ -164,8 +164,8 @@ struct ConformEngineTests {
     /// untagged source converts toward a tagged target, silent when the source is fully
     /// tagged or the target imposes no complete spec.
     @Test func assumedColorWarningNamesTheAssumptionOnlyWhenUsed() {
-        let warned = ConformEngine.assumedColorWarning(clipName: "BBC", source: mpeg2, target: france)
-        #expect(warned?.contains("BT.601 (625-line)") == true && warned?.contains("BBC") == true)
+        let warned = ConformEngine.assumedColorWarning(clipName: "Broadcast", source: mpeg2, target: france)
+        #expect(warned?.contains("BT.601 (625-line)") == true && warned?.contains("Broadcast") == true)
         #expect(ConformEngine.assumedColorWarning(clipName: "f", source: france, target: france) == nil)
         #expect(ConformEngine.assumedColorWarning(clipName: "x", source: mpeg2, target: h264) == nil)
     }

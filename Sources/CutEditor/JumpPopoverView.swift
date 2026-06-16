@@ -3,8 +3,8 @@ import SwiftUI
 /// The jump popover (issue #21): time and frame fields anchored to the cut-editor
 /// readout, opened with ⌘J or by clicking the readout. Return jumps to whichever
 /// field was edited last and closes; Esc closes without moving; invalid input
-/// does nothing so it can be corrected. The relative checkbox (ticked by default,
-/// TMPGEnc semantics) makes the value an offset from the playhead — negative
+/// does nothing so it can be corrected. The relative checkbox (ticked by default)
+/// makes the value an offset from the playhead — negative
 /// moves backward; unticked, it's a position from the clip's first frame.
 struct JumpPopoverView: View {
     @ObservedObject var model: CutEditorModel

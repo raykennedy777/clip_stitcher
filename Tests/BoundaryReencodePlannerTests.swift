@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the Milestone 2 planner (ADR-0009): a kept range becomes an ordered list
 /// of logical segments tagged *copy* (stream-copy a keyframe-bounded span) or

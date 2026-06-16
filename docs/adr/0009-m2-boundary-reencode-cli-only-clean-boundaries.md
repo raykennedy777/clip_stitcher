@@ -22,9 +22,9 @@ The minimal-re-encode, libav-level approach (smartcut-style) is deferred to a **
 > range's upper bound (`K − n_leading`), because the muxer cut time derives from the
 > *keyframe's* DTS midpoint, not the range end. The strict rule stays on the start side:
 > copying *from* an open keyframe would orphan its leading pictures at the seam — that is
-> #17's territory (RASL packet surgery, or Milestone 2b). The measurements below predate
+> #68's territory (RASL packet surgery, or Milestone 2b). The measurements below predate
 > the amendment: open-GOP **tail** edges now re-encode only the leading-picture slots plus
-> the partial out-GOP; head edges keep the clean-point cost until #17.
+> the partial out-GOP; head edges keep the clean-point cost until #68.
 
 > **Amended (#18): an MP4 plan mixing copy and re-encode pieces pins one video track
 > timescale.** MP4 has a *per-track* timescale: a stream-copied piece inherits one from the

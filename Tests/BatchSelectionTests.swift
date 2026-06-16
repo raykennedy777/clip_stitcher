@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Block-move compaction: the selection moves as one contiguous block, relative
 /// order preserved — one position above the topmost selected row (up) or one below

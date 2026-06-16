@@ -1,6 +1,6 @@
 # Audio-only inputs / audio-only projects
 
-vid_conform does not support importing files with no video track (MP3s, radio
+clip_stitcher does not support importing files with no video track (MP3s, radio
 recordings, audio elementary streams) or building audio-only projects around
 them. A clip whose probe finds no `v:0` is rejected at import ("No video
 track"), and that stays the intended behavior.

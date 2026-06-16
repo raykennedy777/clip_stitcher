@@ -29,7 +29,7 @@ enum FieldCodingDetector {
 
     /// The median interval between consecutive timestamps — robust against the stray
     /// duplicate/gap anomalies real broadcast captures carry (ADR-0008's ~714 on the
-    /// BBC fixture). `nil` below 25 intervals: too thin to call a cadence.
+    /// broadcast fixture). `nil` below 25 intervals: too thin to call a cadence.
     static func medianInterval(_ pts: [Double]) -> Double? {
         guard pts.count >= 26 else { return nil }
         let deltas = zip(pts.dropFirst(), pts).map { $0 - $1 }

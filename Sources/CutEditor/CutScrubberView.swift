@@ -3,7 +3,7 @@ import SwiftUI
 /// The cut-editor's scrubber (issue #20): a custom track replacing the plain
 /// Slider so the selection state is visible at a glance — frames outside the
 /// selection range draw dim, split ranges inside it alternate between two tints
-/// (a macOS-toned take on TMPGEnc's blue/orange) so each future clip reads as a
+/// (a macOS-toned blue/orange palette) so each future clip reads as a
 /// distinct band, split points draw as markers (dimmed when inert), and the
 /// in/out ends draw as brackets. Dragging scrubs; a click seeks, snapping to a
 /// split marker when it lands within a few points of one.

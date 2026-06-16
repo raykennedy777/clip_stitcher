@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The Source view's clip-row detail line (issue #11): it must summarize the clip's
 /// *edited* audio track list (ADR-0014's slots), not the source file's probed streams.

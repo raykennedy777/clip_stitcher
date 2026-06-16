@@ -19,7 +19,7 @@ import Foundation
 ///
 /// The thresholds (gap ≥ 1.8× the stream's median interval, duplicate ≤ 0.25×,
 /// 2 s cluster merge) reproduce every documented zone of both real corrupted
-/// captures and flag nothing on the clean fixtures — including the BBC capture,
+/// captures and flag nothing on the clean fixtures — including the broadcast capture,
 /// whose ~714 benign anomalies are pts-only (dts intact, so no rule fires).
 enum DamageDetector {
     // MARK: - Stage 1: demux anomaly pass (pure)
@@ -73,7 +73,7 @@ enum DamageDetector {
                 } else {
                     // A dts-poor container (e.g. a raw elementary stream): fall back
                     // to presentation order, gaps only — sorted pts legitimately
-                    // duplicates on timestamp-dirty sources (the BBC capture), so the
+                    // duplicates on timestamp-dirty sources (the broadcast capture), so the
                     // duplicate rule stays dts-exclusive.
                     let pts = stream.packets.compactMap(\.pts).sorted()
                     guard let median = medianInterval(pts) else { continue }
@@ -326,7 +326,7 @@ enum DamageDetector {
         if let duration { args += ["-t", ExportEngine.timeString(duration)] }
         args += ["-i", url.path, "-map", "0:v:0", "-vf", "showinfo", "-f", "null", "-"]
         let dump = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-confirm-\(UUID().uuidString).log")
+            .appendingPathComponent("clipstitcher-confirm-\(UUID().uuidString).log")
         defer { try? FileManager.default.removeItem(at: dump) }
         guard (try? await ProcessRunner.run(ffmpeg, args, stderrTo: dump)) != nil,
               let stderr = try? String(contentsOf: dump, encoding: .utf8) else { return [] }

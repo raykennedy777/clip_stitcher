@@ -1,6 +1,6 @@
 # Audio is always rebuilt, and conformed to the target clip's codec
 
-vid_conform smart-renders **video** (stream-copy the untouched span, re-encode only the
+clip_stitcher smart-renders **video** (stream-copy the untouched span, re-encode only the
 boundary GOPs), but it does **not** smart-render audio. On every export the audio track is
 fully rebuilt: each clip's audio is decoded over its exact kept range and concatenated at
 the sample level into one continuous track, then re-encoded — by default to the **target
@@ -21,7 +21,7 @@ matches the target. The only open question is **to which codec**.
 
 The rebuilt audio is encoded to the **target clip's** audio codec by default. The target
 clip already defines the project's output spec (ADR-0005); having the audio match it makes
-the output a true instance of that spec, and — importantly — makes a vid_conform export
+the output a true instance of that spec, and — importantly — makes a clip_stitcher export
 **round-trip**: re-importing an exported file matches the target instead of being flagged
 for a needless re-render. (The earlier behaviour hard-coded AAC, so re-importing an export
 of, say, an mp2 source was always badged "re-encode" purely on the audio codec.)
@@ -41,7 +41,7 @@ mislabelled or unplayable file. AAC is the right fallback: it is audibly transpa
 
 ## Consequences
 
-- A vid_conform export round-trips: re-importing it is smart-renderable, not re-encoded.
+- A clip_stitcher export round-trips: re-importing it is smart-renderable, not re-encoded.
 - Audio codec is **removed from the match verdict** (ADR-0005): since audio is always rebuilt
   to the target codec, a clip's *source* audio codec never blocks its video from being
   smart-rendered. Sample rate and channels stay in the verdict.

@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The pure parts of cut-editor audio playback (issue #7): the PCM decode command
 /// and the start_time-aware seek math. The streaming/engine side is verified at

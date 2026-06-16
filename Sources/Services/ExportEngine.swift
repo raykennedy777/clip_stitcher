@@ -110,7 +110,7 @@ enum ExportEngine {
 
     /// Output bitstream filter that makes matroska accept stream-copied MPEG-2 (issue #2).
     /// Real MPEG-PS broadcast captures carry occasional video packets with **no PTS at
-    /// all** (the second frame of each duplicated-timestamp anomaly — the BBC fixture has
+    /// all** (the second frame of each duplicated-timestamp anomaly — the broadcast fixture has
     /// them; even a plain whole-file remux failed with "Can't write packet with unknown
     /// timestamp"). TS and MP4 tolerate a missing PTS; matroska refuses the packet. The
     /// `setts` filter refills exactly those packets' PTS from their DTS — the same refill
@@ -283,7 +283,7 @@ enum ExportEngine {
     }
 
     /// Plan-aware variant (issue #19): a stream-copied span is a *faithful* copy, so its
-    /// timestamps legitimately reproduce the source's own irregularities (the 2009 BBC
+    /// timestamps legitimately reproduce the source's own irregularities (the 2009
     /// broadcast capture has ~714 duplicate+gap anomalies in 67 min — rejecting them
     /// rejected correct exports). Inside a **copy** segment an anomaly is a defect only
     /// when the source has no same-kind anomaly within ±3 intervals of the corresponding
@@ -568,7 +568,7 @@ enum ExportEngine {
         // pieces and is written as an audio-elementary file (ADR-0010 / #1).
         let ext = AudioCodecPolicy.outputExtension(type: settings.type, container: settings.container, audioEncoder: audioCodec)
         let work = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-export-\(UUID().uuidString)")
+            .appendingPathComponent("clipstitcher-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: work) }
 

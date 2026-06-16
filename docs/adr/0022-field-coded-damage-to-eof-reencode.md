@@ -1,7 +1,7 @@
 # Field-coded (PAFF) repair is a damage-to-EOF MBAFF re-encode, not a smart-render splice
 
 ADR-0021 left field-coded (PAFF) sources as the open fork: Clip Doctor's first real input
-(the 18:42 Polsat capture) is PAFF, and whether the field-aware repaired-segment recipe could
+(a broadcast capture) is PAFF, and whether the field-aware repaired-segment recipe could
 splice cleanly in TS had to be decided in the shell before Swift. ADR-0020 kept PAFF
 warn-only for the same reason. **It does not splice. A no-IDR PAFF source cannot be
 smart-render repaired in this toolchain** — proven exhaustively on a real PAFF slice (issue

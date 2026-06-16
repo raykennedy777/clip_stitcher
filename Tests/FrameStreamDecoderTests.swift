@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 struct FrameStreamDecoderTests {
 

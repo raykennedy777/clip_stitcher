@@ -34,7 +34,7 @@ straight into Swift and hope.
   -show_entries packet=pts_time,dts_time`. That shows the demuxer's placement *before* the output
   muxer "repairs" non-monotonic DTS (single-tick bumping that masquerades as a different bug).
   This separated demuxer math from muxer fixups in one step on both #18 (MP4 track-timescale
-  mismatch between copied and re-encoded pieces) and the #17 Path-1 de-risk.
+  mismatch between copied and re-encoded pieces) and the #68 Path-1 de-risk.
 
 ## Verifying a change in the running app
 
@@ -43,10 +43,10 @@ shell**, and hand the actual GUI to the user to eyeball.
 
 When you do build and launch the app to hand it over:
 
-- **Force-kill the old instance before relaunching.** `osascript -e 'quit app "VidConform"'`
+- **Force-kill the old instance before relaunching.** `osascript -e 'quit app "ClipStitcher"'`
   is **blocked by any modal dialog** (e.g. an export-error sheet), so `open` then just
   refocuses the *stale* binary — which reads as a "stale build / my fix didn't work" false
-  alarm. Use `pkill -f "VidConform.app/Contents/MacOS/VidConform"` first, then `open`.
+  alarm. Use `pkill -f "ClipStitcher.app/Contents/MacOS/ClipStitcher"` first, then `open`.
 - Confirm freshness by comparing the running process start time to the built binary's mtime,
   not by trusting that `open` relaunched.
 
@@ -55,7 +55,7 @@ When you do build and launch the app to hand it over:
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
 xcodegen generate   # after adding/removing source files; the .xcodeproj is gitignored — never hand-edit
-xcodebuild -project VidConform.xcodeproj -scheme VidConform -destination 'platform=macOS' test \
+xcodebuild -project ClipStitcher.xcodeproj -scheme ClipStitcher -destination 'platform=macOS' test \
   2>&1 | grep -E "error:|Test run with|TEST (FAILED|SUCCEEDED)" | grep -iv connection
 ```
 

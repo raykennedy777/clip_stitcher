@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The damage detector's pure stages (issue #45): demux anomaly extraction,
 /// clustering, confirm-decode parsing, and zone span math. The shapes and numbers
@@ -75,7 +75,7 @@ struct DamageDetectorTests {
     }
 
     @Test func cleanStreamsAndPtsOnlyQuirksProduceNoAnomalies() {
-        // The BBC capture's benign shape: dts fully continuous, some packets missing
+        // The broadcast capture's benign shape: dts fully continuous, some packets missing
         // *pts only* (refilled from dts by the index — ADR-0006). Zero anomalies:
         // the empirical full-file scan of the real capture found exactly none.
         var packets = stamps(interval: 0.04, count: 200)

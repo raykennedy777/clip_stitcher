@@ -1,7 +1,7 @@
-name: VidConform
+name: ClipStitcher
 
 options:
-  bundleIdPrefix: com.conmotogroup
+  bundleIdPrefix: io.github.raykennedy777
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
@@ -12,13 +12,12 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    DEVELOPMENT_TEAM: ""
-    CODE_SIGN_STYLE: Manual
-    CODE_SIGN_IDENTITY: "VidConform Dev"
     ENABLE_HARDENED_RUNTIME: YES
+    # Signing lives in Config/Signing.xcconfig (portable ad-hoc default + optional local
+    # override) so a fresh clone builds with no Apple account or certificate.
   configs:
     Debug:
-      # Hardened runtime enforces Library Validation: under the self-signed "VidConform Dev"
+      # Hardened runtime enforces Library Validation: under the self-signed "ClipStitcher Dev"
       # cert (Team ID "not set") the test host refuses to load the xctest bundle and the
       # Xcode debug dylib ("different Team IDs"), so `xcodebuild test` aborts at launch. Dev
       # builds need neither (no notarization); Release still gets hardened runtime from base.
@@ -27,62 +26,69 @@ settings:
       ENABLE_DEBUG_DYLIB: NO
 
 targets:
-  VidConform:
+  ClipStitcher:
     type: application
     platform: macOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
     sources:
       - path: Sources
     settings:
       base:
-        PRODUCT_NAME: VidConform
-        PRODUCT_BUNDLE_IDENTIFIER: com.conmotogroup.vidconform
+        PRODUCT_NAME: ClipStitcher
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.raykennedy777.clipstitcher
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.video"
         COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Generated/Info.plist
       properties:
-        CFBundleName: VidConform
-        CFBundleDisplayName: VidConform
+        CFBundleName: Clip Stitcher
+        CFBundleDisplayName: Clip Stitcher
         LSMinimumSystemVersion: "14.0"
-        NSHumanReadableCopyright: "Copyright © 2026 Conmoto Group. All rights reserved."
+        NSHumanReadableCopyright: "Copyright © 2026 raykennedy777"
         CFBundleDocumentTypes:
-          - CFBundleTypeName: VidConform Project
+          - CFBundleTypeName: Clip Stitcher Project
             CFBundleTypeRole: Editor
             LSHandlerRank: Owner
             LSItemContentTypes:
-              - com.conmotogroup.vidconform.project
+              - io.github.raykennedy777.clipstitcher.project
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: com.conmotogroup.vidconform.project
-            UTTypeDescription: VidConform Project
+          - UTTypeIdentifier: io.github.raykennedy777.clipstitcher.project
+            UTTypeDescription: Clip Stitcher Project
             UTTypeConformsTo:
               - public.data
             UTTypeTagSpecification:
               public.filename-extension:
-                - vidconform
+                - clipstitcher
 
-  VidConformTests:
+  ClipStitcherTests:
     type: bundle.unit-test
     platform: macOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
     sources:
       - path: Tests
     dependencies:
-      - target: VidConform
+      - target: ClipStitcher
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.conmotogroup.vidconform.tests
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.raykennedy777.clipstitcher.tests
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
-  VidConform:
+  ClipStitcher:
     build:
       targets:
-        VidConform: all
-        VidConformTests: [test]
+        ClipStitcher: all
+        ClipStitcherTests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
-        - VidConformTests
+        - ClipStitcherTests
     archive:
       config: Release

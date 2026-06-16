@@ -12,15 +12,17 @@
 # sources. The exact ranges are written to manifest.txt next to the fixtures.
 #
 # Usage: make_corrupt_fixtures.sh [output-dir]
-#   Sources default to the known clean fixtures; override with MPEG2_SRC / H264_SRC /
-#   HEVC_SRC environment variables.
+#   You supply your own clean sources (no media is committed; ADR-0023). Set SAMPLES_DIR to a
+#   folder holding source_mpeg2.mpg / source_h264.mkv / source_hevc.mkv, or override each path
+#   individually with MPEG2_SRC / H264_SRC / HEVC_SRC.
 
 set -euo pipefail
 
-OUT_DIR="${1:-$HOME/Desktop/working/corrupt_fixtures}"
-MPEG2_SRC="${MPEG2_SRC:-$HOME/Downloads/MotoGP.125cc.2009.Round01.Qatar.Race.BBC.mpg}"
-H264_SRC="${H264_SRC:-$HOME/Desktop/working/motogp_2026/saturday/hungary_sprint.mkv}"
-HEVC_SRC="${HEVC_SRC:-$HOME/Desktop/working/motogp_2026/saturday/hungary_sprint_1080p50.mkv}"
+SAMPLES_DIR="${SAMPLES_DIR:-$HOME/clipstitcher-samples}"
+OUT_DIR="${1:-$SAMPLES_DIR/corrupt_fixtures}"
+MPEG2_SRC="${MPEG2_SRC:-$SAMPLES_DIR/source_mpeg2.mpg}"
+H264_SRC="${H264_SRC:-$SAMPLES_DIR/source_h264.mkv}"
+HEVC_SRC="${HEVC_SRC:-$SAMPLES_DIR/source_hevc.mkv}"
 
 EXCERPT_SECONDS=90
 DAMAGE_FRACTIONS="0.40 0.55 0.70"

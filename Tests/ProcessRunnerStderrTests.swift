@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins `ProcessRunner`'s stderr handling (issue #59): a subprocess that floods stderr
 /// past the OS pipe buffer (~64 KB) before exiting must not deadlock, and the result's

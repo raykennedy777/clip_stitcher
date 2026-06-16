@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Split-point arithmetic (issue #20, ADR-0017): a split at frame N starts the
 /// range after it, only splits strictly inside the selection range (in < N ≤ out)

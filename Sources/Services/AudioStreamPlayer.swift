@@ -29,7 +29,7 @@ final class AudioStreamPlayer {
 
     /// Blocking pipe reads run here (never the main thread or the concurrency pool),
     /// mirroring FrameStreamDecoder's hygiene.
-    private let queue = DispatchQueue(label: "com.conmotogroup.vidconform.audioplayer")
+    private let queue = DispatchQueue(label: "io.github.raykennedy777.clipstitcher.audioplayer")
     private let lock = NSLock()
     private var process: Process?
     /// Bumped by `stop()`; a reader that wakes up under an older generation exits

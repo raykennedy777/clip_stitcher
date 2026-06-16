@@ -19,7 +19,7 @@ final class KeyframePrefetcher {
     private let width: Int
     private let height: Int
     private let ffmpeg: URL
-    private let queue = DispatchQueue(label: "com.conmotogroup.vidconform.kf-prefetch")
+    private let queue = DispatchQueue(label: "io.github.raykennedy777.clipstitcher.kf-prefetch")
     private let lock = NSLock()
     private var process: Process?
     private var generation = 0

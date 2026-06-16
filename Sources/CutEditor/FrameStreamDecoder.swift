@@ -31,7 +31,7 @@ final class FrameStreamDecoder {
     /// and must emit exactly `width`×`height` (the pipe reads fixed-size frames).
     private let filter: String?
     private let ffmpeg: URL
-    private let queue = DispatchQueue(label: "com.conmotogroup.vidconform.decoder")
+    private let queue = DispatchQueue(label: "io.github.raykennedy777.clipstitcher.decoder")
 
     /// How many trailing frames to materialise when decoding forward through a GOP.
     /// Matches the model's cache cap so a run of backward steps stays in cache.

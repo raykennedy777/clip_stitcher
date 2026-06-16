@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the pure export-progress math (issue #9): `-progress pipe:1` line parsing
 /// and incremental chunk assembly, the out_time → overall-fraction mapping (keeping the

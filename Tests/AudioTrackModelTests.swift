@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Multi-track audio model rules (ADR-0014): track display naming from container
 /// metadata with the "Track N" fallback, and project-JSON backward compatibility for
@@ -65,9 +65,9 @@ struct AudioTrackModelTests {
 
     @Test func probedTrackListSurvivesARoundTrip() throws {
         var clip = Clip(bookmark: Data(), displayName: "multi.mkv")
-        clip.audio = track(language: "eng", title: "Eurosport")
+        clip.audio = track(language: "eng", title: "Commentary")
         clip.audioTracks = [
-            track(language: "eng", title: "Eurosport"),
+            track(language: "eng", title: "Commentary"),
             track(language: "spa", title: "TVE"),
             track(title: "Natural Sounds"),
         ]

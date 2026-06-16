@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The pure halves of the scene-change jump (ROADMAP slice 8): parsing ffmpeg's
 /// `metadata=print` output, mapping times back to frames, and the landing rules —

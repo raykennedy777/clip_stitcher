@@ -1,4 +1,4 @@
-# vid_conform
+# clip_stitcher
 
 A macOS app for frame-accurate video joining via smart rendering — re-encoding only the
 frames at edit/join boundaries while stream-copying everything untouched. See `README.md`
@@ -12,7 +12,7 @@ De-risk every ffmpeg command in the shell — on all three formats and **in the 
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues for `raykennedy777/vid_conform` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues for `raykennedy777/clip_stitcher` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

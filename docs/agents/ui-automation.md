@@ -113,10 +113,10 @@ the marker plus the paths the run needs:
 
 | Variable | Meaning |
 | --- | --- |
-| `VIDCONFORM_AUTOMATION=1` | Arms the bypass — must be exactly `1`; without it the panels behave as in normal use and the bypass is unreachable |
-| `VIDCONFORM_EXPORT_DEST` | Export… destination — a file path in Connect mode (the mode's extension is appended if missing), a folder in Separate mode |
-| `VIDCONFORM_IMPORT_SOURCE` | Add File sources — newline-separated paths, imported in order |
-| `VIDCONFORM_RELINK_SOURCE` | Relink… source — a single path |
+| `CLIPSTITCHER_AUTOMATION=1` | Arms the bypass — must be exactly `1`; without it the panels behave as in normal use and the bypass is unreachable |
+| `CLIPSTITCHER_EXPORT_DEST` | Export… destination — a file path in Connect mode (the mode's extension is appended if missing), a folder in Separate mode |
+| `CLIPSTITCHER_IMPORT_SOURCE` | Add File sources — newline-separated paths, imported in order |
+| `CLIPSTITCHER_RELINK_SOURCE` | Relink… source — a single path |
 
 The bypass replaces only the panel; everything downstream (import pipeline, export
 status/warnings/verification) runs exactly as in normal use. A companion variable
@@ -125,16 +125,16 @@ left unset leaves that flow on its panel. The environment is read once at launch
 Example — full headless loop (export, then re-import the result on a second launch):
 
 ```sh
-VIDCONFORM_AUTOMATION=1 \
-VIDCONFORM_IMPORT_SOURCE="$HOME/Downloads/clip.mkv" \
-VIDCONFORM_EXPORT_DEST=/tmp/out.mp4 \
-open --env-keep-all /path/to/VidConform.app   # or launch the binary directly
+CLIPSTITCHER_AUTOMATION=1 \
+CLIPSTITCHER_IMPORT_SOURCE="$HOME/Downloads/clip.mkv" \
+CLIPSTITCHER_EXPORT_DEST=/tmp/out.mp4 \
+open --env-keep-all /path/to/ClipStitcher.app   # or launch the binary directly
 # then over AX: press source.addFile → wait for the row → nav.output → output.export
 # → poll /tmp/out.mp4 → read output.status
 ```
 
 (`open` strips the environment unless the binary is launched directly —
-`…/VidConform.app/Contents/MacOS/VidConform &` is the reliable way.)
+`…/ClipStitcher.app/Contents/MacOS/ClipStitcher &` is the reliable way.)
 
 ## Synthesized-event gotchas (issue #41)
 
@@ -162,7 +162,7 @@ open --env-keep-all /path/to/VidConform.app   # or launch the binary directly
 ## Probe recipe
 
 A minimal external probe (Swift script, no project needed):
-`AXUIElementCreateApplication(pid)` for bundle id `com.conmotogroup.vidconform`,
+`AXUIElementCreateApplication(pid)` for bundle id `io.github.raykennedy777.clipstitcher`,
 then recurse `AXChildren` from `AXWindows` collecting `AXIdentifier`. AppleScript's
 `entire contents of window 1` still reports 0 for SwiftUI content — use AXChildren
 traversal instead; it returns the full annotated tree.

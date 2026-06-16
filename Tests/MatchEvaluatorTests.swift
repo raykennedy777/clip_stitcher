@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the smart-render-vs-conform match verdict (ADR-0005). Audio is not compared
 /// at all (ADR-0014): every audio leg is rebuilt and conformed to its output track's

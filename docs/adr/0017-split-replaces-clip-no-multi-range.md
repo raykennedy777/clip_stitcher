@@ -16,8 +16,8 @@ source file. We deliberately did **not** give `Clip` a list of kept ranges.
   row to drag or select.
 - **Clip replacement** (chosen): split is a cut-editor gesture, but the project model never
   learns a new concept. The resulting clips reorder, delete (batch, issue #12), retarget,
-  and export exactly like any other clip. Mirrors TMPGEnc Smart Renderer, where confirming
-  replaces the original clip with the split results in the clip list.
+  and export exactly like any other clip. Mirrors commercial smart-render editors, where
+  confirming replaces the original clip with the split results in the clip list.
 
 ## Consequences
 

@@ -1,4 +1,4 @@
-# vid_conform
+# clip_stitcher
 
 A macOS app for frame-accurate video joining via smart rendering: re-encode only the
 frames at edit/join boundaries while stream-copying everything untouched. This file fixes
@@ -115,7 +115,7 @@ _Avoid_: input, original
 
 **Project**:
 The ordered set of clips, the chosen target clip, and the output settings; persisted as one
-`.vidconform` document.
+`.clipstitcher` document.
 _Avoid_: session, job, timeline
 
 **Frame index**:

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Test-only bypass for the modal file panels (issue #37). When the app is
-/// launched with `VIDCONFORM_AUTOMATION=1`, the export save panel and the
+/// launched with `CLIPSTITCHER_AUTOMATION=1`, the export save panel and the
 /// import/relink open panels are skipped and their paths come from companion
 /// variables instead — so automated verification (see
 /// `docs/agents/ui-automation.md`) can run export → inspect → re-import without
@@ -9,13 +9,13 @@ import Foundation
 /// call site falls through to its normal panel, unchanged.
 struct AutomationOverrides {
     /// The marker that arms the bypass; must be exactly "1".
-    static let markerVariable = "VIDCONFORM_AUTOMATION"
+    static let markerVariable = "CLIPSTITCHER_AUTOMATION"
     /// Export destination: a file path in connect mode, a folder in separate mode.
-    static let exportDestinationVariable = "VIDCONFORM_EXPORT_DEST"
+    static let exportDestinationVariable = "CLIPSTITCHER_EXPORT_DEST"
     /// Add File sources — newline-separated paths, imported in order.
-    static let importSourcesVariable = "VIDCONFORM_IMPORT_SOURCE"
+    static let importSourcesVariable = "CLIPSTITCHER_IMPORT_SOURCE"
     /// Relink source — a single path.
-    static let relinkSourceVariable = "VIDCONFORM_RELINK_SOURCE"
+    static let relinkSourceVariable = "CLIPSTITCHER_RELINK_SOURCE"
 
     let exportDestination: URL?
     let importSources: [URL]

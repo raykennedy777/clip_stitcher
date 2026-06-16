@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins export cancellation (issue #32): the kept-files accounting on the status
 /// detail, and the discrimination between a cancel-caused process termination and a

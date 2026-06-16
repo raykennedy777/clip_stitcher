@@ -28,8 +28,8 @@ damage zones, video and audio.**
 ## Consequences
 
 - **Field-coded (PAFF) sources are the open fork.** ADR-0020 keeps PAFF warn-only because the
-  field-aware repaired-segment recipe is unproven. Clip Doctor's first real input (the 18:42
-  Polsat capture) is PAFF, so the shell de-risk must prove field-pair-aligned copy boundaries
+  field-aware repaired-segment recipe is unproven. Clip Doctor's first real input (a
+  broadcast capture) is PAFF, so the shell de-risk must prove field-pair-aligned copy boundaries
   and an interlaced re-encode seaming cleanly in TS. If it proves out, field-coded sources get
   smart-render repair; if the seams are unworkable, field-coded sources fall back to a full
   interlaced re-encode (lossy, slow, but seamless). This is decided in the shell, before Swift.

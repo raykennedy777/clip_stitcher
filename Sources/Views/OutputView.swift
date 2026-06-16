@@ -234,8 +234,8 @@ struct OutputView: View {
     private var defaultName: String {
         if let first = document.project.clips.first {
             let stem = (first.displayName as NSString).deletingPathExtension
-            return stem.isEmpty ? "VidConform Export" : stem
+            return stem.isEmpty ? "Clip Stitcher Export" : stem
         }
-        return "VidConform Export"
+        return "Clip Stitcher Export"
     }
 }

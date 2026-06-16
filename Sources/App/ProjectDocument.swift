@@ -24,7 +24,7 @@ enum ExportStatus: Equatable {
     case cancelled(detail: String?)
 }
 
-/// The document backing one VidConform project. A reference type so async import
+/// The document backing one ClipStitcher project. A reference type so async import
 /// work (ffprobe + frame indexing) can mutate published state safely.
 ///
 /// Persisted state lives in `project` (a Codable `VidProject`). Everything else
@@ -32,7 +32,7 @@ enum ExportStatus: Equatable {
 final class ProjectDocument: ReferenceFileDocument {
     typealias Snapshot = VidProject
 
-    static var readableContentTypes: [UTType] { [.vidConformProject] }
+    static var readableContentTypes: [UTType] { [.clipStitcherProject] }
 
     @Published var project: VidProject
     @Published var importStates: [Clip.ID: ImportState] = [:]

@@ -1,6 +1,6 @@
 # Confirm-time keep choice for split ranges
 
-vid_conform does not offer a TMPGEnc-style choice at cut-editor confirm time of
+clip_stitcher does not offer a multi-range keep choice at cut-editor confirm time of
 which split ranges to register as clips ("keep both sets" vs "keep only the
 alternating set").
 
@@ -8,7 +8,7 @@ alternating set").
 
 The split slice deliberately shipped with the simpler two-step flow: every split
 range becomes a clip, and unwanted ones are deleted in the Source view
-(multi-select batch delete, issue #12). Issue #22 was filed as a placeholder in
+(multi-select batch delete, issue #12). Issue #69 was filed as a placeholder in
 case that flow proved annoying in real-world ad-cutting use.
 
 It didn't. During triage on 2026-06-11 the maintainer reported having used the
@@ -24,4 +24,4 @@ two-step flow grate.
 
 ## Prior requests
 
-- #22 — "Cut editor: confirm-time keep choice for split ranges (TMPGEnc both/alternating)"
+- #69 — "Cut editor: confirm-time keep choice for split ranges (keep both/alternating)"

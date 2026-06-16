@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Duplicate inserts a copy directly after the original — same source, probed
 /// properties, and in/out selection, but its own identity (ROADMAP slice 7).

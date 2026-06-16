@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins the preview's spatial conform chain (ADR-0012): the deinterlace/scale/pad
 /// decisions mirror ConformEngine's, computed in the canvas's square-pixel display

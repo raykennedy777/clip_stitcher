@@ -1,7 +1,7 @@
 import Foundation
 
-/// The serializable state of a VidConform project: the ordered clips, which clip
-/// is the target, and the output settings. Persisted as JSON in the `.vidconform`
+/// The serializable state of a ClipStitcher project: the ordered clips, which clip
+/// is the target, and the output settings. Persisted as JSON in the `.clipstitcher`
 /// document.
 struct VidProject: Codable, Equatable {
     var clips: [Clip] = []

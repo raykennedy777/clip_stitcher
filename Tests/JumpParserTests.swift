@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Jump popover parsing (issue #21): lenient timecode and frame fields, with
 /// relative (offset) and absolute (from the clip's first frame) resolution.
@@ -14,7 +14,7 @@ struct JumpParserTests {
     }
 
     @Test func bareSecondsConvert() {
-        // TMPGEnc's example: 70 seconds is 1:10.
+        // Bare seconds convert to frames: 70 seconds is 1:10.
         #expect(JumpParser.timecodeFrames("70", fps: 25) == 1750)
     }
 

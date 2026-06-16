@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The pure audio side of the output preview (issue #8): per-(track × segment) leg
 /// resolution mirroring the export's audio rebuild (ADR-0014), and the seek/duration

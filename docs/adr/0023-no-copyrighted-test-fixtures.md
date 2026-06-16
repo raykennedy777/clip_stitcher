@@ -1,13 +1,13 @@
 # Test fixtures carry no copyrighted media; integration tests build them from a private capture and skip when it's absent
 
-This repo is intended to go public, and the real-world test material — the Polsat / MotoGP
-broadcast captures the engine was de-risked against — is copyrighted. So **no copyrighted media
-may be committed to the repo**, by any mechanism: not directly, and not via git-lfs (both
-publish the bytes). An integration test that genuinely needs such a source instead **generates
-its fixture on demand** — a fast `-c copy` slice of the private capture, written into a
-fully-gitignored local fixtures folder — and **skips loudly** when neither the cached slice nor
-the private capture is present (a fresh clone, another machine). The committed artifacts are the
-test code and a documented capture path; never the video.
+This repo is intended to go public, and the real-world test material the engine was de-risked
+against is copyrighted broadcast video. So **no copyrighted media may be committed to the
+repo**, by any mechanism: not directly, and not via git-lfs (both publish the bytes). An
+integration test that genuinely needs such a source instead **generates its fixture on demand**
+— a fast `-c copy` slice of a developer-supplied capture, written into a fully-gitignored local
+fixtures folder — and **skips loudly** when neither the cached slice nor a capture is present (a
+fresh clone, another machine). The committed artifacts are the test code and the documented
+slice recipe; never the video.
 
 This is forced rather than chosen for the field-coded (PAFF) repair test (issue #61): the
 encoders in this ffmpeg build are MBAFF-only — there is no way to synthesise a PAFF source — so
@@ -40,11 +40,13 @@ exactly why it can't be committed. The same rule governs every future fixture of
 - **Suite:** `FieldCodedRepairIntegrationTests` (`Tests/FieldCodedRepairIntegrationTests.swift`).
   It skips loudly (`@Test(.enabled(if: PAFFFixture.available, "…"))`) when neither the cached
   slice nor the capture is present.
-- **Fixtures folder:** `Tests/Fixtures/field-coded/`, located at runtime from `#filePath` (env
-  and CWD don't reach the test runner). It ships only a `.gitignore` of `*` + `!.gitignore`; the
-  cached `paff_slice.ts` and `paff_slice_repaired.ts` are unstageable.
-- **Private capture (never committed):**
-  `~/Desktop/working/motogp_2026/sunday/polsat_sport_premium_2_20260607_1842.ts`.
+- **Fixtures folder:** `Tests/Fixtures/field-coded/`, located at runtime from `#filePath`. It
+  ships only a `.gitignore` of `*` + `!.gitignore`; the cached `paff_slice.ts` and
+  `paff_slice_repaired.ts`, and any developer-supplied `source.ts`, are all unstageable.
+- **Developer-supplied capture (never committed):** drop a field-coded source at
+  `Tests/Fixtures/field-coded/source.ts` (resolved from `#filePath`, so it reaches the test
+  runner), or point `CLIPSTITCHER_PAFF_CAPTURE` at one when the runner inherits the environment.
+  No personal path is baked into the repo.
 - **Slice recipe (cut on demand, cached):** a fast stream-copy window over the capture's first
   damage zone (~883 s) — field-coded **and** carrying a video damage zone:
   ```
@@ -53,6 +55,6 @@ exactly why it can't be committed. The same rule governs every future fixture of
   ```
 - **Run commands** (the suite runs ~20–30 s — a full damage-to-EOF repair of the slice):
   - everyday fast run excludes it:
-    `xcodebuild test … -skip-testing:VidConformTests/FieldCodedRepairIntegrationTests`
+    `xcodebuild test … -skip-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests`
   - on demand / before a release:
-    `xcodebuild test … -only-testing:VidConformTests/FieldCodedRepairIntegrationTests`
+    `xcodebuild test … -only-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests`

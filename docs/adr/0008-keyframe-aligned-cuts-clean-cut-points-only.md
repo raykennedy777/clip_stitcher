@@ -18,9 +18,9 @@ This was confirmed in the shell against the three real test formats:
 
 | Content | Cut points | Pure-copy result |
 |---------|-----------|------------------|
-| H.264/MP4 (Eurosport) | all closed-GOP | frame-exact, clean |
-| MPEG-2/TS (BBC broadcast) | closed | frame-exact, clean |
-| HEVC/MKV (MotoGP 2026) | mixed | clean-decoding but −1–2 frames at open-GOP boundaries |
+| H.264/MP4 (broadcast) | all closed-GOP | frame-exact, clean |
+| MPEG-2/TS (broadcast) | closed | frame-exact, clean |
+| HEVC/MKV (broadcast) | mixed | clean-decoding but −1–2 frames at open-GOP boundaries |
 
 A matching frame *count* is not sufficient proof; the open/closed distinction must be derived
 from decode-vs-presentation order and is authoritative only when the cut segment actually decodes
@@ -43,7 +43,7 @@ on its own.
     the joins. The filter refills exactly those packets' PTS from DTS — the same rule
     `FrameIndexer.parseIndex` uses to number frames (ADR-0006) — and is the identity on
     fully-stamped sources. Every other codec×container command is byte-identical to its
-    validated shape. De-risked on the real BBC capture end-to-end (cut, re-encode, concat,
+    validated shape. De-risked on the real broadcast capture end-to-end (cut, re-encode, concat,
     chained remux, audio mux — frame-exact, clean decode, verify gates pass).
   where each `segment_time` is the **midpoint between the target cut-point's DTS (decode time) and
   the DTS of the packet decoded immediately before it**. The segment muxer splits at the first
@@ -74,7 +74,7 @@ on its own.
   health, catching the two concat-mux defects below.
   - **Amended (issue #19):** the check's original premise — one piece, one source, constant frame
     rate ⇒ uniform spacing — is false for **faithful stream copies of a timestamp-irregular
-    source**. The real 2009 BBC broadcast capture carries ~714 duplicate-PTS + re-sync-gap
+    source**. The real 2009 broadcast capture carries ~714 duplicate-PTS + re-sync-gap
     anomalies in 67 min; a copy span covering one reproduces it bit-exact, and the uniformity
     check rejected (and deleted) correct exports. The gate is now **plan-aware**: inside a
     **copied** span, an anomaly is a defect only if the source has no anomaly of the same kind
@@ -90,7 +90,7 @@ on its own.
     failed it). Consequence of seam strictness: a source anomaly that happens to sit *at* a
     planned segment boundary still fails verification — conservative by design; the shell
     de-risk caught a real misplaced-seam defect at exactly that position, so loosening seams
-    would have shipped it. De-risked on MPEG-2/TS (dirty BBC end-to-end pass + clean-CFR
+    would have shipped it. De-risked on MPEG-2/TS (dirty broadcast end-to-end pass + clean-CFR
     no-regression + injected dup/gap still fail), H.264/MP4 and HEVC/MKV+MP4 (clean
     copy+re-encode+concat pass both old and new gate). A full re-encode (`ConformEngine`) keeps
     the plain uniformity check — there is no copied span to be faithful to.

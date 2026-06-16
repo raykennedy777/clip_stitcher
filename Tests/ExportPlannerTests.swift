@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the pure export planning behind the document's export entry point
 /// (issue #28): the smart-render-vs-conform verdict matrix (ADR-0005 / ADR-0011) and

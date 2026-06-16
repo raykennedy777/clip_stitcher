@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the one audio source resolver behind preview playback and export
 /// (ADR-0014): turning a clip's audio track selections into concrete sources, with the
@@ -37,7 +37,7 @@ struct AudioSourceResolverTests {
     @Test func externalFileResolvesToItsURLAndChosenStream() throws {
         // A live external file: bookmark resolves, file exists — both policies agree.
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-resolver-test-\(UUID().uuidString)")
+            .appendingPathComponent("clipstitcher-resolver-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("commentary.mp3")
@@ -88,7 +88,7 @@ struct AudioSourceResolverTests {
     @Test func missingFileBehindALiveBookmarkCountsAsMissing() throws {
         // The bookmark resolves but the file was deleted since: same policy split.
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-resolver-test-\(UUID().uuidString)")
+            .appendingPathComponent("clipstitcher-resolver-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("fleeting.mp3")
@@ -124,7 +124,7 @@ struct AudioSourceResolverTests {
     }
 
     @Test func trackFormatComesFromTheTargetFirstThenTimelineOrder() {
-        let mono = AudioProperties(codec: "mp2", sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport")
+        let mono = AudioProperties(codec: "mp2", sampleRate: 44100, channels: 1, language: "eng", title: "Commentary")
         let stereo = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2, language: "spa", title: "TVE")
         let other = AudioProperties(codec: "ac3", sampleRate: 32000, channels: 2)
         // target carries one track; the second output track's spec falls to the first
@@ -133,7 +133,7 @@ struct AudioSourceResolverTests {
         let clips = [clipWithTracks([other]), clipWithTracks([other, stereo])]
         let tracks = AudioSourceResolver.resolveOutputTracks(target: target, clips: clips)
         #expect(tracks == [
-            AudioCodecPolicy.OutputAudioTrack(sampleRate: 44100, channels: 1, language: "eng", title: "Eurosport"),
+            AudioCodecPolicy.OutputAudioTrack(sampleRate: 44100, channels: 1, language: "eng", title: "Commentary"),
             AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2, language: "spa", title: "TVE"),
         ])
     }

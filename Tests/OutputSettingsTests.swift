@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins `OutputSettings` decoding across save vintages: the `rendering` choice arrived
 /// with ADR-0018, and saves made before it must decode to conform-to-target — today's

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The field-coded (PAFF) check (issue #46): measured packet cadence vs the probed
 /// display rate. The rate pairs and cadences below are the *real* probed values of the
@@ -28,7 +28,7 @@ struct FieldCodingDetectorTests {
     }
 
     @Test func cleanTwentyFiveFpsIsNotFlagged() {
-        // The BBC MPEG-2 / hungary H.264 shape: 25 packets/s, 25/1 both ways.
+        // The MPEG-2 / H.264 shape: 25 packets/s, 25/1 both ways.
         #expect(!FieldCodingDetector.isFieldCoded(
             packetPts: pts(interval: 0.04), frameRates: ["25/1", "25/1"]))
     }
@@ -42,7 +42,7 @@ struct FieldCodingDetectorTests {
     }
 
     @Test func strayTimestampAnomaliesDoNotChangeTheVerdict() {
-        // Real broadcast captures carry stray duplicate/gap anomalies (the BBC fixture
+        // Real broadcast captures carry stray duplicate/gap anomalies (the broadcast fixture
         // has ~714 — ADR-0008); the median cadence must shrug them off.
         var dirty = pts(interval: 0.04)
         dirty[50] = dirty[49]            // duplicate pts

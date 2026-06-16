@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the *copy-safe boundary* test for Milestone 2's boundary re-encode
 /// (ADR-0009): the keyframes a stream-copied middle may start/end on without dragging

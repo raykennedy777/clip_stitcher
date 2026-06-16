@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the keyframe lookup that keyframe-aligned cuts (export Milestone 1)
 /// will depend on: the nearest keyframe at or before a given frame is the safe

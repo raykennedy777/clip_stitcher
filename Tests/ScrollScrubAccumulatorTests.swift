@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// The scroll-to-scrub step math (issue #40). Direction follows page meaning:
 /// positive deltaY — the gesture that scrolls a webpage toward its top — moves

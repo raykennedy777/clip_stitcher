@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins the shared encoder-selection tables (issue #29) both re-encode paths build
 /// from: codec → encoder, profile-string → -profile:v token, and the level tokens.

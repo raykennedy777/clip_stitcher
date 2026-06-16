@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Pins the output-frame ↔ source-frame mapping of the preview's assembled timeline
 /// (ADR-0012): matching clips pass through 1:1, conformed clips are re-timed to the

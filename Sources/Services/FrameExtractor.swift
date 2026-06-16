@@ -22,7 +22,7 @@ enum FrameExtractor {
         guard index.count > 0, n >= 0, n < index.count else { return nil }
         let ffmpeg = try FFTools.ffmpegURL()
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-\(UUID().uuidString).png")
+            .appendingPathComponent("clipstitcher-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let anchor = index.keyframeIndex(atOrBefore: n)
@@ -84,7 +84,7 @@ enum FrameExtractor {
 
         let ffmpeg = try FFTools.ffmpegURL()
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-window-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("clipstitcher-window-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 

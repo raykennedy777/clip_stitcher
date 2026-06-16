@@ -454,10 +454,10 @@ enum ClipDoctorEngine {
         // Intermediates live in a throwaway temp dir; the final mux is staged on the
         // destination's own volume so the success move is an atomic same-volume rename.
         let work = fm.temporaryDirectory
-            .appendingPathComponent("vidconform-doctor-\(UUID().uuidString)")
+            .appendingPathComponent("clipstitcher-doctor-\(UUID().uuidString)")
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         let staged = dest.deletingLastPathComponent()
-            .appendingPathComponent("vidconform-doctor-staging-\(UUID().uuidString).\(ext)")
+            .appendingPathComponent("clipstitcher-doctor-staging-\(UUID().uuidString).\(ext)")
         defer {
             try? fm.removeItem(at: work)
             try? fm.removeItem(at: staged)   // present only on a failed/cancelled run

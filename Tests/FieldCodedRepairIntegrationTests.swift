@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import VidConform
+@testable import ClipStitcher
 
 /// End-to-end regression net for the field-coded (PAFF) damage-to-EOF repair (issue #54,
 /// ADR-0022) — the one acceptance criterion that the fast unit suite can't cover, because
@@ -14,8 +14,8 @@ import Foundation
 /// capture into a fully-gitignored folder, caches it there, and **skips loudly** when neither
 /// the cached slice nor the capture is present (a fresh clone / other machine). It is kept
 /// out of the everyday run by living in its own suite — run it on demand with
-/// `-only-testing:VidConformTests/FieldCodedRepairIntegrationTests`, and the fast unit run
-/// excludes it with `-skip-testing:VidConformTests/FieldCodedRepairIntegrationTests`.
+/// `-only-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests`, and the fast unit run
+/// excludes it with `-skip-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests`.
 @Suite("Field-coded repair (integration)")
 struct FieldCodedRepairIntegrationTests {
 
@@ -23,11 +23,20 @@ struct FieldCodedRepairIntegrationTests {
     enum PAFFFixture {
         enum FixtureError: Error { case absent }
 
-        /// The private broadcast capture — copyrighted, **never committed**. Documented here
-        /// so the slice is reproducible and the skip message can point at it.
-        static let capture = URL(fileURLWithPath:
-            ("~/Desktop/working/motogp_2026/sunday/polsat_sport_premium_2_20260607_1842.ts"
-                as NSString).expandingTildeInPath)
+        /// A developer-supplied field-coded capture — copyrighted, **never committed**
+        /// (ADR-0023). Point `CLIPSTITCHER_PAFF_CAPTURE` at one, or drop a file at
+        /// `Tests/Fixtures/field-coded/source.ts` (the folder is fully gitignored). Absent on a
+        /// fresh clone, so the test skips loudly. Returns nil unless a capture actually exists.
+        static var capture: URL? {
+            let fm = FileManager.default
+            if let env = ProcessInfo.processInfo.environment["CLIPSTITCHER_PAFF_CAPTURE"],
+               !env.isEmpty {
+                let url = URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
+                if fm.fileExists(atPath: url.path) { return url }
+            }
+            let local = folder.appendingPathComponent("source.ts")
+            return fm.fileExists(atPath: local.path) ? local : nil
+        }
 
         /// The gitignored local fixtures folder, located relative to *this source file*
         /// (`#filePath`, a compile-time absolute path) rather than from the environment or the
@@ -44,10 +53,9 @@ struct FieldCodedRepairIntegrationTests {
         /// no re-encode, so the corrupt packets are preserved exactly.
         static let sliceStart = 850.0, sliceDuration = 90.0
 
-        /// The fixture can run iff the cached slice or the private capture is present.
+        /// The fixture can run iff the cached slice or a developer-supplied capture is present.
         static var available: Bool {
-            let fm = FileManager.default
-            return fm.fileExists(atPath: slice.path) || fm.fileExists(atPath: capture.path)
+            FileManager.default.fileExists(atPath: slice.path) || capture != nil
         }
 
         /// The cached slice, cut from the capture on demand (and cached in the gitignored
@@ -55,7 +63,7 @@ struct FieldCodedRepairIntegrationTests {
         static func ensure() async throws -> URL {
             let fm = FileManager.default
             if fm.fileExists(atPath: slice.path) { return slice }
-            guard fm.fileExists(atPath: capture.path) else { throw FixtureError.absent }
+            guard let capture else { throw FixtureError.absent }
             try fm.createDirectory(at: folder, withIntermediateDirectories: true)
             let ffmpeg = try FFTools.ffmpegURL()
             let result = try await ProcessRunner.run(ffmpeg, [

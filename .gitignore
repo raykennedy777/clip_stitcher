@@ -42,11 +42,14 @@ venv/
 *.webm
 tmp/
 samples/
-tmpgenc_screenshots/
+scratch_screenshots/
 
 # Env
 .env
 .env.local
+
+# Local signing override (see Config/Local.xcconfig.example)
+Config/Local.xcconfig
 
 # Claude Code transient state
 .claude/scheduled_tasks.lock

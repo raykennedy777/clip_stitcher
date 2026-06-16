@@ -1,5 +1,5 @@
 import Testing
-@testable import VidConform
+@testable import ClipStitcher
 
 /// Exercises the pure CSV→index parsing. The frame index must keep one entry per decoded
 /// frame: the cut editor numbers frames by it and the export cuts by it, so a dropped

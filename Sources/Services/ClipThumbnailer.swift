@@ -53,7 +53,7 @@ actor ClipThumbnailer {
     private static func run(url: URL, seek: String?) async -> Data? {
         guard let ffmpeg = try? FFTools.ffmpegURL() else { return nil }
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vidconform-thumb-\(UUID().uuidString).png")
+            .appendingPathComponent("clipstitcher-thumb-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         var args = ["-hide_banner", "-loglevel", "error"]
