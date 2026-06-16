@@ -56,3 +56,34 @@ struct FrameIndexTimeLookupTests {
         #expect(index.frameIndex(atOrBeforeTime: 99.0) == 4)
     }
 }
+
+/// Preview audio's spawn commands (issue #8): the per-leg conform filter, the leg
+/// duration cap, and the silence leg — shapes de-risked in the shell on all three
+/// formats + the 4-track MKV (exact byte counts, first byte in 13–23 ms).
+struct AudioStreamPlayerPreviewArgumentTests {
+    @Test func filterAndDurationSlotIntoTheDecodeCommand() {
+        let args = AudioStreamPlayer.arguments(
+            filePath: "/tmp/clip.mkv", streamIndex: 1, seekSeconds: 11.6,
+            filter: "aresample=48000,aformat=channel_layouts=stereo", duration: 2.4)
+        #expect(args == [
+            "-v", "error",
+            "-ss", "11.600000",
+            "-t", "2.400000",
+            "-i", "/tmp/clip.mkv",
+            "-map", "0:a:1", "-vn",
+            "-af", "aresample=48000,aformat=channel_layouts=stereo",
+            "-f", "f32le", "-ac", "2", "-ar", "48000",
+            "-",
+        ])
+    }
+
+    @Test func silenceLegGeneratesEngineFormatSilenceForTheLegDuration() {
+        #expect(AudioStreamPlayer.silenceArguments(duration: 2.0) == [
+            "-v", "error",
+            "-t", "2.000000",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-f", "f32le", "-ac", "2", "-ar", "48000",
+            "-",
+        ])
+    }
+}

@@ -207,3 +207,21 @@ struct ProjectDocumentBatchTests {
         #expect(doc.project.clips[3].audioSelections == nil)
     }
 }
+
+/// The preview's track choice persists per project (pinned #8 decision): a new
+/// optional field on the project model — old saves decode to the default, track 1.
+struct MonitoredOutputTrackPersistenceTests {
+    @Test func oldSavesDecodeToNilMeaningTrackOne() throws {
+        let json = #"{"clips":[],"output":{"mode":"connect","type":"videoAndAudio","container":"ts"}}"#
+        let project = try JSONDecoder().decode(VidProject.self, from: Data(json.utf8))
+        #expect(project.monitoredOutputTrack == nil)
+    }
+
+    @Test func trackChoiceRoundTrips() throws {
+        var project = VidProject()
+        project.monitoredOutputTrack = 2
+        let data = try JSONEncoder().encode(project)
+        let decoded = try JSONDecoder().decode(VidProject.self, from: data)
+        #expect(decoded.monitoredOutputTrack == 2)
+    }
+}

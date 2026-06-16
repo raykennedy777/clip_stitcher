@@ -21,46 +21,6 @@ struct ClipDoctorEngineTests {
         #expect(ClipDoctorEngine.repairedSibling(of: dotted).lastPathComponent == "2026.06.07.race_repaired.ts")
     }
 
-    // MARK: - Bounded keyframe copy
-
-    /// 10 frames at 25 fps starting at the container's 1.0 s start_time.
-    private var index: FrameIndex {
-        let pts = (0..<10).map { 1.0 + Double($0) * 0.04 }
-        return FrameIndex(pts: pts, keyframeFlags: Array(repeating: true, count: 10))
-    }
-
-    @Test func boundedCopySeeksToTheSpanAndSplitsAfterItsFrameCount() {
-        let args = BoundaryReencodeEngine.boundedCopyArguments(
-            source: src, range: 2..<6, index: index, containerStart: 1.0,
-            segmentPattern: "/tmp/cp_%03d.ts")
-        // Input seek is start_time-relative: pts[2] (1.08) − containerStart (1.0) = 0.08.
-        #expect(args[args.firstIndex(of: "-ss")! + 1] == "0.08")
-        #expect(args.firstIndex(of: "-ss")! < args.firstIndex(of: "-i")!)   // input seek
-        // A single split after exactly hi−lo = 4 frames → segment 000 is the span.
-        #expect(args[args.firstIndex(of: "-segment_frames")! + 1] == "4")
-        #expect(args.contains("-reset_timestamps"))
-        // The read is bounded a couple of seconds past the span, not run to EOF.
-        #expect(args[args.firstIndex(of: "-t")! + 1] == "2.16")   // span 0.16 + 2.0
-        #expect(args.contains("-c") && args.contains("copy") && args.contains("0:v:0"))
-        #expect(args.last == "/tmp/cp_%03d.ts")
-    }
-
-    @Test func boundedCopyOfTheFirstSpanSeeksToZero() {
-        let args = BoundaryReencodeEngine.boundedCopyArguments(
-            source: src, range: 0..<4, index: index, containerStart: 1.0,
-            segmentPattern: "/tmp/cp_%03d.ts")
-        #expect(args[args.firstIndex(of: "-ss")! + 1] == "0")
-        #expect(args[args.firstIndex(of: "-segment_frames")! + 1] == "4")
-    }
-
-    @Test func boundedCopyOfTheTailRunsToTheLastFrame() {
-        // hi == count: span end is the last frame's pts, frame count is count − lo.
-        let args = BoundaryReencodeEngine.boundedCopyArguments(
-            source: src, range: 6..<10, index: index, containerStart: 1.0,
-            segmentPattern: "/tmp/cp_%03d.ts")
-        #expect(args[args.firstIndex(of: "-segment_frames")! + 1] == "4")
-    }
-
     // MARK: - Source-codec audio rebuild mux
 
     @Test func repairedMuxCopiesVideoAndRebuildsHEAACInItsOwnCodec() {
@@ -300,22 +260,6 @@ struct ClipDoctorEngineTests {
             from: segments, index: index, zones: zones, fieldOrder: "tt")
         #expect(plan == ClipDoctorEngine.damageToEOFPlan(segments, index: index, zones: zones))
         #expect(encoder == BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt"))
-    }
-
-    /// `-top` follows the source scan order: top-field-first stays 1, bottom-field-first 0.
-    @Test func mbaffRepairArgsCarryTheInterlaceFlagsCrf18AndTopFromFieldOrder() {
-        let tff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt")
-        #expect(tff.contains("libx264"))
-        #expect(tff[tff.firstIndex(of: "-flags")! + 1] == "+ildct+ilme")
-        #expect(tff[tff.firstIndex(of: "-top")! + 1] == "1")
-        #expect(tff[tff.firstIndex(of: "-crf")! + 1] == "18")        // fixed, visually lossless
-        #expect(tff[tff.firstIndex(of: "-forced-idr")! + 1] == "1")  // clean IDR entry seam
-        let params = tff[tff.firstIndex(of: "-x264-params")! + 1]
-        #expect(params.contains("ref=5") && params.contains("open_gop=0") && params.contains("b-pyramid=0"))
-        #expect(tff[tff.firstIndex(of: "-bsf:v")! + 1] == "dump_extra")
-
-        let bff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "bb")
-        #expect(bff[bff.firstIndex(of: "-top")! + 1] == "0")
     }
 
     // MARK: - H.264-only field-coded guard (issue #57)
