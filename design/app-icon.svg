@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- macOS app-icon master: 2h art inset to the 824/1024 icon grid with transparent margins -->
+  <g transform="translate(100,100) scale(0.8046875)">
+    <defs><clipPath id="sq"><rect width="1024" height="1024" rx="230"/></clipPath></defs>
+    <g clip-path="url(#sq)">
+      <rect x="0" y="0" width="512" height="1024" fill="#FF5A1F"/>
+      <rect x="512" y="0" width="512" height="1024" fill="#1B2A6B"/>
+
+      <!-- seam -->
+      <rect x="508" y="0" width="8" height="1024" fill="#F4F3EF"/>
+
+      <!-- cross-stitch braid: top edge -> target, target -> bottom edge -->
+      <g stroke="#F4F3EF" stroke-width="20" stroke-linecap="round">
+        <line x1="460" y1="22"  x2="564" y2="110"/><line x1="460" y1="110" x2="564" y2="22"/>
+        <line x1="460" y1="112" x2="564" y2="200"/><line x1="460" y1="200" x2="564" y2="112"/>
+        <line x1="460" y1="202" x2="564" y2="290"/><line x1="460" y1="290" x2="564" y2="202"/>
+        <line x1="460" y1="734" x2="564" y2="822"/><line x1="460" y1="822" x2="564" y2="734"/>
+        <line x1="460" y1="824" x2="564" y2="912"/><line x1="460" y1="912" x2="564" y2="824"/>
+        <line x1="460" y1="914" x2="564" y2="1002"/><line x1="460" y1="1002" x2="564" y2="914"/>
+      </g>
+
+      <!-- target -->
+      <circle cx="512" cy="512" r="210" fill="none" stroke="#F4F3EF" stroke-width="34"/>
+      <circle cx="512" cy="512" r="120" fill="#F4F3EF"/>
+      <circle cx="512" cy="512" r="60" fill="#111111"/>
+    </g>
+  </g>
+</svg>
