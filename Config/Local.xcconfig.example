@@ -1,0 +1,4 @@
+// Copy this file to Config/Local.xcconfig (gitignored) to override signing locally.
+// Example: pin a stable self-signed identity so macOS keeps TCC grants across rebuilds.
+//
+//   CODE_SIGN_IDENTITY = VidConform Dev

@@ -1,0 +1,13 @@
+// Code signing — portable defaults so `git clone` + build works on any machine with no
+// Apple Developer account or certificate (ad-hoc "Sign to Run Locally").
+//
+// To pin a stable signing identity locally — e.g. a self-signed cert so macOS doesn't
+// re-prompt for Desktop/Downloads access on every rebuild — copy Local.xcconfig.example
+// to Config/Local.xcconfig (gitignored) and set CODE_SIGN_IDENTITY there. The optional
+// include below picks it up when present and is silently skipped otherwise.
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"
