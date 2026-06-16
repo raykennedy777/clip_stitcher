@@ -20,8 +20,8 @@ jobs:
       - name: Build and test (fast suite)
         run: |
           xcodebuild test \
-            -scheme VidConform \
+            -scheme ClipStitcher \
             -destination 'platform=macOS' \
             ENABLE_DEBUG_DYLIB=NO ENABLE_HARDENED_RUNTIME=NO \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-            -skip-testing:VidConformTests/FieldCodedRepairIntegrationTests
+            -skip-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests
