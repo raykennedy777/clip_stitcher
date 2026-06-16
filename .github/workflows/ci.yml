@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen and FFmpeg
+        run: brew install xcodegen ffmpeg
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build and test (fast suite)
+        run: |
+          xcodebuild test \
+            -scheme VidConform \
+            -destination 'platform=macOS' \
+            ENABLE_DEBUG_DYLIB=NO ENABLE_HARDENED_RUNTIME=NO \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            -skip-testing:VidConformTests/FieldCodedRepairIntegrationTests
