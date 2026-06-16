@@ -53,6 +53,25 @@ struct ClipDetailLineTests {
                 == "H264 1024×576 · 50 fps · AC3 6ch 44kHz · 2 audio tracks")
     }
 
+    /// An interlaced source names its field order between the frame rate and the audio
+    /// (ClipRowView.detailLine field-order branch): the raw label is shown in parens.
+    @Test func interlacedClipNamesItsFieldOrder() {
+        var clip = videoClip()
+        clip.video?.fieldOrder = "tt"
+        clip.audioSelections = []
+        #expect(ClipRowView.detailLine(for: clip)
+                == "H264 1024×576 · 50 fps · interlaced (tt)")
+    }
+
+    /// A progressive source reads "progressive", not "interlaced (progressive)".
+    @Test func progressiveClipReadsProgressive() {
+        var clip = videoClip()
+        clip.video?.fieldOrder = "progressive"
+        clip.audioSelections = []
+        #expect(ClipRowView.detailLine(for: clip)
+                == "H264 1024×576 · 50 fps · progressive")
+    }
+
     @Test func zeroSlotsShowNoAudioSegment() {
         var clip = videoClip()
         clip.audio = track(codec: "mp2")
