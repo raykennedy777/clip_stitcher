@@ -1,33 +1,76 @@
-# vid_conform
+# ClipStitcher
 
-A macOS app for frame-accurate video joining via **smart rendering** — re-encoding only
-the frames at edit/join boundaries while stream-copying everything untouched. Inspired by
-[TMPGEnc MPEG Smart Renderer](https://tmpgenc.pegasys-inc.com/en/product/tmsr5.html).
+Frame-accurate video joining for macOS via **smart rendering**: stream-copy every untouched
+frame and re-encode only the partial GOPs at edit/join boundaries — near-instant, near-lossless
+joins. Clips that don't match the target spec (codec, resolution, color, scan) are conformed
+automatically.
 
-## Goal
+![Source view](docs/images/source.png)
 
-Trim clips to arbitrary frames and join them with near-instant, near-lossless output:
+## How it works
 
-1. **Probe** each input (codec, profile/level, resolution, fps, pixel format, GOP, color params).
-2. **Classify** each clip's in/out points:
-   - On a keyframe → stream-copy (bit-exact, zero re-encode).
-   - Between keyframes → re-encode only the partial GOP to the next keyframe; copy the rest.
-3. **Concatenate** the resulting segments (stream copy).
+1. **Probe** each input — codec, profile/level, resolution, fps, pixel format, GOP, color.
+2. **Classify** each in/out point — on a keyframe → stream-copy; between keyframes → re-encode
+   only the partial GOP to the next keyframe, copy the rest.
+3. **Concatenate** the segments (stream copy).
 
-The hard part is making the re-encoded boundary segment splice seamlessly with the copied
-stream: matching codec profile/level, pixel format, color space/range, bitrate, GOP structure,
-and PTS/DTS + audio alignment.
+## Screenshots
 
-## Approach / references
+| Cut editor | Output |
+| --- | --- |
+| ![Cut editor](docs/images/cut-editor.png) | ![Output](docs/images/output.png) |
 
-- [smartcut](https://github.com/skeskinen/smartcut) — boundary-re-encode algorithm (H.264/H.265/VP9/AV1).
-- [LosslessCut](https://github.com/mifi/lossless-cut) — reference for the cut/trim GUI UX.
-- FFmpeg as the underlying engine.
+## Requirements
 
-## Status
+- macOS 14+
+- Xcode 16+ (Swift 5)
+- [XcodeGen](https://github.com/yonwoo9/XcodeGen) + FFmpeg: `brew install xcodegen ffmpeg`
 
-The engine is done and verified on MPEG-2, H.264, and HEVC: keyframe-aligned cuts,
-frame-exact boundary re-encode, conform of non-matching clips to the target spec, and the
-sample-accurate audio rebuild (ROADMAP slices 1–5, ADR-0008…0011). Current work: the output
-preview (ROADMAP slice 6, ADR-0012). See `docs/ROADMAP.md` for what's next and `docs/adr/`
-for the reasoning.
+## Build & run
+
+```sh
+xcodegen generate
+open ClipStitcher.xcodeproj   # ⌘R to run
+```
+
+Builds out of the box with ad-hoc signing — no Apple account needed. `ffmpeg`/`ffprobe` are
+located from your `PATH` (Homebrew) during development.
+
+## Test
+
+```sh
+xcodebuild test -scheme ClipStitcher -destination 'platform=macOS' \
+  ENABLE_DEBUG_DYLIB=NO ENABLE_HARDENED_RUNTIME=NO \
+  -skip-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests
+```
+
+## Keyboard shortcuts
+
+Modifier order follows Apple's convention (⌃ ⌥ ⇧ ⌘).
+
+**Transport** (cut editor & preview)
+
+| Key | Action |
+| --- | --- |
+| `Space` | Play / Pause |
+| `←` `→` | Step one frame |
+| `⇧←` `⇧→` | Step to previous / next keyframe |
+
+**Cut editor only**
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` | Previous / next scene change |
+| `[` `]` | Set in / out point |
+| `⌘B` | Split / unsplit at the playhead |
+| `⌘J` | Go to a time or frame |
+
+**Mouse / trackpad** (cut editor)
+
+- Vertical scroll — scrub by frame
+- `⇧` + scroll — stride by keyframe
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). ClipStitcher drives FFmpeg as an external tool (not bundled);
+see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
