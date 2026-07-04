@@ -177,40 +177,85 @@ struct ExportEngineTests {
     @Test func keptWindowSubtractsTheContainerStartFromTheSeek() {
         // The measured .mpg case: in point at pts 60.2 in a 0.24-start container must
         // seek 59.96 — passing 60.2 lands 0.24 s late in content (measured +230 ms
-        // audio-ahead lip-sync error in the real TS output).
-        let w = ExportEngine.keptWindow(inPts: 60.2, outPts: 70.2, firstPts: 0.24,
+        // audio-ahead lip-sync error in the real TS output). The window ends at the out
+        // frame's display end (`outEndPts` = pts[out+1] = 70.24 → seek 70.0), so the leg
+        // covers the full kept video span, not one frame short (issue #75).
+        let w = ExportEngine.keptWindow(inPts: 60.2, outPts: 70.2, outEndPts: 70.24, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == 59.96)
-        #expect(abs(w.end! - 69.96) < 1e-9)
-        #expect(w.duration == 10.0)
+        #expect(abs(w.end! - 70.0) < 1e-9)
+        #expect(abs(w.duration - 10.04) < 1e-9)
     }
 
     @Test func keptWindowIsUnchangedOnAZeroStartContainer() {
-        let w = ExportEngine.keptWindow(inPts: 57.0, outPts: 60.0, firstPts: 0.04,
+        // Closed out at pts 60.0 whose next frame is 60.04: the window runs to the out
+        // frame's display end (60.04), matching the kept video span (issue #75).
+        let w = ExportEngine.keptWindow(inPts: 57.0, outPts: 60.0, outEndPts: 60.04, firstPts: 0.04,
                                         lastPts: 5169.0, frameDuration: 0.04, containerStart: 0)
         #expect(w.start == 57.0)
-        #expect(w.end == 60.0)
-        #expect(w.duration == 3.0)
+        #expect(abs(w.end! - 60.04) < 1e-9)
+        #expect(abs(w.duration - 3.04) < 1e-9)
+    }
+
+    @Test func keptWindowClosedOutAtFileEndUsesTheFrameDuration() {
+        // The out point is the last frame, so `pts[out+1]` doesn't exist (`outEndPts`
+        // nil): the display end falls back to one frame beyond the out pts (issue #75).
+        let w = ExportEngine.keptWindow(inPts: 4010.2, outPts: 4020.2, outEndPts: nil, firstPts: 0.24,
+                                        lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
+        #expect(w.start == 4009.96)
+        #expect(abs(w.end! - 4020.0) < 1e-9)
+        #expect(abs(w.duration - 10.04) < 1e-9)
     }
 
     @Test func keptWindowOpenStartReadsFromTheFileStart() {
         // No in point: no seek at all (and none needed — reading from the start is
-        // immune to the start_time trap). Duration spans first frame to the out pts.
-        let w = ExportEngine.keptWindow(inPts: nil, outPts: 10.24, firstPts: 0.24,
+        // immune to the start_time trap). Duration spans first frame to the out frame's
+        // display end (pts[out+1] = 10.28 → seek 10.04).
+        let w = ExportEngine.keptWindow(inPts: nil, outPts: 10.24, outEndPts: 10.28, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == nil)
-        #expect(w.end == 10.0)
-        #expect(w.duration == 10.0)
+        #expect(abs(w.end! - 10.04) < 1e-9)
+        #expect(abs(w.duration - 10.04) < 1e-9)
     }
 
     @Test func keptWindowOpenEndRunsToTheLastFrame() {
-        // No out point: read to the file end; the kept span ends one frame *after*
-        // the last frame's pts (the last frame still displays for a frame).
-        let w = ExportEngine.keptWindow(inPts: 4010.2, outPts: nil, firstPts: 0.24,
+        // No out point: read to the file end (end nil); the kept span ends one frame
+        // *after* the last frame's pts (the last frame still displays for a frame).
+        // Unchanged by #75 — the open-end branch already reached the display end.
+        let w = ExportEngine.keptWindow(inPts: 4010.2, outPts: nil, outEndPts: nil, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == 4009.96)
         #expect(w.end == nil)
         #expect(abs(w.duration - 10.04) < 1e-9)
+    }
+
+    /// The invariant issue #75 is about: for a tail-trimmed smart-rendered clip, the
+    /// forced audio-leg duration (`keptWindow.duration`) must equal the kept video span
+    /// (`clipSpan`) — pre-fix the leg was one frame short. Uses the same 25 fps 0.24-start
+    /// index as `clipSpanOfATrimmedSmartRenderedClipIsExact`, kept `[0, 4)`.
+    @Test func keptWindowDurationEqualsClipSpanForATrimmedClip() {
+        let pts = [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52]
+        let index = FrameIndex(pts: pts,
+                               keyframeFlags: [true, false, false, false, true, false, false, false])
+        // Clip kept in=0…out=3 (a copy segment 0..<4). clipSpan = pts[4] - pts[0].
+        let item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mpg"),
+                              segments: [PlannedSegment(kind: .copy, range: 0..<4)], index: index)
+        let w = ExportEngine.keptWindow(inPts: pts[0], outPts: pts[3], outEndPts: pts[4],
+                                        firstPts: pts.first, lastPts: pts.last,
+                                        frameDuration: 0.04, containerStart: 0.24)
+        #expect(abs(w.duration - (ExportEngine.clipSpan(item) ?? -1)) < 1e-9)
+        #expect(abs(w.duration - 0.16) < 1e-9)   // pts[4] - pts[0], four frame slots
+    }
+
+    /// A single-frame keep (`in == out`) must still force a one-frame-duration leg —
+    /// pre-#75 its duration collapsed to 0 (out pts − in pts), leaving the leg unforced.
+    @Test func keptWindowSingleFrameKeepForcesOneFrame() {
+        let w = ExportEngine.keptWindow(inPts: 1.0, outPts: 1.0, outEndPts: 1.04,
+                                        firstPts: 0.0, lastPts: 5.0, frameDuration: 0.04,
+                                        containerStart: 0)
+        #expect(abs(w.duration - 0.04) < 1e-9)   // exactly one frame, not zero
+        #expect(w.start == 1.0)
+        #expect(abs(w.end! - 1.04) < 1e-9)
     }
 
     private let stereoTrack = AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2)

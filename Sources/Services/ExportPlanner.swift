@@ -117,9 +117,17 @@ enum ExportPlanner {
             guard index.pts.indices.contains(frame) else { throw ExportError.invalidPlan }
             return index.pts[frame]
         }
+        // The frame after the out point (`pts[out+1]`), when it exists: the out frame's
+        // display end, where the kept video span reaches (`clipSpan`, #75). nil for an
+        // open out point or when the out is the last frame (the file-end fallback in
+        // `keptWindow` then uses one frame beyond the out pts).
+        let outEndPts = clip.outPoint.flatMap { out in
+            index.pts.indices.contains(out + 1) ? index.pts[out + 1] : nil
+        }
         let window = ExportEngine.keptWindow(
             inPts: try keptPts(clip.inPoint),
             outPts: try keptPts(clip.outPoint),
+            outEndPts: outEndPts,
             firstPts: index.pts.first, lastPts: index.pts.last,
             frameDuration: frameDuration(clip.video?.frameRate),
             containerStart: input.containerStart)

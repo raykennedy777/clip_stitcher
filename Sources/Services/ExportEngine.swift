@@ -394,14 +394,30 @@ enum ExportEngine {
     /// the container's start_time, so passing absolute pts lands `containerStart`
     /// seconds late in content on a non-zero-start file (measured +230 ms audio-ahead
     /// on the MPEG-PS test clip — issue #3); the seek values subtract it. The duration
-    /// stays in absolute pts: first/last frame fill open ends, and the last frame
-    /// displays for one frame beyond its pts.
-    static func keptWindow(inPts: Double?, outPts: Double?, firstPts: Double?,
-                           lastPts: Double?, frameDuration: Double?, containerStart: Double) -> KeptWindow {
+    /// stays in absolute pts.
+    ///
+    /// The kept **video** piece spans through the out frame's *display end*, not its pts:
+    /// the smart-render plan keeps frames `[in, out+1)` and `clipSpan` measures
+    /// `pts[out+1] - pts[in]`, so the last kept frame (`out`) still occupies its full
+    /// slot. The window must end there too — at `outEndPts` (`pts[out+1]`), or one frame
+    /// beyond the out pts at the file end where `pts[out+1]` doesn't exist. Ending at the
+    /// out frame's own pts (the pre-#75 behavior) dropped that last slot, so every
+    /// tail-trimmed audio leg was one frame shorter than its video and, forced to
+    /// `duration` (ADR-0014), drifted a frame earlier per join in connect mode (#75). An
+    /// open out end already ran to `lastPts + frameDuration` (last frame's display end)
+    /// and is unchanged; a single-frame keep (`in == out`) now yields a one-frame
+    /// duration instead of zero, so its leg is still length-forced.
+    static func keptWindow(inPts: Double?, outPts: Double?, outEndPts: Double?,
+                           firstPts: Double?, lastPts: Double?,
+                           frameDuration: Double?, containerStart: Double) -> KeptWindow {
         let spanStart = inPts ?? firstPts ?? 0
-        let spanEnd = outPts ?? ((lastPts ?? 0) + (frameDuration ?? 0))
+        // A closed out point ends the window at the out frame's display end; open runs
+        // one frame past the last frame's pts. Both leave `end` nil only when the out is
+        // open (read audio to the file end).
+        let closedEnd = outPts.map { outEndPts ?? ($0 + (frameDuration ?? 0)) }
+        let spanEnd = closedEnd ?? ((lastPts ?? 0) + (frameDuration ?? 0))
         return KeptWindow(start: inPts.map { $0 - containerStart },
-                          end: outPts.map { $0 - containerStart },
+                          end: closedEnd.map { $0 - containerStart },
                           duration: max(0, spanEnd - spanStart))
     }
 

@@ -83,7 +83,9 @@ struct ExportPlannerTests {
     // MARK: item assembly
 
     @Test func smartRenderedItemCarriesPlanWindowAndSources() throws {
-        // Kept range frames 2…6 on a 0-start container: window in pts, duration = kept span.
+        // Kept range frames 2…6 on a 0-start container (pts 0.08…0.24, next frame 0.28).
+        // The window ends at the out frame's display end (pts[7] = 0.28), so the forced
+        // audio duration equals the kept video span, not one frame short (issue #75).
         let input = ExportPlanner.ClipInput(
             clip: clip(video: video(), inPoint: 2, outPoint: 6),
             url: URL(fileURLWithPath: "/tmp/a.mp4"), index: index,
@@ -94,8 +96,8 @@ struct ExportPlannerTests {
         #expect(item.codec == "h264")
         #expect(item.source.path == "/tmp/a.mp4")
         #expect(item.audioStart == 0.08)
-        #expect(item.audioEnd == 0.24)
-        #expect(abs((item.audioDuration ?? 0) - 0.16) < 1e-9)
+        #expect(abs((item.audioEnd ?? 0) - 0.28) < 1e-9)   // out frame's display end (pts[7])
+        #expect(abs((item.audioDuration ?? 0) - 0.20) < 1e-9)   // pts[7] - pts[2] = kept video span
         #expect(item.audioSources == [.stream(0), nil])
         #expect(!item.encoder.isEmpty)
     }
