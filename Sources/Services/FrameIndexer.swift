@@ -132,101 +132,104 @@ enum FrameIndexer {
     /// audio gap, including events that leave no video packet trace.
     ///
     /// The scan reads a source sequentially and is linear in file size — minutes on a
-    /// multi-GB network file (issue #81). When `onProgress` and a positive
-    /// `expectedDuration` are supplied, the streamed CSV is teed through a `ScanProgress`
-    /// parser so the caller can advance a bar off the greatest `pts_time` seen vs the
-    /// duration (the Clip Doctor verify band). The authoritative CSV is still written
-    /// whole to the dump file and parsed from there — the tee only observes.
+    /// multi-GB network file (issue #81), and the dominant cost of damage detection, which
+    /// pays it twice (import + verify re-scan). The read itself is irreducible, so the win
+    /// is memory: the CSV is **stream-parsed** as it arrives (issue #84) — chunks flow
+    /// straight into `LiveScan`'s per-stream `PacketStamp` arrays with the progress fraction
+    /// folded into the same pass — so a multi-hour 20–30 GB capture never materializes its
+    /// packet dump as one multi-hundred-MB `String`, and there's no temp file to write, read
+    /// back, or delete. Only the current chunk plus the irreducible per-stream arrays
+    /// detection needs are held at once.
+    ///
+    /// When `onProgress` and a positive `expectedDuration` are supplied, the caller gets a
+    /// bar off the greatest `pts_time` seen vs the duration (the Clip Doctor verify band).
+    /// Ordering and completeness of the streamed chunks are load-bearing now — the parse
+    /// depends on them — which `ProcessRunner`'s single-reader-plus-EOF-semaphore streaming
+    /// path guarantees.
     static func scanAllStreams(
         url: URL,
         expectedDuration: Double? = nil,
         onProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> AllStreamsScan {
         let ffprobe = try FFTools.ffprobeURL()
-        let dump = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clipstitcher-scan-\(UUID().uuidString).csv")
-        defer { try? FileManager.default.removeItem(at: dump) }
-
-        var onStdout: (@Sendable (Data) -> Void)? = nil
-        if let onProgress, let expectedDuration, expectedDuration > 0 {
-            let progress = LiveScanProgress(duration: expectedDuration)
-            onStdout = { chunk in
-                if let f = progress.feed(chunk) { onProgress(f) }
-            }
-        }
+        // A duration is only wanted when a progress bar is being fed; without one the parse
+        // still runs, it just reports no fraction.
+        let live = LiveScan(duration: onProgress == nil ? 0 : (expectedDuration ?? 0))
 
         let output = try await ProcessRunner.run(ffprobe, [
             "-v", "error",
             "-show_entries", "packet=codec_type,stream_index,pts_time,dts_time,flags",
             "-of", "csv=p=0",
             url.path,
-        ], stdoutTo: dump, onStdout: onStdout)
+        ], onStdout: { chunk in
+            if let f = live.feed(chunk) { onProgress?(f) }
+        })
         guard output.status == 0 else {
             throw FFError.indexFailed(String(data: output.stderr, encoding: .utf8) ?? "exit \(output.status)")
         }
-
-        let text = try String(contentsOf: dump, encoding: .utf8)
-        return parseAllStreams(csv: text)
+        // The run has reached EOF (ProcessRunner waits for the reader), so no feed is in
+        // flight; assemble the final scan from the accumulated per-stream arrays.
+        return live.finish()
     }
 
-    /// Turns the streamed `scanAllStreams` CSV into a monotonic progress fraction (issue
-    /// #81): the greatest `pts_time` seen so far, minus the first stamp (a TS stream's pts
-    /// can start at an arbitrary clock offset), over the scan's total duration. The scan
-    /// reads packets in demux order so pts climbs roughly with bytes read — the natural
-    /// signal for a sequential network read — and taking the running *max* keeps it
-    /// strictly non-decreasing through the odd out-of-order or missing stamp. Pure line
-    /// assembly (a chunk can split a line anywhere), so it's unit-testable.
-    struct ScanProgress {
-        private var pending = ""
+    /// Stream-parses the `scanAllStreams` CSV (`codec_type,stream_index,pts_time,dts_time,
+    /// flags`) as it arrives (issue #84): assembles lines incrementally via `LineAssembler`,
+    /// groups packets into per-stream arrays, and tracks a monotonic pts-progress fraction —
+    /// all in **one pass**. So the multi-hundred-MB dump is never held whole as a `String`
+    /// (only the current chunk plus the irreducible per-stream `PacketStamp` arrays detection
+    /// needs), and the stream isn't parsed twice for progress and packets.
+    ///
+    /// Progress (issue #81): the greatest `pts_time` seen so far, minus the first stamp (a TS
+    /// stream's pts starts at an arbitrary clock offset), over the total duration. The scan
+    /// reads packets in demux order so pts climbs roughly with bytes read — the natural signal
+    /// for a sequential network read — and taking the running *max* keeps it strictly
+    /// non-decreasing through the odd out-of-order or missing stamp. Pure, so it's unit-testable.
+    struct StreamingAllStreamsScan {
+        private var lines = LineAssembler()
+        private var order: [Int] = []
+        private var streams: [Int: StreamPackets] = [:]
         private var maxPts = 0.0
         private var firstPts: Double? = nil
         let duration: Double
 
-        init(duration: Double) { self.duration = duration }
+        /// `duration` drives the progress fraction; pass 0 (the default) when only the parsed
+        /// scan is wanted and no bar is fed — parsing runs regardless.
+        init(duration: Double = 0) { self.duration = duration }
 
-        /// Feeds one CSV chunk; returns the fraction 0…1 reached, or nil when no completed
-        /// line carried a later timestamp than already seen (so the bar isn't re-poked).
+        /// Feeds one CSV chunk: parses every completed line into the per-stream arrays, and
+        /// returns the progress fraction 0…1 if a later `pts_time` advanced it (nil when no
+        /// completed line carried a later stamp — so the bar isn't re-poked — or when there's
+        /// no positive duration).
         mutating func feed(_ chunk: String) -> Double? {
-            guard duration > 0 else { return nil }
-            pending += chunk
-            let lines = pending.components(separatedBy: "\n")
-            pending = lines.last ?? ""
             var advanced = false
-            for line in lines.dropLast() {
-                // codec_type,stream_index,pts_time,dts_time,flags — pts_time is field 2.
-                let fields = line.split(separator: ",", omittingEmptySubsequences: false)
-                guard fields.count >= 3, let pts = Double(fields[2]) else { continue }
-                if firstPts == nil {           // first real stamp seeds the baseline
-                    firstPts = pts
-                    maxPts = pts
-                    advanced = true
-                } else if pts > maxPts {
-                    maxPts = pts
-                    advanced = true
-                }
-            }
-            guard advanced else { return nil }
-            let elapsed = maxPts - (firstPts ?? 0)
-            return min(max(elapsed / duration, 0), 1)
+            for line in lines.feed(chunk) { if ingest(line) { advanced = true } }
+            return fraction(advanced: advanced)
         }
-    }
 
-    /// Builds the scan from ffprobe's `packet=codec_type,stream_index,pts_time,dts_time,
-    /// flags` CSV. Pure, so the grouping and the index equivalence are unit-testable.
-    /// Only audio and video packets are kept — a broadcast TS also carries teletext/data
-    /// streams whose sparse, irregular timing would read as fake gaps. The index is
-    /// assembled from the first video stream's packets by the same rules as
-    /// `parseIndex`, so the two reads can never disagree about frame numbering.
-    static func parseAllStreams(csv: String) -> AllStreamsScan {
-        var order: [Int] = []
-        var streams: [Int: StreamPackets] = [:]
-        csv.enumerateLines { line, _ in
+        /// Flushes any final unterminated line and assembles the scan. The index is built from
+        /// the lowest-numbered video stream's packets by the same `makeIndex` rules as
+        /// `parseIndex`, so this scan's frame index can never disagree with the single-stream
+        /// index about frame numbering.
+        mutating func finish() -> AllStreamsScan {
+            if let last = lines.finish() { _ = ingest(last) }
+            let inOrder = order.compactMap { streams[$0] }
+            let videoPackets = inOrder.filter(\.isVideo)
+                .min { $0.streamIndex < $1.streamIndex }?.packets ?? []
+            return AllStreamsScan(index: makeIndex(videoPackets), streams: inOrder)
+        }
+
+        /// Parses one CSV line into a packet appended to its stream, and folds its `pts_time`
+        /// into the running progress max; returns whether it advanced that max. Only audio and
+        /// video packets are kept — a broadcast TS also carries teletext/data streams whose
+        /// sparse, irregular timing would read as fake gaps (and would jitter progress).
+        private mutating func ingest(_ line: String) -> Bool {
             // e.g. "video,0,1.480000,1.440000,K__," → trailing comma on MPEG-2 streams
             let fields = line.split(separator: ",", omittingEmptySubsequences: false)
             guard fields.count >= 4, fields[0] == "video" || fields[0] == "audio",
-                  let streamIndex = Int(fields[1]) else { return }
+                  let streamIndex = Int(fields[1]) else { return false }
+            let pts = Double(fields[2])
             let stamp = PacketStamp(
-                pts: Double(fields[2]),
+                pts: pts,
                 dts: fields.count > 3 ? Double(fields[3]) : nil,
                 keyframe: fields.count > 4 && fields[4].contains("K"))
             if streams[streamIndex] == nil {
@@ -235,27 +238,58 @@ enum FrameIndexer {
                 order.append(streamIndex)
             }
             streams[streamIndex]!.packets.append(stamp)
+            guard let pts else { return false }
+            if firstPts == nil {           // first real stamp seeds the baseline
+                firstPts = pts
+                maxPts = pts
+                return true
+            }
+            if pts > maxPts { maxPts = pts; return true }
+            return false
         }
-        let inOrder = order.compactMap { streams[$0] }
-        let videoPackets = inOrder.filter(\.isVideo)
-            .min { $0.streamIndex < $1.streamIndex }?.packets ?? []
-        return AllStreamsScan(index: makeIndex(videoPackets), streams: inOrder)
+
+        private func fraction(advanced: Bool) -> Double? {
+            guard duration > 0, advanced else { return nil }
+            return min(max((maxPts - (firstPts ?? 0)) / duration, 0), 1)
+        }
+    }
+
+    /// Builds the scan from a whole `scanAllStreams` CSV in one shot — the pure entry point
+    /// the unit tests drive. Feeds the string through the same incremental
+    /// `StreamingAllStreamsScan` the live scan uses, so the two can't diverge; the live path
+    /// just feeds it chunk-by-chunk instead.
+    static func parseAllStreams(csv: String) -> AllStreamsScan {
+        var scan = StreamingAllStreamsScan()
+        _ = scan.feed(csv)
+        return scan.finish()
     }
 }
 
-/// Thread-safe wrapper around `FrameIndexer.ScanProgress` for the streamed scan's stdout
-/// chunks (issue #81) — one per scan, fed from `ProcessRunner`'s reader queue.
-final class LiveScanProgress: @unchecked Sendable {
-    private var progress: FrameIndexer.ScanProgress
+/// Thread-safe wrapper around `FrameIndexer.StreamingAllStreamsScan` for the streamed scan
+/// (issues #81, #84) — one per scan, fed from `ProcessRunner`'s serial reader queue, so the
+/// lock guards the incremental parse. `feed` reports live progress as chunks arrive; `finish`
+/// (called once the run has reached EOF, so no `feed` is in flight) returns the assembled scan.
+/// The CSV packet arrays are built here as the file streams in, never materialized as a whole
+/// `String` — the memory win of issue #84.
+final class LiveScan: @unchecked Sendable {
+    private var scan: FrameIndexer.StreamingAllStreamsScan
     private let lock = NSLock()
 
-    init(duration: Double) { progress = FrameIndexer.ScanProgress(duration: duration) }
+    init(duration: Double) { scan = FrameIndexer.StreamingAllStreamsScan(duration: duration) }
 
-    /// Feeds one stdout chunk; returns the latest progress fraction it advanced to, if any.
+    /// Feeds one stdout chunk into the parse; returns the latest progress fraction it advanced
+    /// to, if any. The CSV fields are pure ASCII, so a chunk never splits a UTF-8 codepoint.
     func feed(_ data: Data) -> Double? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return progress.feed(text)
+        return scan.feed(text)
+    }
+
+    /// Assembles the final scan after the stream reaches EOF.
+    func finish() -> FrameIndexer.AllStreamsScan {
+        lock.lock()
+        defer { lock.unlock() }
+        return scan.finish()
     }
 }

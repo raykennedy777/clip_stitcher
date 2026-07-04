@@ -41,18 +41,17 @@ enum ExportProgress {
         }
     }
 
-    /// Incremental line assembly over the raw stdout chunks: a chunk can split a line
-    /// anywhere, so the trailing partial line is held back until its newline arrives.
-    /// `feed` returns the latest out_time among the chunk's completed lines, if any.
+    /// Incremental line assembly over the raw stdout chunks (via the shared `LineAssembler`):
+    /// a chunk can split a line anywhere, so the trailing partial line is held back until its
+    /// newline arrives. `feed` returns the latest out_time among the chunk's completed lines,
+    /// if any. Only completed lines matter — ffmpeg ends with a newline-terminated
+    /// `progress=end`, so there's no final unterminated line to flush.
     struct Stream {
-        private var pending = ""
+        private var lines = LineAssembler()
 
         mutating func feed(_ chunk: String) -> Double? {
-            pending += chunk
-            let lines = pending.components(separatedBy: "\n")
-            pending = lines.last ?? ""
             var latest: Double? = nil
-            for line in lines.dropLast() {
+            for line in lines.feed(chunk) {
                 if let t = ExportProgress.outTimeSeconds(fromLine: line) { latest = t }
             }
             return latest

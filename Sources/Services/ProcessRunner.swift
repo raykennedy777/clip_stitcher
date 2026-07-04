@@ -166,16 +166,27 @@ enum ProcessRunner {
             outHandle = nil
             outPipe = pipe
             teeToFile = false
-            outDone = nil
             if let onStdout {
+                // Single serial reader with an EOF semaphore, mirroring the tee (issue #84):
+                // this handler is the sole consumer and signals `done` at EOF, and the
+                // termination handler waits on it before draining any remainder — so no second
+                // read races an in-flight handler invocation and reorders or duplicates chunks.
+                // Chunk order and completeness are load-bearing now: the streamed all-streams
+                // scan parses these chunks into per-stream packet arrays, not just the
+                // running-max progress signal they were for #81.
+                let done = DispatchSemaphore(value: 0)
+                outDone = done
                 pipe.fileHandleForReading.readabilityHandler = { handle in
                     let chunk = handle.availableData
-                    if chunk.isEmpty {            // EOF — stop observing
+                    if chunk.isEmpty {            // EOF — write end closed; stop observing
                         handle.readabilityHandler = nil
+                        done.signal()
                     } else {
                         onStdout(chunk)
                     }
                 }
+            } else {
+                outDone = nil
             }
         }
 
@@ -217,10 +228,16 @@ enum ProcessRunner {
                                 if !rest.isEmpty { try? outHandle?.write(contentsOf: rest) }
                             }
                         } else if let onStdout {
-                            // Streaming mode: hand any unread tail to the callback.
-                            outPipe.fileHandleForReading.readabilityHandler = nil
-                            let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
-                            if !rest.isEmpty { onStdout(rest) }
+                            // Streaming mode: wait for the live reader to reach EOF so every
+                            // chunk was delivered in order (issue #84). Only on the 5 s
+                            // backstop — a reader that somehow never saw EOF — do we drain the
+                            // remainder here, after clearing the handler so this is then the
+                            // sole reader, exactly as the tee path above recovers its tail.
+                            if outDone?.wait(timeout: .now() + 5) == .timedOut {
+                                outPipe.fileHandleForReading.readabilityHandler = nil
+                                let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
+                                if !rest.isEmpty { onStdout(rest) }
+                            }
                         } else {
                             out = outPipe.fileHandleForReading.readDataToEndOfFile()
                         }
