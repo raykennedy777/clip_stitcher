@@ -4,6 +4,7 @@ import Testing
 
 /// Confirming a split replaces the clip with one clip per split range (issue #20,
 /// ADR-0017): first range keeps the original identity, the rest are copies.
+@MainActor
 struct SplitClipTests {
     private func makeDocument() -> ProjectDocument {
         let doc = ProjectDocument()

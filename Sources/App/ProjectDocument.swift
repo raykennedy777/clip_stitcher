@@ -29,10 +29,11 @@ enum ExportStatus: Equatable {
 ///
 /// Persisted state lives in `project` (a Codable `VidProject`). Everything else
 /// here (import states, resolved URLs) is runtime-only.
+@MainActor
 final class ProjectDocument: ReferenceFileDocument {
     typealias Snapshot = VidProject
 
-    static var readableContentTypes: [UTType] { [.clipStitcherProject] }
+    nonisolated static var readableContentTypes: [UTType] { [.clipStitcherProject] }
 
     @Published var project: VidProject
     @Published var importStates: [Clip.ID: ImportState] = [:]
@@ -305,7 +306,7 @@ final class ProjectDocument: ReferenceFileDocument {
     /// Either out of range → both reset to nil (whole clip), since a stale point outrunning
     /// a now-shorter index would trap the export planner's frame lookup. `didReset` tells
     /// the caller a reset happened so it's surfaced, never silent.
-    static func validatedInOut(inPoint: Int?, outPoint: Int?, frameCount: Int)
+    nonisolated static func validatedInOut(inPoint: Int?, outPoint: Int?, frameCount: Int)
         -> (inPoint: Int?, outPoint: Int?, didReset: Bool) {
         let range = 0..<frameCount
         let inOK = inPoint.map(range.contains) ?? true
@@ -342,7 +343,7 @@ final class ProjectDocument: ReferenceFileDocument {
     /// `.reimport`ed (re-probe + re-index); otherwise it's `.ready`.
     enum ReopenResolution: Equatable { case missing, reimport, ready }
 
-    static func reopenResolution(resolved: Bool, hasVideo: Bool) -> ReopenResolution {
+    nonisolated static func reopenResolution(resolved: Bool, hasVideo: Bool) -> ReopenResolution {
         guard resolved else { return .missing }
         return hasVideo ? .ready : .reimport
     }
@@ -571,7 +572,7 @@ final class ProjectDocument: ReferenceFileDocument {
         // file (issue #74): reopen's lazy rebuild and the export-time rebuild both land
         // here, not just import — a source shortened on disk while closed resets to
         // whole-clip and surfaces the notice, rather than trapping the planner.
-        await reconcileInOut(id: clip.id, frameCount: built.count)
+        reconcileInOut(id: clip.id, frameCount: built.count)
         return built
     }
 
@@ -614,7 +615,7 @@ final class ProjectDocument: ReferenceFileDocument {
     /// A `nil` state means "ready" — the Source row treats it the same (unimported clips
     /// carry no runtime state) and the planner's own guard still refuses a truly-unprobed
     /// clip. Pure over the passed state so the gate is testable without real media.
-    static func clipNotReadyReason(for clip: Clip, state: ImportState?) -> String? {
+    nonisolated static func clipNotReadyReason(for clip: Clip, state: ImportState?) -> String? {
         switch state {
         case .ready, .none:
             return nil
@@ -633,7 +634,7 @@ final class ProjectDocument: ReferenceFileDocument {
     /// source-missing clip needs the user to remove or relink it (its row shows the
     /// specific error). Pure over the passed clips/states so it's testable and can't
     /// disagree with `clipNotReadyReason`.
-    static func exportDisabledReason(clips: [Clip], states: [Clip.ID: ImportState]) -> String? {
+    nonisolated static func exportDisabledReason(clips: [Clip], states: [Clip.ID: ImportState]) -> String? {
         let analysing = clips.filter {
             switch states[$0.id] {
             case .probing, .indexing: return true

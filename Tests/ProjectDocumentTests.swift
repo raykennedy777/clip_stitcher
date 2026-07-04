@@ -4,6 +4,7 @@ import Testing
 
 /// Duplicate inserts a copy directly after the original — same source, probed
 /// properties, and in/out selection, but its own identity (ROADMAP slice 7).
+@MainActor
 struct ProjectDocumentDuplicateTests {
     private func makeDocument() -> ProjectDocument {
         let doc = ProjectDocument()
@@ -69,6 +70,7 @@ struct ProjectDocumentDuplicateTests {
 
 /// Batch actions on a multi-selection (issue #12): every batch lands as one
 /// mutation, in timeline order regardless of the selection set's own order.
+@MainActor
 struct ProjectDocumentBatchTests {
     /// Five ready clips named clip0…clip4; clip0 is the target.
     private func makeDocument() -> ProjectDocument {
