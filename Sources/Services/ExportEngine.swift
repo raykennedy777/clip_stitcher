@@ -218,6 +218,72 @@ enum ExportEngine {
         return acc > 1 ? acc : nil
     }
 
+    /// Bounds how many one-packet timescale probes overlap (issue #85). Each is a short
+    /// stream-copy + ffprobe; a handful in flight overlaps the I/O without a process storm
+    /// (the spirit of the import throttle).
+    static let timescaleProbeConcurrency = 4
+
+    /// Combines the per-clip timescale probe results into the export-wide MP4 pin —
+    /// **all-or-nothing** (issue #85). A single unprobeable clip (`nil`) yields *no* pin:
+    /// the pin is stamped on *every* piece (copies included, ADR-0009 #24), so a value that
+    /// isn't a whole-tick multiple of the unprobed clip's own timescale would round its
+    /// copied frame durations — a partial LCM would silently misrepresent that clip, which
+    /// then falls back to its own per-#18 pin only if there is no export-wide pin at all.
+    /// With every clip measured, the pin is their LCM (`exportWideTimescale(probed:)`).
+    static func exportWideTimescale(probes: [Int?]) -> Int? {
+        guard !probes.isEmpty else { return nil }
+        var measured: [Int] = []
+        for p in probes {
+            guard let p else { return nil }   // any unprobeable clip → no export-wide pin
+            measured.append(p)
+        }
+        return exportWideTimescale(probed: measured)
+    }
+
+    /// One clip's measured MP4 track timescale (issue #18/#24): stream-copy a single video
+    /// packet into a throwaway MP4 and read back the muxer-assigned track timescale — never
+    /// derived from the source time_base (the MKV 1/1000 auto-raise trap). `nil` when the
+    /// probe (either process) fails.
+    private static func probeTrackTimescale(ffmpeg: URL, source: URL, output: URL) async -> Int? {
+        guard let result = try? await ProcessRunner.run(
+                  ffmpeg, BoundaryReencodeEngine.timescaleProbeArguments(source: source, output: output)),
+              result.status == 0 else { return nil }
+        return BoundaryReencodeEngine.trackTimescale(timeBase: await MediaProbe.videoTimeBase(url: output))
+    }
+
+    /// Measures every clip's MP4 track timescale concurrently (bounded by
+    /// `timescaleProbeConcurrency`), returning results in `sources` order (the LCM combine is
+    /// order-independent, but keeping order keeps the mapping legible). The probes are
+    /// independent short-lived subprocesses writing distinct `tsprobe_N.mp4` files, so
+    /// overlapping them turns the old serial per-clip stall into one bounded fan-out
+    /// (issue #85). A single failure still nils the whole pin — that decision lives in
+    /// `exportWideTimescale(probes:)`, not here.
+    private static func probeTrackTimescales(ffmpeg: URL, sources: [URL], work: URL) async -> [Int?] {
+        var results = [Int?](repeating: nil, count: sources.count)
+        await withTaskGroup(of: (Int, Int?).self) { group in
+            var next = 0
+            let seed = min(timescaleProbeConcurrency, sources.count)
+            while next < seed {
+                let i = next
+                let source = sources[i]
+                let output = work.appendingPathComponent("tsprobe_\(i).mp4")
+                group.addTask { (i, await probeTrackTimescale(ffmpeg: ffmpeg, source: source, output: output)) }
+                next += 1
+            }
+            while let (i, ts) = await group.next() {
+                results[i] = ts
+                if next < sources.count {
+                    let j = next
+                    let source = sources[j]
+                    let output = work.appendingPathComponent("tsprobe_\(j).mp4")
+                    group.addTask { (j, await probeTrackTimescale(ffmpeg: ffmpeg, source: source, output: output)) }
+                    next += 1
+                }
+            }
+        }
+        return results
+    }
+
     /// ffmpeg args to join already-cut, same-codec video pieces with the concat demuxer —
     /// a pure stream-copy, so the join is frame-exact.
     static func concatArguments(listFile: URL, output: URL) -> [String] {
@@ -714,21 +780,13 @@ enum ExportEngine {
             // clip's copies); the per-clip #18 behavior then applies as before.
             var exportTimescale: Int? = nil
             if ext.lowercased() == "mp4" {
-                var probes: [Int] = []
-                for (i, item) in items.enumerated() {
-                    let probeOut = work.appendingPathComponent("tsprobe_\(i).mp4")
-                    guard let result = try? await ProcessRunner.run(
-                            ffmpeg, BoundaryReencodeEngine.timescaleProbeArguments(
-                                source: item.source, output: probeOut)),
-                          result.status == 0,
-                          let ts = BoundaryReencodeEngine.trackTimescale(
-                            timeBase: await MediaProbe.videoTimeBase(url: probeOut)) else {
-                        probes = []
-                        break
-                    }
-                    probes.append(ts)
-                }
-                exportTimescale = exportWideTimescale(probed: probes)
+                // Overlap the per-clip one-packet copy probes (bounded) instead of stalling
+                // clip-by-clip; the all-or-nothing pin decision then lives in the pure combine
+                // (issue #85). Any unprobeable clip drops the export-wide pin entirely (a
+                // partial pin would misrepresent that clip's copies); the per-#18 behavior applies.
+                let probes = await probeTrackTimescales(
+                    ffmpeg: ffmpeg, sources: items.map(\.source), work: work)
+                exportTimescale = exportWideTimescale(probes: probes)
             }
             for (i, item) in items.enumerated() {
                 let withinClip: @Sendable (Double) -> Void = { w in

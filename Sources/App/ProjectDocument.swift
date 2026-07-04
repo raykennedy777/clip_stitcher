@@ -581,6 +581,21 @@ final class ProjectDocument: ReferenceFileDocument {
         return built
     }
 
+    /// The clip's container start_time, from the shared `containerStartCache` — probed once
+    /// and reused (issue #85). The Output Preview reads this instead of probing on every
+    /// load (its old per-clip `containerStartTime` call ignored the cache the import already
+    /// filled). A cache miss (e.g. a preview before import finished, or a clip whose import
+    /// hasn't reached the start_time step) probes once and populates; an unresolvable source
+    /// is 0 — the same correct seek offset a demuxer with no start_time reports.
+    @MainActor
+    func containerStart(for clip: Clip) async -> Double {
+        if let cached = containerStartCache[clip.id] { return cached }
+        guard let url = url(for: clip) else { return 0 }
+        let value = await MediaProbe.containerStartTime(url: url)
+        containerStartCache[clip.id] = value
+        return value
+    }
+
     // MARK: - Clip Doctor (issue #53, ADR-0021)
 
     /// The inputs Clip Doctor needs for one clip, reusing the import-time caches: the
@@ -904,7 +919,9 @@ final class ProjectDocument: ReferenceFileDocument {
             // bounded seek-anchored confirm decodes around them — zero decodes on a
             // clean file, never a from-start full decode. Failures degrade to "none
             // found"; a damaged source must still import.
-            let containerStart = await MediaProbe.containerStartTime(url: url)
+            // start_time came free with the properties probe above (issue #85) — the same
+            // `-show_format` block carries it, so import launches no second, dedicated ffprobe.
+            let containerStart = probe.containerStart
             containerStartCache[id] = containerStart
             let zones = await DamageDetector.detectZones(
                 url: url, scan: scan, containerStart: containerStart)

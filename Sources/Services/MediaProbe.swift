@@ -17,6 +17,11 @@ enum MediaProbe {
         /// Every audio stream, in container order.
         var audioTracks: [AudioProperties] = []
         var duration: Double?
+        /// The container-level start_time in seconds — the ADR-0013 input `-ss` base. Read
+        /// straight off the same `-show_format` JSON `probe` already fetches (issue #85), so
+        /// the import path needs no second, dedicated ffprobe for it. 0 when the demuxer
+        /// carries none ("N/A") — also the correct seek offset for such files.
+        var containerStart: Double = 0
         /// The video stream's r_frame_rate, kept separately from
         /// `VideoProperties.frameRate` (avg-first) for the field-coding check
         /// (issue #46): on a PAFF capture avg_frame_rate is the *field* rate
@@ -79,8 +84,13 @@ enum MediaProbe {
         }
 
         let duration = decoded.format?.duration.flatMap(Double.init)
+        // start_time rides in the same -show_format block (verified equal to the dedicated
+        // `format=start_time` probe on real MPEG-PS/TS captures) — parsed through the same
+        // rule as the CSV path so "N/A"/absent both land on 0 (issue #85).
+        let containerStart = decoded.format?.start_time.map { parseStartTime(csv: $0) } ?? 0
         return Result(video: video, audio: audioTracks.first, audioTracks: audioTracks,
-                      duration: duration, videoCodecFrameRate: v?.r_frame_rate)
+                      duration: duration, containerStart: containerStart,
+                      videoCodecFrameRate: v?.r_frame_rate)
     }
 
     /// One source audio stream's repair-relevant facts (issue #52), in container order so
@@ -184,6 +194,11 @@ enum MediaProbe {
     /// `-ss` from (the ADR-0013 trap; audio playback subtracts it to seek by source
     /// presentation time). 0 when the demuxer reports none ("N/A") or the probe fails;
     /// that's also the correct value for such files.
+    ///
+    /// A dedicated one-fact probe, kept for callers that need only start_time without a
+    /// full `probe(url:)` (e.g. Clip Doctor's verify, the reopen copy-share warm-up). The
+    /// import path does **not** use this — `probe(url:)` already surfaces the same value
+    /// from its `-show_format` block, so importing needs no second launch (issue #85).
     static func containerStartTime(url: URL) async -> Double {
         guard let ffprobe = try? FFTools.ffprobeURL(),
               let output = try? await ProcessRunner.run(ffprobe, [
@@ -248,4 +263,5 @@ private extension Optional where Wrapped == [String: String] {
 
 private struct FFFormat: Decodable {
     var duration: String?
+    var start_time: String?
 }

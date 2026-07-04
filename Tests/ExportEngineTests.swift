@@ -118,6 +118,20 @@ struct ExportEngineTests {
         #expect(ExportEngine.exportWideTimescale(probed: []) == nil)
     }
 
+    @Test func exportWideTimescaleFromProbesIsAllOrNothing() {
+        // Every clip measured → the LCM (same as the raw-value overload).
+        #expect(ExportEngine.exportWideTimescale(probes: [25000, 90000]) == 450000)
+        // A single unprobeable clip (nil) drops the whole export-wide pin: the pin is stamped
+        // on every piece, so a partial LCM would round the unprobed clip's copied frames.
+        #expect(ExportEngine.exportWideTimescale(probes: [25000, nil, 90000]) == nil)
+        #expect(ExportEngine.exportWideTimescale(probes: [nil]) == nil)
+        // No clips at all → no pin (mirrors the empty raw-value case).
+        #expect(ExportEngine.exportWideTimescale(probes: []) == nil)
+        // A single-clip probe still yields no *export-wide* pin below the >1 bar (the per-#18
+        // path covers a lone clip) — the combine mirrors exportWideTimescale(probed:).
+        #expect(ExportEngine.exportWideTimescale(probes: [25000]) == 25000)
+    }
+
     @Test func copyCommandsCarryTheExportWideTimescale() {
         let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: 2.0)
         let cut = ExportEngine.cutArguments(source: src, plan: plan,

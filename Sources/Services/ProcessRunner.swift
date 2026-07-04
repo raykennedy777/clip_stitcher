@@ -81,6 +81,20 @@ private final class StderrTail: @unchecked Sendable {
 /// EOF via a semaphore the termination handler waits on — so no second read races the
 /// last write and truncates the file the caller then parses.
 enum ProcessRunner {
+    #if DEBUG
+    /// Counts subprocess launches inside the enclosing `$launchCounter.withValue` scope, so a
+    /// test can prove an optimization removed a process launch (issue #85). Task-local, so a
+    /// test's count is isolated from other tests running in parallel — only launches within
+    /// the current structured-concurrency tree are counted, not another suite's ffmpeg runs.
+    final class LaunchCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+        func record() { lock.lock(); value += 1; lock.unlock() }
+    }
+    @TaskLocal static var launchCounter: LaunchCounter?
+    #endif
+
     static func run(_ executable: URL, _ arguments: [String], stdoutTo fileURL: URL? = nil,
                     stderrTo errFileURL: URL? = nil,
                     onStdout: (@Sendable (Data) -> Void)? = nil) async throws -> ProcessResult {
@@ -247,6 +261,9 @@ enum ProcessRunner {
                 }
                 do {
                     try process.run()
+                    #if DEBUG
+                    Self.launchCounter?.record()
+                    #endif
                 } catch {
                     continuation.resume(throwing: error)
                 }

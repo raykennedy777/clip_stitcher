@@ -140,6 +140,31 @@ struct MediaProbeTests {
         #expect(try MediaProbe.parseAudioStreamDetails(json: json) == [])
     }
 
+    // MARK: container start_time folded into the JSON probe (issue #85)
+
+    @Test func parseProbeReadsContainerStartFromShowFormat() throws {
+        // The `-show_format` block already carries start_time (verified equal to the dedicated
+        // `format=start_time` probe on real captures), so the import path needs no second probe.
+        let json = Data("""
+        { "streams": [ { "codec_type": "video", "codec_name": "h264" } ],
+          "format": { "duration": "10.0", "start_time": "1.480000" } }
+        """.utf8)
+        #expect(try MediaProbe.parseProbe(json: json).containerStart == 1.48)
+    }
+
+    @Test func parseProbeTreatsAbsentOrNAContainerStartAsZero() throws {
+        // Absent format.start_time and an explicit "N/A" both map to 0 — the same rule the CSV
+        // path uses, and the correct seek offset for such files.
+        let absent = Data("""
+        { "streams": [ { "codec_type": "video" } ], "format": { "duration": "10.0" } }
+        """.utf8)
+        #expect(try MediaProbe.parseProbe(json: absent).containerStart == 0)
+        let na = Data("""
+        { "streams": [ { "codec_type": "video" } ], "format": { "start_time": "N/A" } }
+        """.utf8)
+        #expect(try MediaProbe.parseProbe(json: na).containerStart == 0)
+    }
+
     // MARK: container start_time CSV (issue #3)
 
     @Test func parseStartTimeReadsTheOffsetSeconds() {

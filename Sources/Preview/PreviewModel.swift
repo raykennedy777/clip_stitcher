@@ -137,7 +137,9 @@ final class PreviewModel: ObservableObject {
                     throw FFError.indexFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await document.frameIndex(for: clip)
-                let containerStart = await MediaProbe.containerStartTime(url: url)
+                // Reuse the document's cached start_time — the import already filled it, so a
+                // repeated preview load probes nothing (issue #85). A miss populates once.
+                let containerStart = await document.containerStart(for: clip)
                 let conformed = !MatchEvaluator.matches(clip, target: target)
                 specs.append(PreviewTimeline.ClipSpec(
                     clipID: clip.id, pts: index.pts,
