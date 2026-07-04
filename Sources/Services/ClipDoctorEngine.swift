@@ -490,27 +490,33 @@ enum ClipDoctorEngine {
         //    `replaceItemAt` rather than remove-then-move (issue #77): a failed move in the
         //    old sequence deleted the previous good output first and then lost it, whereas
         //    the atomic replace keeps the previous file if the swap fails.
+        //    `replaceItemAt` may hand back a different URL than `dest` (it can retain the
+        //    original's inode/name under a new path on some filesystems) — verify and report
+        //    that URL, not the stale `dest`, so the auto-verify scan and the returned result
+        //    describe the file that actually landed.
+        let finalDest: URL
         if fm.fileExists(atPath: dest.path) {
-            _ = try fm.replaceItemAt(dest, withItemAt: staged)
+            finalDest = try fm.replaceItemAt(dest, withItemAt: staged) ?? dest
         } else {
             try fm.moveItem(at: staged, to: dest)
+            finalDest = dest
         }
         progress(0.97)
 
         // 4. Auto-verify: re-run detection on the output. A failed re-scan is inconclusive,
         //    never a discard — the produced piece already passed its own verify gate.
-        let scan = try? await FrameIndexer.scanAllStreams(url: dest)
+        let scan = try? await FrameIndexer.scanAllStreams(url: finalDest)
         let verdict: Verdict
         if let scan {
-            let outStart = await MediaProbe.containerStartTime(url: dest)
+            let outStart = await MediaProbe.containerStartTime(url: finalDest)
             let surviving = await DamageDetector.detectZones(
-                url: dest, scan: scan, containerStart: outStart)
+                url: finalDest, scan: scan, containerStart: outStart)
             verdict = makeVerdict(clipName: clip.displayName, scanned: true, survivingZones: surviving)
         } else {
             verdict = makeVerdict(clipName: clip.displayName, scanned: false, survivingZones: [])
         }
         progress(1.0)
-        return Result(output: dest, verdict: verdict,
+        return Result(output: finalDest, verdict: verdict,
                       repairedZoneCount: (clip.damageZones ?? []).count)
     }
 

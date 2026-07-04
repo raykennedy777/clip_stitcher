@@ -314,6 +314,39 @@ final class ProjectDocument: ReferenceFileDocument {
         return (nil, nil, true)
     }
 
+    /// Reconciles a clip's stored in/out against a freshly-built frame count (issue #74) —
+    /// the single altitude every fresh-index path funnels through: import, relink,
+    /// reopen's lazy rebuild, and the export-time rebuild. A source replaced on disk with a
+    /// shorter file while the app was closed lands here on the next index build; stale points
+    /// reset to whole-clip and queue the notice, instead of trapping the planner as a bare
+    /// `invalidPlan`. A no-op when the points still fit (the common case) or are already nil
+    /// (fresh imports). Mutates `project`/`inOutResets`, so it hops to the main actor.
+    @MainActor
+    func reconcileInOut(id: Clip.ID, frameCount: Int) {
+        guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        let validated = Self.validatedInOut(
+            inPoint: project.clips[i].inPoint, outPoint: project.clips[i].outPoint,
+            frameCount: frameCount)
+        guard validated.didReset else { return }
+        var p = project
+        p.clips[i].inPoint = validated.inPoint
+        p.clips[i].outPoint = validated.outPoint
+        commit(p)
+        if !inOutResets.contains(id) { inOutResets.append(id) }
+    }
+
+    /// The post-reopen resolution for one clip (issue #78 follow-up), factored out so it's
+    /// testable without real bookmarks. An unresolvable source is `.missing`; a resolvable
+    /// clip whose probed `video` never persisted — autosaved mid-probe, so it can never
+    /// export (`videoTreatment` throws `clipNotReady`) yet would look ready — must be
+    /// `.reimport`ed (re-probe + re-index); otherwise it's `.ready`.
+    enum ReopenResolution: Equatable { case missing, reimport, ready }
+
+    static func reopenResolution(resolved: Bool, hasVideo: Bool) -> ReopenResolution {
+        guard resolved else { return .missing }
+        return hasVideo ? .ready : .reimport
+    }
+
     /// Drops a clip from the in/out-reset notice queue (issue #74) — the user dismissed
     /// its notice, so it shouldn't surface again.
     func dismissInOutReset(_ id: Clip.ID) {
@@ -490,9 +523,23 @@ final class ProjectDocument: ReferenceFileDocument {
         guard !didResolveSources else { return }
         didResolveSources = true
         for clip in project.clips where importStates[clip.id] == nil {
-            importStates[clip.id] = resolveSource(for: clip, refreshIfStale: true) == nil
-                ? .sourceMissing
-                : .ready
+            let url = resolveSource(for: clip, refreshIfStale: true)
+            switch Self.reopenResolution(resolved: url != nil, hasVideo: clip.video != nil) {
+            case .missing:
+                importStates[clip.id] = .sourceMissing
+            case .reimport:
+                // A clip autosaved mid-probe persisted with `video == nil` (issue #78
+                // follow-up): marking it `.ready` from bookmark resolvability alone would
+                // wrongly enable export on a clip that can never encode. Route it through
+                // the import path — it re-probes, rebuilds the index, and sets the state.
+                importStates[clip.id] = .probing
+                if let url {
+                    let id = clip.id
+                    Task { await importClip(id: id, url: url) }
+                }
+            case .ready:
+                importStates[clip.id] = .ready
+            }
         }
         // A reopened project has no runtime indexes yet; build them in the background
         // (throttled like import) so the copy/re-encode shares appear without waiting
@@ -520,6 +567,11 @@ final class ProjectDocument: ReferenceFileDocument {
         }
         let built = try await FrameIndexer.buildIndex(url: url)
         frameIndexCache[clip.id] = built
+        // A freshly-built index is the moment to reconcile stored in/out against the real
+        // file (issue #74): reopen's lazy rebuild and the export-time rebuild both land
+        // here, not just import — a source shortened on disk while closed resets to
+        // whole-clip and surfaces the notice, rather than trapping the planner.
+        await reconcileInOut(id: clip.id, frameCount: built.count)
         return built
     }
 
@@ -663,6 +715,11 @@ final class ProjectDocument: ReferenceFileDocument {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await frameIndex(for: clip)
+                // Building the index above may have reset stale in/out against the real
+                // file (issue #74) — re-read the clip so planning sees the reconciled
+                // points, not this loop's now-stale copy. The plan is built below, after
+                // this, so a reset-before-plan can't corrupt an in-flight plan.
+                let clip = project.clips.first(where: { $0.id == clip.id }) ?? clip
                 let containerStart: Double
                 if let cached = containerStartCache[clip.id] {
                     containerStart = cached
@@ -828,18 +885,13 @@ final class ProjectDocument: ReferenceFileDocument {
                 p.clips[i].fieldCoded = FieldCodingDetector.isFieldCoded(
                     packetPts: index.pts,
                     frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
-                // Now the new frame count is known, drop any stored in/out that no longer
-                // fits (issue #74): a relink to a shorter file leaves stale points that
-                // would trap the export planner. Fresh imports carry nil in/out, so this
-                // is a no-op for them.
-                let validated = Self.validatedInOut(
-                    inPoint: p.clips[i].inPoint, outPoint: p.clips[i].outPoint,
-                    frameCount: index.count)
-                p.clips[i].inPoint = validated.inPoint
-                p.clips[i].outPoint = validated.outPoint
                 commit(p)
-                if validated.didReset { inOutResets.append(id) }
             }
+            // Now the new frame count is known, drop any stored in/out that no longer fits
+            // (issue #74) — the shared reconciliation every fresh-index path funnels through
+            // (relink to a shorter file leaves stale points that would trap the planner).
+            // Fresh imports carry nil in/out, so this is a no-op for them.
+            reconcileInOut(id: id, frameCount: index.count)
             // Damage detection (issue #45): cluster the demux anomalies, then a few
             // bounded seek-anchored confirm decodes around them — zero decodes on a
             // clean file, never a from-start full decode. Failures degrade to "none

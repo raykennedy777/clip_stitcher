@@ -257,6 +257,72 @@ struct InOutRevalidationTests {
     }
 }
 
+/// The reconciliation the fresh-index paths funnel through (issue #74 follow-up): whenever
+/// an index is freshly built — import, relink, reopen's lazy rebuild, or the export-time
+/// rebuild — stored in/out is checked against the real frame count so a source shortened
+/// on disk resets to whole-clip and queues the notice, never a bare `invalidPlan`.
+@MainActor
+struct ReconcileInOutTests {
+    private func doc(inPoint: Int?, outPoint: Int?) -> (ProjectDocument, Clip.ID) {
+        let d = ProjectDocument()
+        var c = Clip(bookmark: Data(), displayName: "a.mp4")
+        c.inPoint = inPoint
+        c.outPoint = outPoint
+        d.project.clips = [c]
+        return (d, c.id)
+    }
+
+    @Test func staleOutPointResetsBothAndQueuesTheNotice() {
+        let (d, id) = doc(inPoint: 10, outPoint: 500)
+        d.reconcileInOut(id: id, frameCount: 100)
+        #expect(d.project.clips[0].inPoint == nil)
+        #expect(d.project.clips[0].outPoint == nil)
+        #expect(d.inOutResets.contains(id))
+    }
+
+    @Test func fittingPointsAreKeptAndNothingIsQueued() {
+        let (d, id) = doc(inPoint: 10, outPoint: 20)
+        d.reconcileInOut(id: id, frameCount: 100)
+        #expect(d.project.clips[0].inPoint == 10)
+        #expect(d.project.clips[0].outPoint == 20)
+        #expect(d.inOutResets.isEmpty)
+    }
+
+    @Test func nilPointsAreLeftAloneAndNotQueued() {
+        let (d, id) = doc(inPoint: nil, outPoint: nil)
+        d.reconcileInOut(id: id, frameCount: 100)
+        #expect(d.project.clips[0].inPoint == nil)
+        #expect(d.project.clips[0].outPoint == nil)
+        #expect(d.inOutResets.isEmpty)
+    }
+
+    @Test func aClipIsNeverQueuedTwice() {
+        let (d, id) = doc(inPoint: 10, outPoint: 500)
+        d.reconcileInOut(id: id, frameCount: 100)
+        // A second fresh build (e.g. export after reopen already reset) must not re-queue.
+        d.reconcileInOut(id: id, frameCount: 100)
+        #expect(d.inOutResets.filter { $0 == id }.count == 1)
+    }
+}
+
+/// Reopen must not trust a clip autosaved mid-probe (issue #78 follow-up): its probed
+/// `video` never persisted, so bookmark-resolvability alone would mark it `.ready` and
+/// wrongly enable export. A resolvable clip with no video is re-imported instead.
+struct ReopenResolutionTests {
+    @Test func unresolvableSourceIsMissing() {
+        #expect(ProjectDocument.reopenResolution(resolved: false, hasVideo: false) == .missing)
+        #expect(ProjectDocument.reopenResolution(resolved: false, hasVideo: true) == .missing)
+    }
+
+    @Test func resolvableClipMissingProbedVideoReimports() {
+        #expect(ProjectDocument.reopenResolution(resolved: true, hasVideo: false) == .reimport)
+    }
+
+    @Test func resolvableProbedClipIsReady() {
+        #expect(ProjectDocument.reopenResolution(resolved: true, hasVideo: true) == .ready)
+    }
+}
+
 /// The preview's track choice persists per project (pinned #8 decision): a new
 /// optional field on the project model — old saves decode to the default, track 1.
 struct MonitoredOutputTrackPersistenceTests {
