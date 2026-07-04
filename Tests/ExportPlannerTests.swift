@@ -116,6 +116,28 @@ struct ExportPlannerTests {
         #expect(item.audioEnd == nil)
     }
 
+    @Test func inOutPastTheIndexEndThrowsInsteadOfTrapping() {
+        // Belt-and-braces (issue #74): a stored out point that outran a re-imported
+        // shorter index must refuse with invalidPlan, never trap the pts subscript.
+        let input = ExportPlanner.ClipInput(
+            clip: clip(video: video(), inPoint: 2, outPoint: 99),
+            url: URL(fileURLWithPath: "/tmp/a.mp4"), index: index,
+            containerStart: 0, audioSources: [.stream(0)])
+        #expect(throws: ExportError.self) {
+            try ExportPlanner.planItem(for: input, target: nil)
+        }
+    }
+
+    @Test func inPointPastTheIndexEndThrowsInsteadOfTrapping() {
+        let input = ExportPlanner.ClipInput(
+            clip: clip(video: video(), inPoint: 42, outPoint: nil),
+            url: URL(fileURLWithPath: "/tmp/a.mp4"), index: index,
+            containerStart: 0, audioSources: [.stream(0)])
+        #expect(throws: ExportError.self) {
+            try ExportPlanner.planItem(for: input, target: nil)
+        }
+    }
+
     // MARK: cut-only (issue #31 / ADR-0018)
 
     private func settings(mode: OutputMode, rendering: SeparateRendering) -> OutputSettings {

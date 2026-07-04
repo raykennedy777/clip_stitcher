@@ -29,6 +29,7 @@ struct SourceView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
+                inOutResetBanner
                 doctorBanner
                 clipList
             }
@@ -375,6 +376,44 @@ struct SourceView: View {
             .padding(.vertical, 8)
             .background(.orange.opacity(0.12))
             .accessibilityIdentifier("source.doctorBanner")
+        }
+    }
+
+    /// The clip an in/out-reset notice is currently offered for (issue #74): the first
+    /// still-present clip in the queue. Skipped if the clip went away.
+    private var inOutResetClip: Clip? {
+        for id in document.inOutResets {
+            if let clip = document.project.clips.first(where: { $0.id == id }) { return clip }
+        }
+        return nil
+    }
+
+    /// A non-modal, dismissible notice above the timeline when a relink's re-import
+    /// dropped a clip's in/out points because the new (shorter) file no longer fit them
+    /// (issue #74) — the clip now exports whole. Never silent.
+    @ViewBuilder
+    private var inOutResetBanner: some View {
+        if let clip = inOutResetClip {
+            HStack(spacing: 12) {
+                Image(systemName: "scissors.badge.ellipsis")
+                    .foregroundStyle(.orange)
+                Text("The in/out points for “\(clip.displayName)” didn’t fit the relinked file and were reset — it will export whole.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button {
+                    document.dismissInOutReset(clip.id)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Dismiss")
+                .accessibilityIdentifier("source.inOutResetBanner.dismiss")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.orange.opacity(0.12))
+            .accessibilityIdentifier("source.inOutResetBanner")
         }
     }
 

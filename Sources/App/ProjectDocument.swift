@@ -50,6 +50,11 @@ final class ProjectDocument: ReferenceFileDocument {
     /// (issue #54's damage-to-EOF path). A FIFO queue so a burst of imports surfaces one
     /// banner at a time, never a modal pile-up.
     @Published var doctorSuggestions: [Clip.ID] = []
+    /// Clips whose stored in/out points were reset to whole-clip because a relink's
+    /// re-import landed a shorter file the old points no longer fit (issue #74). The
+    /// Source view surfaces a one-time, dismissible notice — the reset is never silent.
+    /// Runtime-only; a FIFO queue matching `doctorSuggestions`.
+    @Published var inOutResets: [Clip.ID] = []
     /// True once the user confirmed a cancel (issue #32) — disables the cancel button
     /// while the asynchronous termination plays out. Reset when an export starts.
     @Published var exportCancelRequested = false
@@ -238,6 +243,7 @@ final class ProjectDocument: ReferenceFileDocument {
             lastViewedFrames[id] = nil
         }
         doctorSuggestions.removeAll { ids.contains($0) }
+        inOutResets.removeAll { ids.contains($0) }
     }
 
     func clearAll() {
@@ -251,6 +257,7 @@ final class ProjectDocument: ReferenceFileDocument {
         containerStartCache.removeAll()
         lastViewedFrames.removeAll()
         doctorSuggestions.removeAll()
+        inOutResets.removeAll()
     }
 
     /// Rebinds every selected clip to a new source file in one undo step (issue #12 —
@@ -281,12 +288,36 @@ final class ProjectDocument: ReferenceFileDocument {
             importStates[id] = .probing
         }
         // Re-detection on the new source will re-suggest if it's damaged; drop any
-        // stale suggestion for these clips meanwhile (issue #55).
+        // stale suggestion for these clips meanwhile (issue #55). Likewise clear any
+        // prior in/out-reset notice — the re-import re-evaluates against the new file
+        // and re-surfaces one if the (kept) points still don't fit (issue #74).
         doctorSuggestions.removeAll { touched.contains($0) }
+        inOutResets.removeAll { touched.contains($0) }
         commit(p)
         for id in touched {
             Task { await importClip(id: id, url: newURL) }
         }
+    }
+
+    /// Validates a clip's stored in/out points against a (re-imported) frame count
+    /// (issue #74). Valid positions are `0..<frameCount`; `outPoint` is an inclusive
+    /// frame. Both still in range → kept unchanged (the common same-file-moved relink).
+    /// Either out of range → both reset to nil (whole clip), since a stale point outrunning
+    /// a now-shorter index would trap the export planner's frame lookup. `didReset` tells
+    /// the caller a reset happened so it's surfaced, never silent.
+    static func validatedInOut(inPoint: Int?, outPoint: Int?, frameCount: Int)
+        -> (inPoint: Int?, outPoint: Int?, didReset: Bool) {
+        let range = 0..<frameCount
+        let inOK = inPoint.map(range.contains) ?? true
+        let outOK = outPoint.map(range.contains) ?? true
+        if inOK && outOK { return (inPoint, outPoint, false) }
+        return (nil, nil, true)
+    }
+
+    /// Drops a clip from the in/out-reset notice queue (issue #74) — the user dismissed
+    /// its notice, so it shouldn't surface again.
+    func dismissInOutReset(_ id: Clip.ID) {
+        inOutResets.removeAll { $0 == id }
     }
 
     func setTarget(id: Clip.ID) {
@@ -739,7 +770,17 @@ final class ProjectDocument: ReferenceFileDocument {
                 p.clips[i].fieldCoded = FieldCodingDetector.isFieldCoded(
                     packetPts: index.pts,
                     frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
+                // Now the new frame count is known, drop any stored in/out that no longer
+                // fits (issue #74): a relink to a shorter file leaves stale points that
+                // would trap the export planner. Fresh imports carry nil in/out, so this
+                // is a no-op for them.
+                let validated = Self.validatedInOut(
+                    inPoint: p.clips[i].inPoint, outPoint: p.clips[i].outPoint,
+                    frameCount: index.count)
+                p.clips[i].inPoint = validated.inPoint
+                p.clips[i].outPoint = validated.outPoint
                 commit(p)
+                if validated.didReset { inOutResets.append(id) }
             }
             // Damage detection (issue #45): cluster the demux anomalies, then a few
             // bounded seek-anchored confirm decodes around them — zero decodes on a

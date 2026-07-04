@@ -208,6 +208,55 @@ struct ProjectDocumentBatchTests {
     }
 }
 
+/// A relink to a shorter file must not leave in/out points the new frame index can't
+/// hold — they'd trap the export planner (issue #74). The validation rule runs once the
+/// re-imported frame count is known: both in range → keep; either out → reset both.
+struct InOutRevalidationTests {
+    @Test func bothPointsInRangeAreKept() {
+        let result = ProjectDocument.validatedInOut(inPoint: 10, outPoint: 20, frameCount: 100)
+        #expect(result.inPoint == 10)
+        #expect(result.outPoint == 20)
+        #expect(result.didReset == false)
+    }
+
+    @Test func nilPointsStayNilAndDoNotReset() {
+        let result = ProjectDocument.validatedInOut(inPoint: nil, outPoint: nil, frameCount: 100)
+        #expect(result.inPoint == nil)
+        #expect(result.outPoint == nil)
+        #expect(result.didReset == false)
+    }
+
+    @Test func lastFrameOutPointIsInRange() {
+        // outPoint is an inclusive frame index; the last valid position is frameCount - 1.
+        let result = ProjectDocument.validatedInOut(inPoint: 0, outPoint: 99, frameCount: 100)
+        #expect(result.outPoint == 99)
+        #expect(result.didReset == false)
+    }
+
+    @Test func outPointPastTheNewEndResetsBothPoints() {
+        let result = ProjectDocument.validatedInOut(inPoint: 10, outPoint: 500, frameCount: 100)
+        #expect(result.inPoint == nil)
+        #expect(result.outPoint == nil)
+        #expect(result.didReset)
+    }
+
+    @Test func inPointAtOrPastTheNewEndResetsBothPoints() {
+        // A shorter file whose new count is <= the stored inPoint (equal is out of range —
+        // valid positions are 0..<count).
+        let result = ProjectDocument.validatedInOut(inPoint: 100, outPoint: nil, frameCount: 100)
+        #expect(result.inPoint == nil)
+        #expect(result.outPoint == nil)
+        #expect(result.didReset)
+    }
+
+    @Test func inPointFitsButOutPointDoesNotResetsBoth() {
+        let result = ProjectDocument.validatedInOut(inPoint: 5, outPoint: 100, frameCount: 100)
+        #expect(result.inPoint == nil)
+        #expect(result.outPoint == nil)
+        #expect(result.didReset)
+    }
+}
+
 /// The preview's track choice persists per project (pinned #8 decision): a new
 /// optional field on the project model — old saves decode to the default, track 1.
 struct MonitoredOutputTrackPersistenceTests {

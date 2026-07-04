@@ -99,9 +99,18 @@ enum ExportPlanner {
         let target = effectiveTarget(target, settings: settings)
         let clip = input.clip
         let index = input.index
+        // Belt-and-braces: a stored in/out that outran a re-imported (shorter) index
+        // would trap the raw `index.pts[$0]` subscript below (issue #74). The relink
+        // re-import already resets out-of-range points, but no plan path may ever trap —
+        // refuse with `invalidPlan` instead.
+        func keptPts(_ frame: Int?) throws -> Double? {
+            guard let frame else { return nil }
+            guard index.pts.indices.contains(frame) else { throw ExportError.invalidPlan }
+            return index.pts[frame]
+        }
         let window = ExportEngine.keptWindow(
-            inPts: clip.inPoint.map { index.pts[$0] },
-            outPts: clip.outPoint.map { index.pts[$0] },
+            inPts: try keptPts(clip.inPoint),
+            outPts: try keptPts(clip.outPoint),
             firstPts: index.pts.first, lastPts: index.pts.last,
             frameDuration: frameDuration(clip.video?.frameRate),
             containerStart: input.containerStart)
