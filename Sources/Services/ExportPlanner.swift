@@ -44,6 +44,15 @@ enum ExportPlanner {
     /// A clip with no zones plans byte-identically to before repair existed.
     static func videoTreatment(for clip: Clip, target: Clip?, index: FrameIndex,
                                containerStart: Double = 0) throws -> VideoTreatment {
+        // No probed video means the clip is still importing (or its import failed):
+        // the smart-render path below reads `clip.video?.codec` and would default the
+        // encoder to libx264, silently re-encoding an HEVC/MPEG-2 source wrong (issue
+        // #78). The document gates the Export button and `export()` on import state;
+        // this refuses the plan itself, so no code path reaches encoder selection with
+        // `video == nil` — belt-and-braces even if the gate is bypassed.
+        guard clip.video != nil else {
+            throw ExportError.clipNotReady("“\(clip.displayName)” isn’t ready to export yet — no video track was read.")
+        }
         if let target, let tv = target.video, let cv = clip.video,
            !MatchEvaluator.matches(clip, target: target) {
             // The conform chain drops the clip's damaged spans before its fps fill

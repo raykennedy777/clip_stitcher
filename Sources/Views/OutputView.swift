@@ -58,9 +58,20 @@ struct OutputView: View {
                 }
                 HStack {
                     Button("Export…") { chooseDestinationAndExport() }
-                        .disabled(document.project.clips.isEmpty || isExporting)
+                        .disabled(document.project.clips.isEmpty || isExporting || exportDisabledReason != nil)
                         .accessibilityIdentifier("output.export")
                     Spacer()
+                }
+                // Why Export is disabled (issue #78): clips still being analysed name
+                // their count; a failed/source-missing clip points to its own row (which
+                // shows the specific error). Hidden while exporting — the progress and
+                // outcome speak for themselves then.
+                if !isExporting, let reason = exportDisabledReason {
+                    Label(reason, systemImage: "hourglass")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("output.exportBlockedReason")
+                        .accessibilityValue(Text(reason))
                 }
                 if isExporting {
                     // Prominent progress (issue #9): a full-width determinate bar with
@@ -120,6 +131,13 @@ struct OutputView: View {
         guard document.project.output.type != .audioOnly else { return nil }
         let shares = document.project.clips.compactMap { document.copyShares[$0.id] }
         return ExportPlanner.reencodeDominanceWarning(shares: shares)
+    }
+
+    /// Why Export is disabled (issue #78), or nil when it can proceed — clips still
+    /// analysing, or a failed/source-missing clip needing the user to act.
+    private var exportDisabledReason: String? {
+        ProjectDocument.exportDisabledReason(
+            clips: document.project.clips, states: document.importStates)
     }
 
     private var exportFraction: Double {

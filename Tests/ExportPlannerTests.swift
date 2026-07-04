@@ -60,14 +60,14 @@ struct ExportPlannerTests {
         }
     }
 
-    @Test func clipWithoutVideoIsSmartRendered() throws {
-        // No probed clip video to compare: the conform verdict can't fire (it needs
-        // both specs); the clip takes the smart-render path, as before the extraction.
-        let treatment = try ExportPlanner.videoTreatment(for: clip(video: nil),
-                                                         target: clip(video: video()), index: index)
-        guard case .smartRender = treatment else {
-            Issue.record("expected smart render")
-            return
+    @Test func clipWithoutVideoRefusesToPlan() {
+        // No probed clip video (still importing, or import failed): planning would
+        // default the smart-render encoder to libx264 and silently re-encode the source
+        // wrong (issue #78), so the planner refuses rather than reaching encoder
+        // selection with `video == nil`.
+        #expect(throws: ExportError.self) {
+            try ExportPlanner.videoTreatment(for: clip(video: nil),
+                                             target: clip(video: video()), index: index)
         }
     }
 

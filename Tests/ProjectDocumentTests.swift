@@ -274,3 +274,90 @@ struct MonitoredOutputTrackPersistenceTests {
         #expect(decoded.monitoredOutputTrack == 2)
     }
 }
+
+/// Export must gate on import state (issue #78): a clip still probing/indexing has no
+/// probed video, so planning it would default the smart-render encoder to libx264 and
+/// silently re-encode the source wrong. The button disables with a visible reason and
+/// `export()` refuses with a specific, user-readable error.
+struct ExportReadinessGateTests {
+    private func clip(_ name: String) -> Clip { Clip(bookmark: Data(), displayName: name) }
+
+    // MARK: per-clip reason (the export() gate)
+
+    @Test func readyAndUnknownStatesAreNotBlocked() {
+        let c = clip("a.mp4")
+        #expect(ProjectDocument.clipNotReadyReason(for: c, state: .ready) == nil)
+        #expect(ProjectDocument.clipNotReadyReason(for: c, state: nil) == nil)
+    }
+
+    @Test func probingAndIndexingClipsAreBlocked() {
+        let c = clip("a.mp4")
+        #expect(ProjectDocument.clipNotReadyReason(for: c, state: .probing)?.contains("being analysed") == true)
+        #expect(ProjectDocument.clipNotReadyReason(for: c, state: .indexing)?.contains("being analysed") == true)
+    }
+
+    @Test func failedClipReasonNamesTheImportError() {
+        let reason = ProjectDocument.clipNotReadyReason(for: clip("a.mp4"), state: .failed("No video track"))
+        #expect(reason?.contains("No video track") == true)
+        #expect(reason?.contains("Remove or relink") == true)
+    }
+
+    @Test func sourceMissingClipIsBlocked() {
+        let reason = ProjectDocument.clipNotReadyReason(for: clip("a.mp4"), state: .sourceMissing)
+        #expect(reason?.contains("missing") == true)
+        #expect(reason?.contains("Relink") == true)
+    }
+
+    // MARK: aggregate reason (the Output button)
+
+    @Test func noReasonWhenEmptyOrAllReady() {
+        #expect(ProjectDocument.exportDisabledReason(clips: [], states: [:]) == nil)
+        let a = clip("a.mp4"), b = clip("b.mp4")
+        let states: [Clip.ID: ImportState] = [a.id: .ready, b.id: .ready]
+        #expect(ProjectDocument.exportDisabledReason(clips: [a, b], states: states) == nil)
+    }
+
+    @Test func analysingReasonNamesTheCountWithPluralisation() {
+        let a = clip("a.mp4"), b = clip("b.mp4"), c = clip("c.mp4")
+        let one: [Clip.ID: ImportState] = [a.id: .probing, b.id: .ready]
+        #expect(ProjectDocument.exportDisabledReason(clips: [a, b], states: one) == "Analysing 1 clip…")
+        let two: [Clip.ID: ImportState] = [a.id: .probing, b.id: .indexing, c.id: .ready]
+        #expect(ProjectDocument.exportDisabledReason(clips: [a, b, c], states: two) == "Analysing 2 clips…")
+    }
+
+    @Test func analysingTakesPriorityOverUnresolved() {
+        // A mix of still-analysing and failed clips reports the analysing count first —
+        // it resolves on its own; the failed row's error is shown in the source list.
+        let a = clip("a.mp4"), b = clip("b.mp4")
+        let states: [Clip.ID: ImportState] = [a.id: .probing, b.id: .failed("No video track")]
+        #expect(ProjectDocument.exportDisabledReason(clips: [a, b], states: states) == "Analysing 1 clip…")
+    }
+
+    @Test func unresolvedReasonWhenNothingIsAnalysing() {
+        let a = clip("a.mp4"), b = clip("b.mp4")
+        let one: [Clip.ID: ImportState] = [a.id: .failed("No video track"), b.id: .ready]
+        #expect(ProjectDocument.exportDisabledReason(clips: [a, b], states: one)?.contains("One clip couldn’t be imported") == true)
+        let two: [Clip.ID: ImportState] = [a.id: .failed("x"), b.id: .sourceMissing]
+        #expect(ProjectDocument.exportDisabledReason(clips: [a, b], states: two)?.hasPrefix("2 clips couldn’t be imported") == true)
+    }
+
+    // MARK: export() refuses an unready clip
+
+    @MainActor
+    @Test func exportDuringProbingFailsWithReadinessNotInvalidPlan() async {
+        let doc = ProjectDocument()
+        let c = clip("a.mp4")
+        doc.project.clips = [c]
+        doc.importStates[c.id] = .probing
+
+        await doc.export(to: URL(fileURLWithPath: NSTemporaryDirectory() + "vidconform-78-out.mp4"))
+
+        guard case .failed(let message) = doc.exportStatus else {
+            Issue.record("expected .failed, got \(doc.exportStatus)")
+            return
+        }
+        #expect(message.contains("being analysed"))
+        // Not the generic invalidPlan wording the old path produced.
+        #expect(!message.contains("collapse to nothing"))
+    }
+}

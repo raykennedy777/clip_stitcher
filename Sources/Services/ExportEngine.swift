@@ -73,6 +73,12 @@ enum ExportError: LocalizedError {
     /// The user cancelled (issue #32) — not a failure. Carries how many `.separate`
     /// files had already finished (and stay on disk) so the status line can say so.
     case cancelled(finished: Int, total: Int)
+    /// A clip isn't ready to export (issue #78): still probing/indexing, failed to
+    /// import, or source-missing. The button gates on this, but the keyboard/automation
+    /// path can reach `export()` regardless — so it refuses with the ready-made,
+    /// user-readable reason rather than routing an unprobed clip (`video == nil`) into
+    /// smart render, where the encoder would silently default to libx264 (ADR-0009).
+    case clipNotReady(String)
 
     var errorDescription: String? {
         switch self {
@@ -86,6 +92,7 @@ enum ExportError: LocalizedError {
         case .destinationIsSource(let clip, let path):
             return "The export would overwrite the source of “\(clip)” at \(path); the original would be destroyed. Choose a different destination."
         case .cancelled: return "The export was cancelled."
+        case .clipNotReady(let reason): return reason
         }
     }
 }

@@ -30,6 +30,7 @@ up from the matched element to its `AXRow` ancestor and set `AXSelected = true`
 | `output.type` | Type popup |
 | `output.container` | Container popup (absent for audio-only type) |
 | `output.export` | Export… button |
+| `output.exportBlockedReason` | Why Export is disabled (issue #78); present only while clips are still analysing or a clip failed import/is source-missing — an `AXStaticText`, full reason in `AXValue` |
 | `output.reencodeWarning` | Re-encode dominance warning (issue #15); present only when > 50 % of the planned output duration re-encodes — an `AXStaticText`, full warning text in `AXValue` (not `AXValueDescription`) |
 | `output.status` | Export outcome (done / failed / cancelled); absent while idle or running |
 

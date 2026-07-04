@@ -554,6 +554,57 @@ final class ProjectDocument: ReferenceFileDocument {
         doctorSuggestions.removeAll { $0 == id }
     }
 
+    // MARK: - Export readiness gate (issue #78)
+
+    /// Why a single clip can't be exported yet, or `nil` when it's ready. `export()`
+    /// throws this (as `ExportError.clipNotReady`) for the first unready clip, so a
+    /// probing/indexing/failed clip never reaches encoder selection with `video == nil`.
+    /// A `nil` state means "ready" — the Source row treats it the same (unimported clips
+    /// carry no runtime state) and the planner's own guard still refuses a truly-unprobed
+    /// clip. Pure over the passed state so the gate is testable without real media.
+    static func clipNotReadyReason(for clip: Clip, state: ImportState?) -> String? {
+        switch state {
+        case .ready, .none:
+            return nil
+        case .probing, .indexing:
+            return "“\(clip.displayName)” is still being analysed — wait for it to finish, then export."
+        case .failed(let message):
+            return "“\(clip.displayName)” couldn’t be imported (\(message)). Remove or relink it, then export."
+        case .sourceMissing:
+            return "The source for “\(clip.displayName)” is missing. Relink it, then export."
+        }
+    }
+
+    /// The Output view's export-disabled reason (issue #78), or `nil` when export can
+    /// proceed. Clips still being analysed take priority — they resolve on their own, so
+    /// the reason names the count ("Analysing 2 clips…"); otherwise a failed or
+    /// source-missing clip needs the user to remove or relink it (its row shows the
+    /// specific error). Pure over the passed clips/states so it's testable and can't
+    /// disagree with `clipNotReadyReason`.
+    static func exportDisabledReason(clips: [Clip], states: [Clip.ID: ImportState]) -> String? {
+        let analysing = clips.filter {
+            switch states[$0.id] {
+            case .probing, .indexing: return true
+            default: return false
+            }
+        }.count
+        if analysing > 0 {
+            return analysing == 1 ? "Analysing 1 clip…" : "Analysing \(analysing) clips…"
+        }
+        let unresolved = clips.filter {
+            switch states[$0.id] {
+            case .failed, .sourceMissing: return true
+            default: return false
+            }
+        }.count
+        if unresolved > 0 {
+            return unresolved == 1
+                ? "One clip couldn’t be imported — remove or relink it to export."
+                : "\(unresolved) clips couldn’t be imported — remove or relink them to export."
+        }
+        return nil
+    }
+
     // MARK: - Export (Milestone 2: frame-exact boundary re-encode)
 
     /// Runs a Milestone 2 export to `destination` — the chosen file in `.connect` mode,
@@ -601,6 +652,13 @@ final class ProjectDocument: ReferenceFileDocument {
             let cutOnly = project.output.mode == .separate
                 && project.output.rendering == .cutOnly
             for clip in project.clips {
+                // The button gates on import state (issue #78), but the keyboard/automation
+                // path reaches here regardless — refuse an unready clip with a specific,
+                // user-readable reason before any planning, so a probing clip never routes
+                // into smart render with `video == nil` (and never as a bare `invalidPlan`).
+                if let reason = Self.clipNotReadyReason(for: clip, state: importStates[clip.id]) {
+                    throw ExportError.clipNotReady(reason)
+                }
                 guard let url = url(for: clip) else {
                     throw ExportError.cutFailed("Source file not found for “\(clip.displayName)”.")
                 }
