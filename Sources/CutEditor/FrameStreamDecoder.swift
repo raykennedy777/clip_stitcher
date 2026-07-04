@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// A long-lived ffmpeg process that streams decoded frames as raw RGB over a pipe,
 /// so sequential stepping costs one frame read (~1-2 ms) instead of spawning a new
@@ -32,6 +33,8 @@ final class FrameStreamDecoder {
     private let filter: String?
     private let ffmpeg: URL
     private let queue = DispatchQueue(label: "io.github.raykennedy777.clipstitcher.decoder")
+    private static let log = Logger(subsystem: "io.github.raykennedy777.clipstitcher",
+                                    category: "FrameStreamDecoder")
 
     /// How many trailing frames to materialise when decoding forward through a GOP.
     /// Matches the model's cache cap so a run of backward steps stays in cache.
@@ -39,6 +42,12 @@ final class FrameStreamDecoder {
 
     private var process: Process?
     private var handle: FileHandle?
+    /// The running ffmpeg's stderr pipe, drained live into `stderrTail`.
+    private var errPipe: Pipe?
+    /// A bounded recent tail of the current ffmpeg's stderr, so a persistent decode
+    /// failure can be logged instead of silently degrading to the `FrameExtractor`
+    /// slow path forever (issue #86). Reuses `ProcessRunner`'s implementation.
+    private var stderrTail: StderrTail?
     private var nextFrame = 0
 
     private var frameBytes: Int { width * height * 3 }
@@ -113,6 +122,9 @@ final class FrameStreamDecoder {
             nextFrame += 1
         }
 
+        // Reached target but never produced its image → the decode broke early; surface
+        // ffmpeg's error (when it emitted one) so a persistent failure is diagnosable.
+        if targetImage == nil { logDecodeFailure(target: target) }
         return Result(image: targetImage, window: window)
     }
 
@@ -149,14 +161,30 @@ final class FrameStreamDecoder {
         process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+
+        // Capture a bounded tail of ffmpeg's stderr (was `/dev/null`) so a persistent
+        // decode failure is logged, not silently swallowed (issue #86). Drained live via a
+        // readability handler so the stderr pipe can never fill and block the decoder's
+        // blocking stdout reads mid-stream (the issue #59 deadlock). At `-loglevel error`
+        // a healthy decode writes nothing here, so the tail stays empty and never logs.
+        let errPipe = Pipe()
+        let tail = StderrTail(cap: 64 * 1024)
+        process.standardError = errPipe
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { handle.readabilityHandler = nil } else { tail.append(chunk) }
+        }
         do {
             try process.run()
         } catch {
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            Self.log.error("ffmpeg failed to launch: \(error.localizedDescription, privacy: .public)")
             return
         }
         self.process = process
         self.handle = pipe.fileHandleForReading
+        self.errPipe = errPipe
+        self.stderrTail = tail
         self.nextFrame = anchor
     }
 
@@ -175,8 +203,22 @@ final class FrameStreamDecoder {
     private func stopSync() {
         if let process, process.isRunning { process.terminate() }
         try? handle?.close()
+        errPipe?.fileHandleForReading.readabilityHandler = nil
+        try? errPipe?.fileHandleForReading.close()
         process = nil
         handle = nil
+        errPipe = nil
+        stderrTail = nil
+    }
+
+    /// Logs the current ffmpeg's stderr tail when a decode ended before reaching its
+    /// target — the point where the caller falls back to the slow `FrameExtractor` path.
+    /// Only logs when the tail is non-empty (at `-loglevel error` that means ffmpeg
+    /// actually reported an error), so a healthy clip's clean EOF never logs.
+    private func logDecodeFailure(target: Int) {
+        guard let data = stderrTail?.snapshot(), !data.isEmpty,
+              let text = String(data: data, encoding: .utf8) else { return }
+        Self.log.error("decode failed reaching frame \(target, privacy: .public); falling back to FrameExtractor. ffmpeg: \(text, privacy: .public)")
     }
 
     /// Converts an absolute frame pts to the input `-ss` value: ffmpeg measures

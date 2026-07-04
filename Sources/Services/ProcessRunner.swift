@@ -22,7 +22,10 @@ struct ProcessResult: Sendable {
 /// boundary rather than mid-byte and stays valid UTF-8 for `String(data:encoding:)`.
 /// Trimming only kicks in once the buffer passes twice the cap, amortising the copy across
 /// many small writes (so the retained tail is bounded by 2× cap, not cap).
-private final class StderrTail: @unchecked Sendable {
+///
+/// Not `private`: the long-lived `FrameStreamDecoder` reuses it to capture its own
+/// ffmpeg's stderr (issue #86) rather than fork a second bounded-tail implementation.
+final class StderrTail: @unchecked Sendable {
     private let cap: Int
     private let lock = NSLock()
     private var buffer = Data()
