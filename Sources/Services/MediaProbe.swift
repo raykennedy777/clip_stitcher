@@ -215,8 +215,17 @@ enum MediaProbe {
     /// Parses the `format=start_time` CSV value to seconds. "N/A" (the demuxer carries
     /// no start time) and anything unparseable are 0 — also the correct seek offset for
     /// such files.
+    ///
+    /// A negative value is clamped to 0 here, the single parse choke point every consumer
+    /// reads `containerStart` through, so the whole app sees a start ≥ 0 by construction.
+    /// The start is only ever used as a seek base — ffmpeg measures input `-ss` *from* it
+    /// and can't seek before the file's first packet, and every seek builder subtracts it
+    /// (`pts − start`); a negative start would push every seek *later* (`pts − (−x)`),
+    /// over-seeking into content. ffprobe normalizes broadcast PTS wrap before it surfaces
+    /// as `start_time`, so a genuinely negative container start has never been observed;
+    /// treating one as "starts at 0" is the safe, meaningful reading.
     static func parseStartTime(csv: String) -> Double {
-        Double(csv.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        max(0, Double(csv.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
     }
 }
 

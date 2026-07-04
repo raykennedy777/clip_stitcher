@@ -489,8 +489,14 @@ enum ExportEngine {
         // open (read audio to the file end).
         let closedEnd = outPts.map { outEndPts ?? ($0 + (frameDuration ?? 0)) }
         let spanEnd = closedEnd ?? ((lastPts ?? 0) + (frameDuration ?? 0))
-        return KeptWindow(start: inPts.map { $0 - containerStart },
-                          end: closedEnd.map { $0 - containerStart },
+        // Clamp the seek values ≥ 0, the same rule the seek builders apply
+        // (`FrameStreamDecoder.seekSeconds` / `audioInputArgs`): a pts at/before the
+        // container start (the very first frames) must not produce a negative `-ss`.
+        // `duration` stays in absolute pts and is unaffected. `containerStart` is already
+        // clamped ≥ 0 at parse (`MediaProbe.parseStartTime`), so on healthy inputs — where
+        // the in/out pts sit at or after it — this is a no-op.
+        return KeptWindow(start: inPts.map { max(0, $0 - containerStart) },
+                          end: closedEnd.map { max(0, $0 - containerStart) },
                           duration: max(0, spanEnd - spanStart))
     }
 

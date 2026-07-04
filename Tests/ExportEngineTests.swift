@@ -201,6 +201,17 @@ struct ExportEngineTests {
         #expect(abs(w.duration - 10.04) < 1e-9)
     }
 
+    @Test func keptWindowClampsANegativeSeekToZero() {
+        // An in point whose pts sits before the container start must not produce a negative
+        // `-ss` — the same max(0, …) rule the seek builders apply (issue #86). Here inPts
+        // 0.10 < containerStart 0.24, so `start` clamps to 0, not −0.14; `end` = 5.04 − 0.24.
+        let w = ExportEngine.keptWindow(inPts: 0.10, outPts: 5.0, outEndPts: 5.04, firstPts: 0.10,
+                                        lastPts: 100.0, frameDuration: 0.04, containerStart: 0.24)
+        #expect(w.start == 0)
+        #expect(abs(w.end! - 4.8) < 1e-9)
+        #expect(w.duration > 0)
+    }
+
     @Test func keptWindowIsUnchangedOnAZeroStartContainer() {
         // Closed out at pts 60.0 whose next frame is 60.04: the window runs to the out
         // frame's display end (60.04), matching the kept video span (issue #75).

@@ -178,6 +178,21 @@ struct MediaProbeTests {
         #expect(MediaProbe.parseStartTime(csv: "") == 0)
     }
 
+    @Test func parseStartTimeClampsANegativeStartToZero() {
+        // A negative container start is never a meaningful seek base (ffmpeg measures input
+        // -ss *from* it and can't seek before the first packet; a negative would over-seek).
+        // Clamped here, the single choke point every `containerStart` consumer reads (#86).
+        #expect(MediaProbe.parseStartTime(csv: "-0.500000\n") == 0)
+    }
+
+    @Test func negativeStartTimeInTheJSONProbeClampsToZero() throws {
+        // Same clamp reached via the folded -show_format path (issue #85 + #86).
+        let json = Data("""
+        { "streams": [ { "codec_type": "video" } ], "format": { "start_time": "-1.200000" } }
+        """.utf8)
+        #expect(try MediaProbe.parseProbe(json: json).containerStart == 0)
+    }
+
     // MARK: video timebase CSV (issue #18)
 
     @Test func parseTimeBaseReturnsTheBareFraction() {
