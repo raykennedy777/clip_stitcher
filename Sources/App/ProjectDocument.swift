@@ -100,7 +100,13 @@ final class ProjectDocument: ReferenceFileDocument {
     private var didResolveSources = false
 
     init() {
-        self.project = VidProject()
+        var project = VidProject()
+        // A brand-new project starts on the user's configured default container
+        // (issue #87). Only new-project creation reads this — opening a saved project
+        // goes through `init(configuration:)`, which decodes the stored container
+        // untouched.
+        project.output.container = AppSettings.defaultContainer()
+        self.project = project
     }
 
     required init(configuration: ReadConfiguration) throws {

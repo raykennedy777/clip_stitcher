@@ -110,6 +110,17 @@ the readable text (e.g. `92% copied`, `0% copied`) is its accessibility value (r
 via `AXValueDescription`, like the badge). Absent until the clip's frame index is
 built (import still running, or source missing).
 
+### Settings window (`SettingsView`, issue #87)
+
+Opened with ⌘, (the standard `Settings` scene). Two preferences, both `@AppStorage`-backed:
+
+| Identifier | Element |
+| --- | --- |
+| `settings.folderMode` | "Save panels start in" popup — Remember my last choice / Always start in a fixed folder |
+| `settings.fixedFolderPath` | Chosen fixed folder path (`AXStaticText`; present only in fixed mode; "No folder chosen" until picked) |
+| `settings.chooseFolder` | Choose… button opening the folder picker (present only in fixed mode) |
+| `settings.container` | Default container popup — the container a new project starts with (TS / MKV / MP4) |
+
 ## Modal-panel bypass (issue #37)
 
 System file dialogs can't be driven reliably, so a launch-gated bypass skips them.

@@ -285,10 +285,14 @@ struct ClipDoctorView: View {
         panel.canCreateDirectories = true
         panel.showsTagField = false
         panel.nameFieldStringValue = model.destination.lastPathComponent
-        panel.directoryURL = model.destination.deletingLastPathComponent()
+        // The configured folder / last choice wins (issue #87); with nothing recorded
+        // yet it falls back to the default repaired-copy sibling's folder.
+        panel.directoryURL = ExportPanelDefaults().startingDirectory
+            ?? model.destination.deletingLastPathComponent()
         if let type = UTType(filenameExtension: ext) { panel.allowedContentTypes = [type] }
         guard panel.runModal() == .OK, var url = panel.url else { return }
         if url.pathExtension.lowercased() != ext.lowercased() { url.appendPathExtension(ext) }
+        ExportPanelDefaults().recordChosenFile(url)
         model.setDestination(url)
     }
 }

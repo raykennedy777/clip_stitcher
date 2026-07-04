@@ -4,6 +4,8 @@ import AppKit
 struct OutputView: View {
     @ObservedObject var document: ProjectDocument
     @State private var showCancelAlert = false
+    /// The shared "start where I last saved / at my fixed folder" mechanism (issue #87).
+    private let panelDefaults = ExportPanelDefaults()
 
     private var output: Binding<OutputSettings> {
         Binding(
@@ -201,9 +203,14 @@ struct OutputView: View {
             panel.canChooseFiles = false
             panel.canCreateDirectories = true
             panel.allowsMultipleSelection = false
-            if let dir = defaultExportDirectory { panel.directoryURL = dir }
+            // The configured folder / last choice wins (issue #87); with nothing
+            // recorded yet it falls back to the clips' folder.
+            if let dir = panelDefaults.startingDirectory ?? defaultExportDirectory {
+                panel.directoryURL = dir
+            }
 
             guard panel.runModal() == .OK, let url = panel.url else { return }
+            panelDefaults.recordChosenFolder(url)
             document.startExport(to: url)
             return
         }
@@ -229,10 +236,15 @@ struct OutputView: View {
         panel.canCreateDirectories = true
         panel.showsTagField = false
         panel.nameFieldStringValue = "\(defaultName).\(ext)"
-        if let dir = defaultExportDirectory { panel.directoryURL = dir }
+        // The configured folder / last choice wins (issue #87); with nothing recorded
+        // yet it falls back to the clips' folder.
+        if let dir = panelDefaults.startingDirectory ?? defaultExportDirectory {
+            panel.directoryURL = dir
+        }
 
         guard panel.runModal() == .OK, var url = panel.url else { return }
         if url.pathExtension.lowercased() != ext { url.appendPathExtension(ext) }
+        panelDefaults.recordChosenFile(url)
         document.startExport(to: url)
     }
 
