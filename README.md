@@ -46,7 +46,10 @@ xcodebuild test -scheme ClipStitcher -destination 'platform=macOS' \
 
 ## Keyboard shortcuts
 
-Modifier order follows Apple's convention (⌃ ⌥ ⇧ ⌘).
+Modifier order follows Apple's convention (⌃ ⌥ ⇧ ⌘). The transport and marking shortcuts
+are also in the menu bar — **Playback** (Play/Pause, Step, Keyframe, Scene) and **Marking**
+(Set In/Out, Split, Go To…) — for discoverability; the menu items act on the cut editor
+when one is frontmost, and the shared transport items act on the output preview otherwise.
 
 **Transport** (cut editor & preview)
 

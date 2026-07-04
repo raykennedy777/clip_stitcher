@@ -46,6 +46,15 @@ struct PreviewView: View {
         .focusedSceneValue(\.saveFrame, SaveFrameCommand(isEnabled: model.canSaveFrame) {
             saveFrame()
         })
+        // Publish the transport (issue #67) so the Playback menu's shared actions
+        // (Play/Pause, Step, Keyframe) drive the preview while it's key. Scene scanning is
+        // cut-editor-only, so it isn't offered here.
+        .focusedSceneValue(\.previewTransport, PreviewTransport(
+            isPlaying: model.isPlaying,
+            canStep: !model.isLoading && model.frameCount > 0,
+            togglePlay: { model.togglePlay() },
+            step: { model.step(by: $0) },
+            stepKeyframe: { $0 < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe() }))
     }
 
     /// Runs the shared save pipeline for the frame under the playhead (issue #89).

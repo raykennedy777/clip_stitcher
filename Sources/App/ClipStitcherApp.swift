@@ -14,6 +14,18 @@ struct ClipStitcherApp: App {
             CommandGroup(after: .saveItem) {
                 SaveFrameMenuItem()
             }
+
+            // Playback and Marking menus (issue #67) surface the frame-surface shortcuts
+            // where macOS users look for them. Placed after the standard View menu, they
+            // route to the key cut-editor (via ActiveCutEditor) or, for the shared
+            // transport actions, the output preview (via the previewTransport focused
+            // value). See MenuCommands.swift.
+            CommandMenu("Playback") {
+                PlaybackCommands()
+            }
+            CommandMenu("Marking") {
+                MarkingCommands()
+            }
         }
 
         // The standard Settings scene wires ⌘, automatically (issue #87).

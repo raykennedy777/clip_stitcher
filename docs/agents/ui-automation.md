@@ -158,18 +158,40 @@ Opened with ⌘, (the standard `Settings` scene). Two preferences, both `@AppSto
 | Identifier | Element |
 | --- | --- |
 | `menu.saveFrame` | File ▸ "Save Frame as Image…" (issue #89, ⌃⌘S) — saves the displayed frame as a full-resolution PNG at the source's coded dimensions |
+| `menu.playback.playPause` | Playback ▸ Play / Pause (Space) — label toggles with `isPlaying` |
+| `menu.playback.stepBackward` | Playback ▸ Step Backward (←) |
+| `menu.playback.stepForward` | Playback ▸ Step Forward (→) |
+| `menu.playback.previousKeyframe` | Playback ▸ Previous Keyframe (⇧←) |
+| `menu.playback.nextKeyframe` | Playback ▸ Next Keyframe (⇧→) |
+| `menu.playback.previousScene` | Playback ▸ Previous Scene (↑) — cut-editor only (disabled otherwise) |
+| `menu.playback.nextScene` | Playback ▸ Next Scene (↓) — cut-editor only (disabled otherwise) |
+| `menu.marking.setIn` | Marking ▸ Set In Point (`[`) — cut-editor only |
+| `menu.marking.setOut` | Marking ▸ Set Out Point (`]`) — cut-editor only |
+| `menu.marking.split` | Marking ▸ Split / Remove Split at Playhead (⌘B) — cut-editor only; label toggles, disabled off a live split point |
+| `menu.marking.goTo` | Marking ▸ Go To… (⌘J) — cut-editor only; opens the jump popover |
 
-`menu.saveFrame` is a File-menu item in the standard position (after Save). It enables
-and acts on whichever surface publishes the `\.saveFrame` scene value — the **output
-preview** while a frame is on screen. In the **cut-editor** (a separate top-level window
-outside the document scene) the ⌃⌘S shortcut still works, handled by a local hidden
-button in that window's view hierarchy; the menu item itself reads as disabled while the
-cut-editor is key (a seam #67's responder-chain routing will close). Both surfaces open a
-save panel (never an instant save), pre-filled `"<clip stem> — HH.MM.SS.FF.png"` and
-starting on the configured export folder (issue #87). Saved dimensions are the source's
-**coded** (storage) pixels — anamorphic content saves at its storage shape, not the
-SAR-corrected display shape shown on screen; a field-coded source is saved matching the
-displayed deinterlacing.
+**Save Frame** (`menu.saveFrame`) is a File-menu item in the standard position (after
+Save). It enables and acts on whichever surface owns the frame: the **output preview**
+publishes the `\.saveFrame` scene value while it's key; the **cut-editor** (a separate
+top-level window outside the document scene) routes through `ActiveCutEditor` (issue #67).
+Both surfaces open a save panel (never an instant save), pre-filled
+`"<clip stem> — HH.MM.SS.FF.png"` and starting on the configured export folder (issue #87).
+Saved dimensions are the source's **coded** (storage) pixels — anamorphic content saves at
+its storage shape, not the SAR-corrected display shape shown on screen; a field-coded
+source is saved matching the displayed deinterlacing.
+
+**Playback / Marking** (`menu.playback.*`, `menu.marking.*`, issue #67) make the
+frame-surface shortcuts discoverable. The cut editor opens outside the document scene, so
+these route to the key cut-editor window through `ActiveCutEditor` (an app-level
+`ObservableObject` the presenter sets on `windowDidBecomeKey` and clears on resign/close);
+the shared transport items (Play/Pause, Step, Keyframe) also act on the **output preview**
+via the `previewTransport` focused scene value when the preview is key. Cut-editor-only
+items (Scene, all of Marking) read disabled when no cut-editor window is key. The transport
+buttons inside each window keep their own `.keyboardShortcut`s, so a key window's local
+equivalent handles the keystroke and the menu doesn't double-fire; ⌘J and ⌃⌘S have no local
+button anymore, so the menu is their only path when the cut editor is key. Scroll-to-scrub
+and ⇧-scroll have no menu equivalent (they aren't keystrokes) and stay documented in the
+README.
 
 ## Modal-panel bypass (issue #37)
 

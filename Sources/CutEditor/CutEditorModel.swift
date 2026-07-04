@@ -23,6 +23,10 @@ final class CutEditorModel: ObservableObject {
     @Published var isPlaying = false
     @Published var isSceneScanning = false
     @Published var errorMessage: String?
+    /// Drives the Go To popover's presentation (issue #21) — published so the ⌘J
+    /// menu item (issue #67) can open it, alongside the readout's tap gesture, now
+    /// that the window's hidden ⌘J button has retired.
+    @Published var isShowingJump = false
 
     /// Set by the presenter to close this editor's window.
     var onClose: (() -> Void)?
@@ -96,6 +100,14 @@ final class CutEditorModel: ObservableObject {
     }
 
     var lastFrame: Int { max(0, frameCount - 1) }
+
+    /// Whether transport (play, step, keyframe, scene) can act: a clip is loaded and
+    /// no longer indexing. The cut editor's transport buttons and the Playback menu
+    /// (issue #67) share this gate.
+    var canStep: Bool { frameCount > 0 && !isIndexing }
+
+    /// Whether a scene-scan jump can start — as `canStep`, and not already scanning.
+    var canScene: Bool { canStep && !isSceneScanning }
 
     func load() async {
         do {

@@ -83,15 +83,46 @@ extension FocusedValues {
 
 /// The File-menu "Save Frame as Image…" item (issue #89). Standard File-menu position,
 /// ⌃⌘S — a free, HIG-sane combination (the document's own ⌘S / ⇧⌘S are taken by
-/// DocumentGroup). Enabled and driven by whichever surface currently publishes
-/// `\.saveFrame`.
+/// DocumentGroup). Enabled and driven by whichever surface owns the frame: the output
+/// preview publishes `\.saveFrame` while it's key; the cut editor — a separate top-level
+/// window outside the document scene — routes through `ActiveCutEditor` instead (issue
+/// #67), which retired the cut editor's local hidden ⌃⌘S button.
 struct SaveFrameMenuItem: View {
     @FocusedValue(\.saveFrame) private var command
+    @ObservedObject private var active = ActiveCutEditor.shared
 
     var body: some View {
-        Button("Save Frame as Image…") { command?.run() }
+        if let command {                       // an in-scene surface (the preview) is key
+            SaveFrameButton(isEnabled: command.isEnabled, run: command.run)
+        } else if let model = active.model {   // a cut-editor window is key
+            CutEditorSaveFrameButton(model: model)
+        } else {
+            SaveFrameButton(isEnabled: false) {}
+        }
+    }
+}
+
+/// Save Frame bound to the key cut-editor. A dedicated `@ObservedObject` view so the item
+/// re-evaluates its enabled state as the model's `canSaveFrame` (a frame loads) changes.
+private struct CutEditorSaveFrameButton: View {
+    @ObservedObject var model: CutEditorModel
+
+    var body: some View {
+        SaveFrameButton(isEnabled: model.canSaveFrame) {
+            guard let request = model.frameSnapshotRequest() else { return }
+            FrameSnapshot.save(request)
+        }
+    }
+}
+
+private struct SaveFrameButton: View {
+    let isEnabled: Bool
+    let run: () -> Void
+
+    var body: some View {
+        Button("Save Frame as Image…") { run() }
             .keyboardShortcut("s", modifiers: [.control, .command])
-            .disabled(!(command?.isEnabled ?? false))
+            .disabled(!isEnabled)
             .accessibilityIdentifier("menu.saveFrame")
     }
 }

@@ -5,9 +5,9 @@ struct CutEditorView: View {
     /// Observed so the audio track dropdown follows live edits from the settings sheet.
     @ObservedObject var document: ProjectDocument
     @State private var showingAudioSettings = false
-    @State private var showingJump = false
     /// The jump popover's relative/absolute choice, kept here so it persists
-    /// while the window is open (issue #21).
+    /// while the window is open (issue #21). Its presentation lives on the model
+    /// (`isShowingJump`) so the ⌘J menu item can open it (issue #67).
     @State private var jumpRelative = true
 
     var body: some View {
@@ -30,25 +30,12 @@ struct CutEditorView: View {
         .sheet(isPresented: $showingAudioSettings) {
             AudioSettingsView(document: document, clipIDs: [model.clip.id])
         }
-        // "Save Frame as Image…" (issue #89). The cut-editor is a separate top-level
-        // window outside the document scene, so it can't drive the File-menu item's
-        // focused value — it registers the same ⌃⌘S shortcut locally (the key window's
-        // view hierarchy handles the equivalent before the menu). Disabled with no frame,
-        // so the key falls through to the (also disabled) menu item. #67 will unify this.
-        .background(
-            Button("") { saveFrame() }
-                .keyboardShortcut("s", modifiers: [.control, .command])
-                .opacity(0)
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
-                .disabled(!model.canSaveFrame)
-        )
-    }
-
-    /// Runs the shared save pipeline for the displayed frame (issue #89).
-    private func saveFrame() {
-        guard let request = model.frameSnapshotRequest() else { return }
-        FrameSnapshot.save(request)
+        // "Save Frame as Image…" (issue #89) and "Go To…" (issue #21) now route through
+        // the menu bar (issue #67): while this window is key it publishes its model to
+        // `ActiveCutEditor`, and the File ▸ Save Frame and Marking ▸ Go To menu items act
+        // on it — so the local hidden ⌃⌘S and ⌘J buttons that used to carry those
+        // shortcuts have retired. The transport buttons below keep their own
+        // `.keyboardShortcut`s (key-window-local); the menu mirrors them for discoverability.
     }
 
     /// The clip's live state in the document (the model's copy is a snapshot from
@@ -154,18 +141,11 @@ struct CutEditorView: View {
                 .monospacedDigit()
                 .font(.body.weight(.medium))
                 .contentShape(Rectangle())
-                .onTapGesture { showingJump = true }
+                .onTapGesture { model.isShowingJump = true }
                 .help("Go to a time or frame (⌘J)")
-                .popover(isPresented: $showingJump, arrowEdge: .bottom) {
-                    JumpPopoverView(model: model, isPresented: $showingJump, relative: $jumpRelative)
+                .popover(isPresented: $model.isShowingJump, arrowEdge: .bottom) {
+                    JumpPopoverView(model: model, isPresented: $model.isShowingJump, relative: $jumpRelative)
                 }
-                .background(
-                    Button("") { showingJump = true }
-                        .keyboardShortcut("j", modifiers: .command)
-                        .opacity(0)
-                        .frame(width: 0, height: 0)
-                        .accessibilityHidden(true)
-                )
             Spacer()
             selectionReadout
         }

@@ -40,8 +40,33 @@ final class CutEditorPresenter: NSObject, ObservableObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
               let id = windows.first(where: { $0.value === window })?.key else { return }
+        // A closing window may never resign key first, so drop it from the menu router
+        // here too (issue #67) before its model tears down.
+        ActiveCutEditor.shared.resign(models[id])
         models[id]?.teardown()
         windows[id] = nil
         models[id] = nil
+    }
+
+    // MARK: - Menu routing (issue #67)
+    //
+    // The cut editor is outside the document scene, so the Playback/Marking menu
+    // commands route to it through `ActiveCutEditor` rather than `@FocusedValue`.
+    // Track the key cut-editor window and hand its model to the router; a resign
+    // (switching to a document window, a Go To popover taking key, or app deactivation)
+    // clears it so the menu items disable and their shortcuts go inert outside a
+    // cut editor.
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let id = windows.first(where: { $0.value === window })?.key,
+              let model = models[id] else { return }
+        ActiveCutEditor.shared.activate(model)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let id = windows.first(where: { $0.value === window })?.key else { return }
+        ActiveCutEditor.shared.resign(models[id])
     }
 }
