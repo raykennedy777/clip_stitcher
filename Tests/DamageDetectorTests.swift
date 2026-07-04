@@ -129,14 +129,18 @@ struct DamageDetectorTests {
     @Test func nearbyAnomaliesMergeIntoOneCandidate() {
         // The real 1844 capture's double-hit events (two holes 0.4 s apart) and their
         // companion audio gaps merge to one candidate; an event 200 s away stays its own.
+        // The video holes are gaps (decode-confirmable); the first cluster also carries an
+        // audio gap — both facts ride through clustering for the gap-vs-opaque authority rule.
         let candidates = DamageDetector.clusterCandidates([
             .init(start: 16334.16, end: 16334.36, isVideo: false),
-            .init(start: 16334.36, end: 16334.72, isVideo: true),
-            .init(start: 16672.08, end: 16672.90, isVideo: true),
+            .init(start: 16334.36, end: 16334.72, isVideo: true, needsDecodeConfirm: true),
+            .init(start: 16672.08, end: 16672.90, isVideo: true, needsDecodeConfirm: true),
         ])
         #expect(candidates == [
-            .init(start: 16334.16, end: 16334.72, hasVideoAnomaly: true),
-            .init(start: 16672.08, end: 16672.90, hasVideoAnomaly: true),
+            .init(start: 16334.16, end: 16334.72, hasVideoAnomaly: true,
+                  hasOpaqueVideoAnomaly: false, hasAudioAnomaly: true),
+            .init(start: 16672.08, end: 16672.90, hasVideoAnomaly: true,
+                  hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false),
         ])
     }
 
@@ -150,6 +154,98 @@ struct DamageDetectorTests {
         #expect(candidates.count == 1)
         #expect(abs(candidates[0].start - 8132.35) < 1e-9)
         #expect(candidates[0].end > 8170.0)
+    }
+
+    // MARK: gap-vs-opaque authority (issue: Clip Doctor output re-flags its own seam)
+
+    @Test func paffHeadToMbaffTailDoesNotFloodTheTailWithGaps() {
+        // Clip Doctor's field-coded output: a PAFF copy-head (two field packets per frame,
+        // 0.02 s apart) spliced onto an MBAFF re-encoded tail (one packet per frame, 0.04 s).
+        // The head dominates the global median (0.02 s), so every 0.04 s tail step clears the
+        // bare 1.8× bar — without the local-cadence gate this floods ~400 gap anomalies into
+        // one file-long candidate and a multi-minute confirm decode. The gate reads the tail's
+        // own cadence and leaves at most a couple of anomalies at the transition.
+        var packets = stamps(interval: 0.02, count: 4000)              // PAFF head, 80 s
+        packets += stamps(interval: 0.04, count: 400, from: 4000 * 0.02 + 0.04)  // MBAFF tail, 16 s
+        let found = DamageDetector.anomalies(streams: [video(packets)])
+        #expect(found.count <= 2, "tail flooded: \(found.count) anomalies")
+    }
+
+    @Test func aRealHoleInsideTheSlowerTailIsStillAGap() {
+        // The gate must not blind the tail to genuine damage: a real 0.84 s hole among the
+        // 0.04 s MBAFF tail steps still beats the local cadence and flags.
+        var packets = stamps(interval: 0.02, count: 4000)              // PAFF head
+        var tail = stamps(interval: 0.04, count: 400, from: 4000 * 0.02 + 0.04)
+        tail += stamps(interval: 0.04, count: 400, from: tail.last!.dts! + 0.84)  // 0.84 s hole
+        packets += tail
+        let found = DamageDetector.anomalies(streams: [video(packets)])
+        #expect(found.contains { $0.isVideo && abs($0.end - $0.start - 0.84) < 1e-6 })
+    }
+
+    @Test func aDamageRegionCollapsingTheLocalMedianStaysCaughtViaGlobal() {
+        // A single-cadence (0.04) stream whose dup bursts would pull a *local* median far below
+        // the global one — `max(global, local)` must fall back to the global bar so the path is
+        // unchanged from before. The dup burst is still detected (duplicate rule, global median).
+        var packets = stamps(interval: 0.04, count: 200)
+        let t = 200 * 0.04
+        for k in 0..<5 { packets.append(.init(pts: t + Double(k) * 0.001, dts: t + Double(k) * 0.001)) }
+        packets += stamps(interval: 0.04, count: 200, from: t + 0.04)
+        let found = DamageDetector.anomalies(streams: [video(packets)])
+        #expect(found.contains { $0.isVideo })
+    }
+
+    @Test func gapOnlyVideoThatDecodesCleanIsNotVideoDamage() {
+        // The seam candidate from the flood above: gap-only video evidence, no audio gap, and
+        // a confirm decode that came back clean (span nil, frames produced). Old logic
+        // (`span != nil || hasVideoAnomaly`) flagged it as a surviving video damage zone —
+        // exactly the false positive a re-imported repaired file shows at its seam. The
+        // authority rule drops it: a gap the decode passed through lost no picture.
+        let seam = DamageDetector.Candidate(start: 80.0, end: 96.0, hasVideoAnomaly: true,
+                                            hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false)
+        // Old logic was `span != nil || hasVideoAnomaly` → true here (a false video zone).
+        #expect(DamageDetector.resolveZone(candidate: seam, span: nil,
+                                           decodedFrameCount: 2000, containerStart: 0) == nil)
+    }
+
+    @Test func gapVideoWithACompanionAudioGapDegradesToAnAudioZone() {
+        // Same clean-decode gap, but a companion audio gap is present: the video isn't damaged
+        // (decode clean), yet the audio hole is real — so the zone survives as audio-only and
+        // the repair silence-fills it without re-encoding video.
+        let c = DamageDetector.Candidate(start: 80.0, end: 96.0, hasVideoAnomaly: true,
+                                         hasOpaqueVideoAnomaly: false, hasAudioAnomaly: true)
+        let zone = DamageDetector.resolveZone(candidate: c, span: nil,
+                                              decodedFrameCount: 2000, containerStart: 0)
+        #expect(zone == DamageZone(start: 80.0, end: 96.0, affectsVideo: false))
+    }
+
+    @Test func opaqueVideoAnomalyStaysVideoDamageEvenWhenTheDecodeIsClean() {
+        // The 39 s dead zone: duplicate-DTS bursts the decoder silently absorbs (clean decode,
+        // span nil) but which are genuine video damage. It must NOT be vetoed by the clean decode.
+        let dead = DamageDetector.Candidate(start: 8132.0, end: 8171.0, hasVideoAnomaly: true,
+                                            hasOpaqueVideoAnomaly: true, hasAudioAnomaly: true)
+        let zone = DamageDetector.resolveZone(candidate: dead, span: nil,
+                                              decodedFrameCount: 1500, containerStart: 0)
+        #expect(zone?.affectsVideo == true)
+    }
+
+    @Test func aGapKeepsItsVideoZoneWhenTheConfirmDecodeProducedNothing() {
+        // A failed/empty confirm decode (kill, missing binary) can't veto a gap it never saw —
+        // a real packet hole must not be silently downgraded, so the gap stays video damage.
+        let c = DamageDetector.Candidate(start: 80.0, end: 96.0, hasVideoAnomaly: true,
+                                         hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false)
+        #expect(DamageDetector.resolveZone(candidate: c, span: nil,
+                                           decodedFrameCount: 0, containerStart: 0)?.affectsVideo == true)
+    }
+
+    @Test func decodeCorroboratedGapIsStillVideoDamage() {
+        // The honest case the veto must not break: a real dropout whose decode shows a hole
+        // (span present). Gap-only evidence, but the decode corroborates it → video damage.
+        let c = DamageDetector.Candidate(start: 41.96, end: 42.84, hasVideoAnomaly: true,
+                                         hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false)
+        let zone = DamageDetector.resolveZone(candidate: c, span: (start: 41.9, end: 42.9),
+                                              decodedFrameCount: 200, containerStart: 0)
+        #expect(zone?.affectsVideo == true)
+        #expect(zone?.start == 41.9 && zone?.end == 42.9)
     }
 
     // MARK: confirm-decode parsing

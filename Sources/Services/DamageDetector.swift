@@ -29,6 +29,16 @@ enum DamageDetector {
         var start: Double
         var end: Double
         var isVideo: Bool
+        /// Whether this is a *video gap* — a long inter-dts interval — whose claim to be
+        /// **video** damage a confirm decode must corroborate. A clean cadence change
+        /// produces such gaps without losing any picture: Clip Doctor's own output splices a
+        /// PAFF copy-head (two field packets per frame) onto an MBAFF re-encoded tail (one
+        /// packet per frame), and the tail's every-frame interval reads as a gap against the
+        /// head-dominated global median, even though the decoder passes straight through it.
+        /// A duplicate-DTS burst or a timestamp-less truncated picture leaves this `false`:
+        /// that is decoder-invisible demux evidence (the 39 s dead zone's signature), trusted
+        /// as video damage without a decode. Irrelevant for audio anomalies (always `false`).
+        var needsDecodeConfirm: Bool = false
     }
 
     /// A cluster of anomalies — the unit a confirm decode investigates.
@@ -36,6 +46,12 @@ enum DamageDetector {
         var start: Double
         var end: Double
         var hasVideoAnomaly: Bool
+        /// A video anomaly the decoder can't see — a duplicate-DTS burst or a timestamp-less
+        /// truncated picture — so it stands as video damage on its own, no decode needed.
+        var hasOpaqueVideoAnomaly: Bool = false
+        /// An audio pts gap somewhere in the cluster — keeps the zone as an audio-only event
+        /// when the video evidence is gap-only and the decode comes back clean.
+        var hasAudioAnomaly: Bool = false
     }
 
     /// Streams with fewer intervals than this have no meaningful cadence to break.
@@ -62,9 +78,23 @@ enum DamageDetector {
                     }
                 }
                 if let median = medianInterval(seq) {
-                    for (i, d) in zip(seq.dropFirst(), seq).map({ $0 - $1 }).enumerated() {
+                    let deltas = zip(seq.dropFirst(), seq).map { $0 - $1 }
+                    for (i, d) in deltas.enumerated() {
                         if d >= median * 1.8 {
-                            found.append(Anomaly(start: seq[i], end: seq[i] + d, isVideo: true))
+                            // A long step is a hole only if it also beats the *local* cadence.
+                            // Clip Doctor's own output splices a PAFF copy-head (two field
+                            // packets per frame) onto an MBAFF re-encoded tail (one packet per
+                            // frame): every normal tail step is ~2× the head-dominated file
+                            // median, so the bare global rule flags the entire tail — one
+                            // file-long candidate and a multi-minute confirm decode (the whole
+                            // point of fast detection lost). `max(global, local)` lifts the bar
+                            // where the stream genuinely runs slower, and never *lowers* it: a
+                            // damage region whose dup bursts collapse the local median (the 39 s
+                            // dead zone) falls back to the global one, unchanged from before.
+                            if d >= 1.8 * Swift.max(median, localMedian(deltas, around: i)) {
+                                found.append(Anomaly(start: seq[i], end: seq[i] + d, isVideo: true,
+                                                     needsDecodeConfirm: true))
+                            }
                         } else if d <= median * 0.25 {
                             found.append(Anomaly(start: min(seq[i], seq[i + 1]),
                                                  end: max(seq[i], seq[i + 1]), isVideo: true))
@@ -77,9 +107,14 @@ enum DamageDetector {
                     // duplicate rule stays dts-exclusive.
                     let pts = stream.packets.compactMap(\.pts).sorted()
                     guard let median = medianInterval(pts) else { continue }
-                    for (i, d) in zip(pts.dropFirst(), pts).map({ $0 - $1 }).enumerated()
-                    where d >= median * 1.8 {
-                        found.append(Anomaly(start: pts[i], end: pts[i] + d, isVideo: true))
+                    let deltas = zip(pts.dropFirst(), pts).map { $0 - $1 }
+                    for (i, d) in deltas.enumerated() where d >= median * 1.8 {
+                        // Same local-cadence gate as the dts path (a slower-running stretch is
+                        // not a hole); the global pre-check keeps `localMedian` off the hot path.
+                        if d >= 1.8 * Swift.max(median, localMedian(deltas, around: i)) {
+                            found.append(Anomaly(start: pts[i], end: pts[i] + d, isVideo: true,
+                                                 needsDecodeConfirm: true))
+                        }
                     }
                 }
             } else {
@@ -104,16 +139,39 @@ enum DamageDetector {
                                   mergeDistance: Double = 2.0) -> [Candidate] {
         var clusters: [Candidate] = []
         for a in anomalies.sorted(by: { $0.start < $1.start }) {
+            let opaqueVideo = a.isVideo && !a.needsDecodeConfirm
             if var last = clusters.last, a.start - last.end <= mergeDistance {
                 last.end = max(last.end, a.end)
                 last.hasVideoAnomaly = last.hasVideoAnomaly || a.isVideo
+                last.hasOpaqueVideoAnomaly = last.hasOpaqueVideoAnomaly || opaqueVideo
+                last.hasAudioAnomaly = last.hasAudioAnomaly || !a.isVideo
                 clusters[clusters.count - 1] = last
             } else {
                 clusters.append(Candidate(start: a.start, end: a.end,
-                                          hasVideoAnomaly: a.isVideo))
+                                          hasVideoAnomaly: a.isVideo,
+                                          hasOpaqueVideoAnomaly: opaqueVideo,
+                                          hasAudioAnomaly: !a.isVideo))
             }
         }
         return clusters
+    }
+
+    /// The local interval cadence around `index`: the median of the deltas in a window
+    /// centred on it. Used only to *raise* the gap bar where the stream legitimately runs at
+    /// a slower cadence than the file-wide median — a PAFF copy-head spliced to an MBAFF
+    /// re-encoded tail (Clip Doctor's own output) runs at half the packet rate, so every
+    /// normal tail step is ~2× the head-dominated median and would otherwise flood the tail
+    /// with gaps. Called only for steps that already cleared the global bar, so it stays off
+    /// the hot path. A centred window means a tail step's window is tail-majority — the local
+    /// cadence reads as the tail's own, leaving the transition with at most a couple of
+    /// anomalies instead of one per frame. Returns 0 when the window is too thin, so
+    /// `max(global, local)` falls back to the file-wide median.
+    static func localMedian(_ deltas: [Double], around index: Int, window: Int = 201) -> Double {
+        let half = window / 2
+        let lo = max(0, index - half), hi = min(deltas.count - 1, index + half)
+        guard hi - lo >= 8 else { return 0 }
+        let slice = deltas[lo...hi].sorted()
+        return slice[slice.count / 2]
     }
 
     /// The median interval between consecutive values; nil when too thin to call.
@@ -197,6 +255,36 @@ enum DamageDetector {
         return (s, e)
     }
 
+    /// The damage zone a confirmed candidate yields — or `nil` to drop it. Pure, so the
+    /// gap-vs-opaque authority rule is unit-tested without ffmpeg.
+    ///
+    /// The confirm decode is the authority on **video** damage. A candidate is real video
+    /// damage when the decode corroborates it (`span` — corrupt frames or decoded holes) or
+    /// when it carries decoder-invisible demux evidence (`hasOpaqueVideoAnomaly` — a
+    /// duplicate-DTS burst or a truncated picture, which the decoder silently absorbs). A
+    /// candidate whose only video evidence is **gaps** that the decode passed through clean is
+    /// *not* video damage — a clean cadence change (Clip Doctor's PAFF head → MBAFF tail) trips
+    /// the gap rule without losing picture. Such a candidate degrades to its audio evidence:
+    /// an audio-only zone if a companion audio gap is present, otherwise nothing at all.
+    ///
+    /// `decodedFrameCount == 0` means the confirm decode produced nothing (a kill, a missing
+    /// binary) — it can't veto a gap it never looked at, so a gap candidate stays video damage.
+    static func resolveZone(candidate: Candidate, span: (start: Double, end: Double)?,
+                            decodedFrameCount: Int, containerStart: Double) -> DamageZone? {
+        let videoReal = span != nil
+            || candidate.hasOpaqueVideoAnomaly
+            || (candidate.hasVideoAnomaly && decodedFrameCount == 0)
+        if videoReal {
+            return DamageZone(
+                start: min(candidate.start, span?.start ?? .infinity) - containerStart,
+                end: max(candidate.end, span?.end ?? -.infinity) - containerStart,
+                affectsVideo: true)
+        }
+        guard candidate.hasAudioAnomaly else { return nil }
+        return DamageZone(start: candidate.start - containerStart,
+                          end: candidate.end - containerStart, affectsVideo: false)
+    }
+
     // MARK: - Orchestration
 
     /// Detects a clip's damage zones: cluster the demux anomalies, confirm each
@@ -240,14 +328,16 @@ enum DamageDetector {
                 frames: absolute,
                 window: (candidate.start - 1.0)...(candidate.end + 1.5),
                 frameInterval: local)
-            // Video evidence is either confirmed by the decode (corrupt frames, holes)
-            // or already demux-level (a video dts/dup anomaly in the cluster — the
-            // 39 s dead zone's garbled video decodes with continuous timestamps and
-            // no corrupt flags, but its duplicate-DTS bursts are video damage).
-            zones.append(DamageZone(
-                start: min(candidate.start, span?.start ?? .infinity) - containerStart,
-                end: max(candidate.end, span?.end ?? -.infinity) - containerStart,
-                affectsVideo: span != nil || candidate.hasVideoAnomaly))
+            // The decode is the authority on video damage (corrupt frames, holes); demux-level
+            // duplicate-DTS bursts and truncated pictures are trusted on their own (the 39 s
+            // dead zone decodes clean but its dup bursts are real video damage); a gap the
+            // decode passed through clean is a cadence change, not lost picture, so it degrades
+            // to its audio evidence or drops. (`resolveZone`.)
+            if let zone = resolveZone(candidate: candidate, span: span,
+                                      decodedFrameCount: absolute.count,
+                                      containerStart: containerStart) {
+                zones.append(zone)
+            }
         }
 
         if let eof = await eofZone(ffmpeg, url: url, index: index,
