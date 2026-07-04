@@ -65,6 +65,11 @@ enum ExportError: LocalizedError {
     case concatFailed(String)
     case missingSegment
     case verificationFailed(String)
+    /// A planned output path equals one of the export's own source files (issue #77):
+    /// the clip's video source or an external audio source. Writing there would truncate
+    /// the source before it is read (ffmpeg `-y`, `placeFile`'s remove-then-move) and
+    /// destroy the original — so the export refuses before touching disk.
+    case destinationIsSource(clip: String, path: String)
     /// The user cancelled (issue #32) — not a failure. Carries how many `.separate`
     /// files had already finished (and stay on disk) so the status line can say so.
     case cancelled(finished: Int, total: Int)
@@ -78,6 +83,8 @@ enum ExportError: LocalizedError {
         case .concatFailed(let d): return "Could not join the clips.\n\(d)"
         case .missingSegment: return "The expected output segment was not produced."
         case .verificationFailed(let d): return "The cut did not verify and was not saved.\n\(d)"
+        case .destinationIsSource(let clip, let path):
+            return "The export would overwrite the source of “\(clip)” at \(path); the original would be destroyed. Choose a different destination."
         case .cancelled: return "The export was cancelled."
         }
     }
@@ -532,6 +539,81 @@ enum ExportEngine {
         return s
     }
 
+    // MARK: - Destination/source collision guard (issue #77)
+
+    /// Every file this export will write, paired with the clip whose piece it holds. In
+    /// `.connect` mode that is the single chosen `destination` (attributed to the first
+    /// clip — the join has no single owner); in `.separate` mode it is each clip's
+    /// generated `NN <name>.<ext>` path inside the chosen folder — the same names the
+    /// `.separate` assembly writes, so the collision guard and the assembly can't disagree.
+    /// `ext` is the export's video-container extension (audio-only outputs follow each
+    /// clip's own codec, exactly as the assembly does).
+    static func plannedOutputs(items: [ExportItem], settings: OutputSettings, ext: String,
+                               audioCodec: String, to destination: URL) -> [(clip: String, url: URL)] {
+        switch settings.mode {
+        case .connect:
+            return [(items.first?.displayName ?? "", destination)]
+        case .separate:
+            let exts = items.map { item in
+                settings.type == .audioOnly
+                    ? AudioCodecPolicy.audioFileExtension(forEncoder: item.ownTracks?.first?.encoder ?? audioCodec)
+                    : ext
+            }
+            let names = separateFileNames(clipNames: items.map(\.displayName), exts: exts)
+            return zip(items, names).map { (clip: $0.displayName, url: destination.appendingPathComponent($1)) }
+        }
+    }
+
+    /// Refuses — before any file is written — if a file the export would write matches one
+    /// of its own source files (issue #77): the clip's video source or an external audio
+    /// source. ffmpeg writes with `-y` and `placeFile` removes-then-moves, so a destination
+    /// equal to a source truncates the original before it is read and destroys the capture
+    /// (the same collision `ClipDoctorEngine` already guards against). Comparison resolves
+    /// symlinks and file identity (`denotesSameFile`). Throws `.destinationIsSource` naming
+    /// the destroyed clip and the offending path.
+    static func assertNoSourceCollision(items: [ExportItem], outputs: [(clip: String, url: URL)]) throws {
+        var sources: [(clip: String, url: URL)] = []
+        for item in items {
+            sources.append((item.displayName, item.source))
+            for case .external(let url, _)? in item.audioSources {
+                sources.append((item.displayName, url))
+            }
+        }
+        for output in outputs {
+            for source in sources where denotesSameFile(output.url, source.url) {
+                throw ExportError.destinationIsSource(clip: source.clip, path: output.url.path)
+            }
+        }
+    }
+
+    /// Whether two URLs denote the **same file** on disk — the guard that stops an export
+    /// (or a Clip Doctor repair) from writing over one of its own sources (issue #77).
+    /// Compares symlink-resolved, standardized paths (so a path and a symlink to it collide,
+    /// and a not-yet-created destination resolves through its real parent directory), and —
+    /// when both files already exist — also file identity (inode/device via
+    /// `fileResourceIdentifierKey`), which catches hard links and aliases that pure path
+    /// resolution misses.
+    static func denotesSameFile(_ a: URL, _ b: URL) -> Bool {
+        if resolvedOutputPath(a) == resolvedOutputPath(b) { return true }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: a.path), fm.fileExists(atPath: b.path),
+              let ida = (try? a.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier,
+              let idb = (try? b.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier
+        else { return false }
+        return (ida as? NSObject)?.isEqual(idb) ?? false
+    }
+
+    /// A URL's symlink-resolved, standardized filesystem path for collision comparison. The
+    /// final component is resolved through its parent — which may itself be a symlink — so a
+    /// not-yet-created destination still resolves to its real directory, while an existing
+    /// file that is itself a symlink is resolved through to its target.
+    static func resolvedOutputPath(_ url: URL) -> String {
+        let std = url.standardizedFileURL
+        let parent = std.deletingLastPathComponent().resolvingSymlinksInPath()
+        return parent.appendingPathComponent(std.lastPathComponent)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     // MARK: - Orchestration
 
     /// Runs the full export: cut every clip's video, then connect or separate per
@@ -567,6 +649,13 @@ enum ExportEngine {
         // Video pieces always use the container extension; an audio-only output has no video
         // pieces and is written as an audio-elementary file (ADR-0010 / #1).
         let ext = AudioCodecPolicy.outputExtension(type: settings.type, container: settings.container, audioEncoder: audioCodec)
+        // Refuse before touching disk if any planned output equals a source file (issue
+        // #77): `-y` and `placeFile`'s remove-then-move would truncate the source before
+        // reading it and destroy the original. Nothing is produced or written until this
+        // passes, so a collision leaves every source intact.
+        let outputs = plannedOutputs(items: items, settings: settings, ext: ext,
+                                     audioCodec: audioCodec, to: destination)
+        try assertNoSourceCollision(items: items, outputs: outputs)
         let work = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
@@ -664,17 +753,11 @@ enum ExportEngine {
             }
 
         case .separate:
-            // Cut-only's audio-only outputs can differ per clip (each clip's own codec,
-            // each codec its natural elementary extension); video outputs all take the
-            // global container's extension.
-            let exts = items.map { item in
-                settings.type == .audioOnly
-                    ? AudioCodecPolicy.audioFileExtension(forEncoder: item.ownTracks?.first?.encoder ?? audioCodec)
-                    : ext
-            }
-            let names = separateFileNames(clipNames: items.map(\.displayName), exts: exts)
+            // Each clip's file is the pre-computed `outputs` path (the same list the
+            // collision guard checked); cut-only's audio-only outputs already follow each
+            // clip's own codec/extension there, video outputs the global container's.
             for (i, item) in items.enumerated() {
-                let out = destination.appendingPathComponent(names[i])
+                let out = outputs[i].url
                 let videoInput = wantsVideo ? videoPieces[i] : nil
                 let itemTracks = item.ownTracks ?? tracks
                 currentOutput = out

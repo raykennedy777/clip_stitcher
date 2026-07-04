@@ -724,3 +724,142 @@ struct SeparateFileNamingTests {
         #expect(names == ["01 Clip.mp4"])
     }
 }
+
+/// The destination/source collision guard (issue #77): the main export must refuse — before
+/// writing anything — any planned output path that equals one of its own source files, or it
+/// truncates the original capture (ffmpeg `-y`, `placeFile`'s remove-then-move) before reading
+/// it. Exercised with real files/symlinks/hard links in a throwaway temp dir so the symlink and
+/// file-identity branches are covered, not just literal-path equality.
+struct ExportSourceCollisionTests {
+    private func tempDir() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cs77-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    private func touch(_ url: URL) {
+        FileManager.default.createFile(atPath: url.path, contents: Data("x".utf8))
+    }
+
+    // MARK: denotesSameFile
+
+    @Test func identicalPathIsTheSameFile() {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("clip.ts"); touch(a)
+        #expect(ExportEngine.denotesSameFile(a, a))
+    }
+
+    @Test func distinctFilesAreNotTheSame() {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.ts"); touch(a)
+        let b = dir.appendingPathComponent("b.ts"); touch(b)
+        #expect(!ExportEngine.denotesSameFile(a, b))
+    }
+
+    @Test func aSymlinkResolvesToItsTarget() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("real.ts"); touch(real)
+        let link = dir.appendingPathComponent("link.ts")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        #expect(ExportEngine.denotesSameFile(link, real))
+    }
+
+    @Test func aHardLinkHasTheSameFileIdentity() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("real.ts"); touch(real)
+        let hard = dir.appendingPathComponent("hard.ts")
+        try FileManager.default.linkItem(at: real, to: hard)
+        // Neither path is a symlink, so this can only match by inode/device identity.
+        #expect(ExportEngine.denotesSameFile(hard, real))
+    }
+
+    @Test func aNotYetCreatedDestinationInASymlinkedFolderCollides() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let realDir = dir.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: realDir, withIntermediateDirectories: true)
+        let linkDir = dir.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: linkDir, withDestinationURL: realDir)
+        let source = realDir.appendingPathComponent("clip.ts"); touch(source)
+        // A destination that does not yet exist under this exact path, but resolves through
+        // the symlinked parent to the source, must still be caught.
+        let dest = linkDir.appendingPathComponent("clip.ts")
+        #expect(ExportEngine.denotesSameFile(dest, source))
+    }
+
+    // MARK: assertNoSourceCollision
+
+    private func item(source: URL, name: String,
+                      audio: [ExportEngine.AudioSource?] = [.stream(0)]) -> ExportItem {
+        ExportItem(source: source, displayName: name, audioSources: audio)
+    }
+
+    @Test func connectRefusesWhenTheDestinationIsASource() {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("clip.ts"); touch(source)
+        var settings = OutputSettings(); settings.mode = .connect
+        let items = [item(source: source, name: "Clip A")]
+        // The connect destination is the source file itself.
+        let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
+                                                  ext: "ts", audioCodec: "aac", to: source)
+        do {
+            try ExportEngine.assertNoSourceCollision(items: items, outputs: outputs)
+            Issue.record("expected destinationIsSource")
+        } catch let error as ExportError {
+            let message = error.errorDescription ?? ""
+            #expect(message.contains("Clip A"))
+            #expect(message.contains(source.path))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+
+    @Test func connectAllowsADistinctDestination() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("clip.ts"); touch(source)
+        let dest = dir.appendingPathComponent("out.ts")
+        var settings = OutputSettings(); settings.mode = .connect
+        let items = [item(source: source, name: "Clip A")]
+        let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
+                                                  ext: "ts", audioCodec: "aac", to: dest)
+        try ExportEngine.assertNoSourceCollision(items: items, outputs: outputs)
+    }
+
+    @Test func separateRefusesWhenAGeneratedPathIsASource() {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        // Separate mode writes `NN <stem>.<ext>`; a source already sitting at that path in
+        // the chosen folder would be overwritten by its own clip.
+        let source = dir.appendingPathComponent("01 clip.ts"); touch(source)
+        var settings = OutputSettings(); settings.mode = .separate
+        let items = [item(source: source, name: "clip.ts")]
+        let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
+                                                  ext: "ts", audioCodec: "aac", to: dir)
+        do {
+            try ExportEngine.assertNoSourceCollision(items: items, outputs: outputs)
+            Issue.record("expected destinationIsSource")
+        } catch let error as ExportError {
+            #expect((error.errorDescription ?? "").contains(source.path))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+
+    @Test func aCollisionWithAnExternalAudioSourceIsCaught() {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let video = dir.appendingPathComponent("video.ts"); touch(video)
+        let external = dir.appendingPathComponent("audio.wav"); touch(external)
+        var settings = OutputSettings(); settings.mode = .connect
+        let items = [item(source: video, name: "Clip A",
+                          audio: [.external(external, stream: 0)])]
+        // The connect destination lands on the external audio file, not the video source.
+        let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
+                                                  ext: "ts", audioCodec: "aac", to: external)
+        do {
+            try ExportEngine.assertNoSourceCollision(items: items, outputs: outputs)
+            Issue.record("expected destinationIsSource")
+        } catch let error as ExportError {
+            #expect((error.errorDescription ?? "").contains(external.path))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+}

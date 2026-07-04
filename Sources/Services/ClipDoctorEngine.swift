@@ -408,7 +408,10 @@ enum ClipDoctorEngine {
         }
 
         let dest = destination ?? repairedSibling(of: source)
-        guard dest.standardizedFileURL != source.standardizedFileURL else {
+        // Resolve symlinks and file identity, not just standardized paths (issue #77): a
+        // symlinked or hard-linked destination that lands on the source would clobber the
+        // original just the same. Shared with the main export's collision guard.
+        guard !ExportEngine.denotesSameFile(dest, source) else {
             throw DoctorError.destinationIsSource
         }
         let fm = FileManager.default
@@ -483,8 +486,15 @@ enum ClipDoctorEngine {
         // 3. Atomic move into place — only now does the destination exist. A cancel or
         //    failure before this point leaves no `_repaired` file and never touches the
         //    source (the staged temp is cleaned by the defer).
-        if overwrite { try? fm.removeItem(at: dest) }
-        try fm.moveItem(at: staged, to: dest)
+        //    When a prior output is being replaced (`overwrite`), swap atomically with
+        //    `replaceItemAt` rather than remove-then-move (issue #77): a failed move in the
+        //    old sequence deleted the previous good output first and then lost it, whereas
+        //    the atomic replace keeps the previous file if the swap fails.
+        if fm.fileExists(atPath: dest.path) {
+            _ = try fm.replaceItemAt(dest, withItemAt: staged)
+        } else {
+            try fm.moveItem(at: staged, to: dest)
+        }
         progress(0.97)
 
         // 4. Auto-verify: re-run detection on the output. A failed re-scan is inconclusive,

@@ -76,6 +76,30 @@ struct ClipDoctorRepairTests {
         }
     }
 
+    /// The source-untouched guard now resolves symlinks (issue #77): a destination that is a
+    /// symlink pointing back at the source would clobber the original just the same, so it is
+    /// refused before any work — not only a byte-identical path string.
+    @Test func aSymlinkedDestinationOntoTheSourceIsRefused() async throws {
+        let fm = FileManager.default
+        let source = fm.temporaryDirectory.appendingPathComponent("cs77-src-\(UUID().uuidString).ts")
+        fm.createFile(atPath: source.path, contents: Data("original".utf8))
+        let link = fm.temporaryDirectory.appendingPathComponent("cs77-link-\(UUID().uuidString).ts")
+        try fm.createSymbolicLink(at: link, withDestinationURL: source)
+        defer { try? fm.removeItem(at: source); try? fm.removeItem(at: link) }
+
+        do {
+            _ = try await ClipDoctorEngine.repair(
+                source: source, clip: videoClip(), index: dummyIndex,
+                containerStart: 0, destination: link)
+            Issue.record("expected destinationIsSource")
+        } catch ClipDoctorEngine.DoctorError.destinationIsSource {
+            // expected
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+        #expect(try String(contentsOf: source, encoding: .utf8) == "original")
+    }
+
     /// An existing destination is not clobbered without `overwrite` — the second half of
     /// the source-untouched guarantee (a prior `_repaired` file is preserved).
     @Test func anExistingDestinationIsNotClobberedWithoutOverwrite() async throws {
