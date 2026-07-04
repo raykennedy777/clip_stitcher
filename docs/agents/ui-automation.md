@@ -54,6 +54,7 @@ Action panel buttons:
 | `source.setTarget` | Set as Target Clip |
 | `source.relink` | Relink… |
 | `source.clipDoctor` | Clip Doctor… (enabled for a single clip with a video damage zone, field-coded included) |
+| `source.clipDoctorBlockedReason` | Why Clip Doctor is disabled for the selection (issue #83); present only when the single selected clip is audio-only (import failed "No video track") — an `AXStaticText`, "Clip Doctor repairs video sources only." in `AXValue` |
 
 Clip Doctor banner (issue #55) — a non-modal suggestion above the timeline, present
 only while a freshly-detected damaged clip has an undismissed suggestion:
@@ -74,6 +75,7 @@ running → finished):
 | `clipDoctor.sheet` | The sheet container |
 | `clipDoctor.destination` | Repaired-copy path (`AXStaticText`, full path in `AXValue`) |
 | `clipDoctor.change` | Change… destination button (configuring only) |
+| `clipDoctor.destinationError` | Why the picked/default destination is invalid (issue #83); present only when the destination denotes the source or its folder isn't writable — an `AXStaticText`, message in `AXValue`. While shown, `clipDoctor.repair` is disabled |
 | `clipDoctor.omitted` | Notice listing non-AV streams not carried (present only when the source has any) |
 | `clipDoctor.reencodeNotice` | Field-coded (PAFF) re-encode warning + time estimate (present only for a field-coded source; message in `AXValue`) |
 | `clipDoctor.reencodeOptIn` | Toggle that must be on before Repair enables, for a field-coded source (issue #54) |

@@ -91,7 +91,17 @@ struct ClipDoctorView: View {
                         .disabled(model.isRunning)
                         .accessibilityIdentifier("clipDoctor.change")
                 }
-                if model.destinationExists {
+                if let destError = model.destinationError {
+                    // Validated on pick (issue #83): a source collision or an unwritable
+                    // folder is caught here and disables Repair, rather than failing after
+                    // the click. Takes precedence over the overwrite notice.
+                    Label(destError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("clipDoctor.destinationError")
+                        .accessibilityValue(Text(destError))
+                } else if model.destinationExists {
                     // Explicit, never silent (ADR-0021): the action button below reads
                     // "Replace" and the user opts in; the source is never the target.
                     Label("A repaired copy already exists here — Repair will replace it.",

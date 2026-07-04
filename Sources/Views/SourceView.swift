@@ -226,6 +226,18 @@ struct SourceView: View {
                    enabled: canDoctorSelection) {
                 if let id = selection.first { presentDoctor(for: id) }
             }
+            // Why Clip Doctor is disabled for an audio-only selection (issue #83): it
+            // repairs video damage, so a no-video source is out of scope — named, never
+            // silent. Present only for that case.
+            if let notice = audioOnlyDoctorNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("source.clipDoctorBlockedReason")
+                    .accessibilityValue(Text(notice))
+            }
 
             Spacer()
         }
@@ -324,6 +336,20 @@ struct SourceView: View {
         guard selection.count == 1, let id = selection.first,
               let clip = document.project.clips.first(where: { $0.id == id }) else { return false }
         return canDoctor(clip)
+    }
+
+    /// The explanation shown beside the disabled Clip Doctor button when the single selected
+    /// clip is audio-only (issue #83): Clip Doctor repairs video damage, so a source import
+    /// rejected for having no video track is out of scope — say so rather than leaving the
+    /// button silently disabled. nil for every other disabled reason (no damage, source
+    /// missing, unsupported field-coded), which the row's own state already explains. Keyed
+    /// off the exact no-video-track import failure so a corrupt-video probe failure (also
+    /// video == nil) isn't mislabelled.
+    private var audioOnlyDoctorNotice: String? {
+        guard selection.count == 1, let id = selection.first,
+              document.importStates[id] == .failed(ProjectDocument.noVideoTrackFailure)
+        else { return nil }
+        return "Clip Doctor repairs video sources only."
     }
 
     /// Selects the clip and opens its Clip Doctor sheet, clearing any pending banner

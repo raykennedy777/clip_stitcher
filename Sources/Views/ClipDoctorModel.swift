@@ -7,6 +7,26 @@ import AppKit
 /// supplies the import-time caches (`doctorInputs`) and the relink path.
 @MainActor
 final class ClipDoctorModel: ObservableObject {
+    /// Why a picked (or defaulted) destination can't be repaired to — surfaced inline the
+    /// moment it's chosen (issue #83), so the guard is a pre-condition of Repair, not a
+    /// failure that only surfaces after clicking it. Pure so it's unit-tested directly.
+    enum DestinationIssue: Equatable {
+        /// The destination resolves to the source file (symlink-resolved / same inode): a
+        /// run would truncate the capture before reading it.
+        case isSource
+        /// The destination's folder can't be written to: the mux would only fail at the end.
+        case unwritableFolder
+
+        var message: String {
+            switch self {
+            case .isSource:
+                return "That’s the source file — choose a different name or folder for the repaired copy."
+            case .unwritableFolder:
+                return "That folder can’t be written to — choose a location you can write to for the repaired copy."
+            }
+        }
+    }
+
     enum Phase {
         case configuring
         case running(progress: Double, eta: String?)
@@ -28,6 +48,12 @@ final class ClipDoctorModel: ObservableObject {
     /// Whether `destination` already exists — the overwrite guard. A run replaces it
     /// only on an explicit Replace, never silently (ADR-0021).
     @Published private(set) var destinationExists = false
+    /// The inline validation error for the current destination (issue #83): non-nil when the
+    /// destination denotes the source or its folder isn't writable. Set on pick and on the
+    /// default sibling at init (a read-only source folder makes the default itself unwritable),
+    /// and it disables Repair — the collision/permission problem is caught before the run, not
+    /// after.
+    @Published private(set) var destinationError: String?
     /// The subtitle/teletext/data streams the repair won't carry, as a notice — nil
     /// when the source has none (probed lazily when the sheet appears).
     @Published private(set) var omittedStreamsNotice: String?
@@ -57,6 +83,7 @@ final class ClipDoctorModel: ObservableObject {
             phase = .failed("Source file not found.")
         }
         refreshDestinationExists()
+        revalidateDestination()
     }
 
     var clip: Clip? { document.project.clips.first { $0.id == clipID } }
@@ -116,9 +143,10 @@ final class ClipDoctorModel: ObservableObject {
             clipName: clip.displayName, duration: clip.duration)
     }
 
-    /// Whether Repair may start: always true for a progressive source; a field-coded
-    /// source needs the explicit opt-in first (issue #54).
-    var canRepair: Bool { !isFieldCoded || fieldCodedAcknowledged }
+    /// Whether Repair may start: the destination must validate (issue #83 — no source
+    /// collision, writable folder), and a field-coded source needs the explicit opt-in
+    /// first (issue #54).
+    var canRepair: Bool { destinationError == nil && (!isFieldCoded || fieldCodedAcknowledged) }
 
     var result: ClipDoctorEngine.Result? {
         switch phase {
@@ -137,10 +165,31 @@ final class ClipDoctorModel: ObservableObject {
     func setDestination(_ url: URL) {
         destination = url
         refreshDestinationExists()
+        revalidateDestination()
     }
 
     func refreshDestinationExists() {
         destinationExists = FileManager.default.fileExists(atPath: destination.path)
+    }
+
+    /// Recomputes `destinationError` for the current destination against the resolved source
+    /// (issue #83). No source (the defensive failed-init path) leaves no error — the sheet is
+    /// already showing the source-not-found failure.
+    private func revalidateDestination() {
+        guard let clip, let source = document.url(for: clip) else { destinationError = nil; return }
+        destinationError = Self.destinationIssue(destination: destination, source: source)?.message
+    }
+
+    /// Validates a repaired-copy destination against its source (issue #83): a destination that
+    /// denotes the source (symlink-resolved / same inode, via `ExportEngine.denotesSameFile` —
+    /// the same identity check the export and engine guards use, landed with #77) would truncate
+    /// the capture, and a folder the app can't write into would only fail at mux time. Pure and
+    /// side-effect-free so it's unit-tested directly.
+    nonisolated static func destinationIssue(destination: URL, source: URL) -> DestinationIssue? {
+        if ExportEngine.denotesSameFile(destination, source) { return .isSource }
+        let folder = destination.deletingLastPathComponent()
+        if !FileManager.default.isWritableFile(atPath: folder.path) { return .unwritableFolder }
+        return nil
     }
 
     /// Probes the source for streams Clip Doctor won't carry (ADR-0021). Called once

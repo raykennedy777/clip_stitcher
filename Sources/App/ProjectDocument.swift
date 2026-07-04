@@ -35,6 +35,11 @@ final class ProjectDocument: ReferenceFileDocument {
 
     nonisolated static var readableContentTypes: [UTType] { [.clipStitcherProject] }
 
+    /// The import failure recorded for a source with no video track (issue #83). Import
+    /// rejects audio-only files with this exact message; the Source view keys the Clip
+    /// Doctor "video sources only" explanation off it, so the string can't drift.
+    static let noVideoTrackFailure = "No video track"
+
     @Published var project: VidProject
     @Published var importStates: [Clip.ID: ImportState] = [:]
     /// Per-clip copy/re-encode split, recomputed from the cached frame indexes whenever
@@ -853,7 +858,7 @@ final class ProjectDocument: ReferenceFileDocument {
         do {
             let probe = try await MediaProbe.probe(url: url)
             guard probe.video != nil else {
-                importStates[id] = .failed("No video track")
+                importStates[id] = .failed(Self.noVideoTrackFailure)
                 return
             }
             if let i = project.clips.firstIndex(where: { $0.id == id }) {
