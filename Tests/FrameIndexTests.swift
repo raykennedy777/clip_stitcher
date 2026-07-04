@@ -21,6 +21,24 @@ struct FrameIndexTests {
         #expect(index.keyframeIndex(atOrBefore: 5) == 3)
     }
 
+    /// No keyframe in `[0, n]` returns nil, not a bogus 0 (issue #86): a partial/headless
+    /// index whose first frames precede its first keyframe. The old 0 handed callers a
+    /// non-keyframe anchor — a copy boundary that can't be cut on, a skewed decode base.
+    @Test func keyframeAtOrBeforeIsNilWhenNoEarlierKeyframeExists() {
+        // frames: 0 1 2(K) 3 — nothing at/before 0 or 1.
+        let headless = FrameIndex(pts: [0.0, 0.04, 0.08, 0.12],
+                                  keyframeFlags: [false, false, true, false])
+        #expect(headless.keyframeIndex(atOrBefore: 0) == nil)
+        #expect(headless.keyframeIndex(atOrBefore: 1) == nil)
+        #expect(headless.keyframeIndex(atOrBefore: 2) == 2)
+        #expect(headless.keyframeIndex(atOrBefore: 3) == 2)
+    }
+
+    /// An empty index has no anchor at all — nil, never an out-of-bounds 0.
+    @Test func keyframeAtOrBeforeIsNilForAnEmptyIndex() {
+        #expect(FrameIndex(pts: [], keyframeFlags: []).keyframeIndex(atOrBefore: 0) == nil)
+    }
+
     @Test func keyframeAfterFindsTheNextLaterKeyframe() {
         #expect(index.keyframeIndex(after: 0) == 3)
         #expect(index.keyframeIndex(after: 2) == 3)

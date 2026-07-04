@@ -175,8 +175,9 @@ final class CutEditorModel: ObservableObject {
     /// makes an *uncached* keyframe step fast too (~50–80 ms instead of ~0.3 s).
     private func prefetchNeighborhood(around frame: Int) {
         guard !isPlaying, let index, let prefetcher, !keyframes.isEmpty else { return }
-        let anchor = index.keyframeIndex(atOrBefore: frame)
-        guard anchor != lastPrefetchAnchor,
+        // No keyframe at/before the frame → nothing to warm around; skip the prefetch.
+        guard let anchor = index.keyframeIndex(atOrBefore: frame),
+              anchor != lastPrefetchAnchor,
               let position = keyframes.firstIndex(of: anchor) else { return }
         lastPrefetchAnchor = anchor
         let wanted = KeyframePrefetcher
@@ -247,7 +248,8 @@ final class CutEditorModel: ObservableObject {
     /// is the decoder's cheapest seek, so these jumps feel instant.
     func stepToPreviousKeyframe() {
         guard let index, currentFrame > 0 else { return }
-        seek(to: index.keyframeIndex(atOrBefore: currentFrame - 1))
+        // No earlier keyframe (a headless partial index) → jump to the clip start.
+        seek(to: index.keyframeIndex(atOrBefore: currentFrame - 1) ?? 0)
     }
 
     /// Jump to the nearest keyframe after the current frame (stays put past the

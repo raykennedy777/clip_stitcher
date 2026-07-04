@@ -360,8 +360,10 @@ enum DamageDetector {
             // clean data (issue #43 de-risk) — `t` in the decode stays anchored to the
             // *requested* time, so the landing slack only widens coverage.
             let anchorFrame = index.frameIndex(atOrBeforeTime: candidate.start - 0.5)
-            var keyframe = index.keyframeIndex(atOrBefore: anchorFrame)
-            keyframe = index.keyframeIndex(atOrBefore: max(0, keyframe - 1))
+            // No keyframe at/before the anchor → seek from the file head (frame 0); a
+            // decode from the earliest frame still covers the candidate span.
+            var keyframe = index.keyframeIndex(atOrBefore: anchorFrame) ?? 0
+            keyframe = index.keyframeIndex(atOrBefore: max(0, keyframe - 1)) ?? 0
             let seekPts = index.pts[keyframe]
             // The decode must reach as far as the span is judged (`tailLookahead` below): a hole
             // whose resume frame lands in the PS-seek slack past the candidate end is invisible
@@ -429,8 +431,9 @@ enum DamageDetector {
     private static func eofZone(_ ffmpeg: URL, url: URL, index: FrameIndex,
                                 frameInterval: Double, containerStart: Double) async -> DamageZone? {
         guard let lastPts = index.pts.last else { return nil }
-        var keyframe = index.keyframeIndex(atOrBefore: index.count - 1)
-        for _ in 0..<2 { keyframe = index.keyframeIndex(atOrBefore: max(0, keyframe - 1)) }
+        // No keyframe at/before the last frame → seek from the file head (frame 0).
+        var keyframe = index.keyframeIndex(atOrBefore: index.count - 1) ?? 0
+        for _ in 0..<2 { keyframe = index.keyframeIndex(atOrBefore: max(0, keyframe - 1)) ?? 0 }
         let seekPts = index.pts[keyframe]
         guard lastPts > seekPts else { return nil }
 

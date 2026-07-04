@@ -93,7 +93,10 @@ enum BoundaryReencodeEngine {
         source: URL, range: Range<Int>, index: FrameIndex, encoder: [String], output: URL,
         trackTimescale: Int? = nil
     ) -> [String] {
-        let anchor = index.keyframeIndex(atOrBefore: range.lowerBound)
+        // No keyframe at/before the segment start → decode from the earliest frame; the
+        // input seek lands on the file's first decodable position and the relative-frame
+        // select counts forward from it either way.
+        let anchor = index.keyframeIndex(atOrBefore: range.lowerBound) ?? 0
         let startOffset = index.pts.first ?? 0
         let seek = index.pts[anchor] - startOffset
         let relStart = range.lowerBound - anchor
@@ -255,9 +258,11 @@ enum BoundaryReencodeEngine {
     private static func repairAnchor(source: URL, range: Range<Int>, index: FrameIndex) -> Int {
         let psExtensions = ["mpg", "mpeg", "vob"]
         let back = psExtensions.contains(source.pathExtension.lowercased()) ? 2 : 1
-        var anchor = index.keyframeIndex(atOrBefore: range.lowerBound)
+        // No keyframe at/before the span start → fall back to the file head (frame 0);
+        // stepping back further keyframes then just stays there (`max(0, …)`).
+        var anchor = index.keyframeIndex(atOrBefore: range.lowerBound) ?? 0
         for _ in 0..<back {
-            anchor = index.keyframeIndex(atOrBefore: max(0, anchor - 1))
+            anchor = index.keyframeIndex(atOrBefore: max(0, anchor - 1)) ?? 0
         }
         return anchor
     }

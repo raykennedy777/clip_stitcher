@@ -87,7 +87,9 @@ final class FrameStreamDecoder {
 
     private func imageSync(at n: Int) -> Result {
         let target = min(max(0, n), index.count - 1)
-        let anchor = index.keyframeIndex(atOrBefore: target)
+        // No keyframe at/before the target → decode from the earliest frame (pts[0]);
+        // ffmpeg's input seek lands on the file's first decodable position either way.
+        let anchor = index.keyframeIndex(atOrBefore: target) ?? 0
 
         // Restart if we have no stream, the target is behind us, or its keyframe is
         // ahead of the playhead (a later GOP — cheaper to seek than decode through).
@@ -116,7 +118,8 @@ final class FrameStreamDecoder {
 
     private func keyframePreviewSync(at n: Int) -> (frame: Int, image: NSImage)? {
         let target = min(max(0, n), index.count - 1)
-        let anchor = index.keyframeIndex(atOrBefore: target)
+        // No keyframe at/before the target → anchor on the earliest frame (see `imageSync`).
+        let anchor = index.keyframeIndex(atOrBefore: target) ?? 0
 
         // Only worth previewing when we'd otherwise restart-and-decode a GOP, and
         // only when the keyframe isn't the target itself.

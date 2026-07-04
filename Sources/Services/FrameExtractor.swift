@@ -25,7 +25,9 @@ enum FrameExtractor {
             .appendingPathComponent("clipstitcher-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        let anchor = index.keyframeIndex(atOrBefore: n)
+        // No keyframe at/before n → anchor on the earliest frame; the input seek still
+        // lands on the file's first decodable position and the offset counts forward from it.
+        let anchor = index.keyframeIndex(atOrBefore: n) ?? 0
         let offset = n - anchor
         // Both input and output `-ss` are measured from the container's start_time,
         // not absolute pts (issue #36 — verified for the output seek too).
@@ -88,7 +90,8 @@ enum FrameExtractor {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let anchor = index.keyframeIndex(atOrBefore: lo)
+        // No keyframe at/before the range start → anchor on the earliest frame (see `imageData`).
+        let anchor = index.keyframeIndex(atOrBefore: lo) ?? 0
         let anchorPTS = String(format: "%.6f", FrameStreamDecoder.seekSeconds(
             forPts: index.pts[anchor], containerStart: containerStart))
         let pattern = dir.appendingPathComponent("f_%05d.png").path

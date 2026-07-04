@@ -35,16 +35,19 @@ struct FrameIndex {
         return last - first
     }
 
-    /// The nearest keyframe at or before frame `n` — the safe seek anchor for
-    /// decoding forward to `n`.
-    func keyframeIndex(atOrBefore n: Int) -> Int {
-        var anchor = 0
+    /// The nearest keyframe at or before frame `n` — the safe seek anchor for decoding
+    /// forward to `n` / the safe stream-copy boundary. `nil` when no keyframe exists in
+    /// `[0, n]`: an empty index, or a partial/damaged index whose head precedes its first
+    /// keyframe. The old contract returned 0 there, silently handing callers a *non*-keyframe
+    /// anchor — a copy boundary that can't be cut on, or a seek/relative-frame base that
+    /// skews the decode count. Callers now decide their own degraded behavior explicitly.
+    func keyframeIndex(atOrBefore n: Int) -> Int? {
         var i = min(n, keyframeFlags.count - 1)
         while i >= 0 {
-            if keyframeFlags[i] { anchor = i; break }
+            if keyframeFlags[i] { return i }
             i -= 1
         }
-        return anchor
+        return nil
     }
 
     /// The first keyframe strictly after frame `n`, or nil when no later keyframe

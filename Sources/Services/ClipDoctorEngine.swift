@@ -141,7 +141,10 @@ enum ClipDoctorEngine {
         guard let firstRepair = segments.firstIndex(where: { $0.kind == .reEncode }) else {
             return segments   // no damage in range — defensive; the caller only routes damaged clips.
         }
-        let seam = index.keyframeIndex(atOrBefore: segments[firstRepair].range.lowerBound)
+        // No keyframe at/before the first repair → seam 0: no head copy, a full re-encode
+        // from the file start (the "damaged before its first keyframe" case above — still
+        // correct, just no longer minimal).
+        let seam = index.keyframeIndex(atOrBefore: segments[firstRepair].range.lowerBound) ?? 0
         var plan: [PlannedSegment] = []
         if seam > 0 {
             plan.append(PlannedSegment(kind: .copy, range: 0..<seam, outCutKeyframe: nil))
