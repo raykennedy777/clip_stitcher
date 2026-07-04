@@ -153,6 +153,24 @@ Opened with ⌘, (the standard `Settings` scene). Two preferences, both `@AppSto
 | `settings.chooseFolder` | Choose… button opening the folder picker (present only in fixed mode) |
 | `settings.container` | Default container popup — the container a new project starts with (TS / MKV / MP4) |
 
+### Menu bar
+
+| Identifier | Element |
+| --- | --- |
+| `menu.saveFrame` | File ▸ "Save Frame as Image…" (issue #89, ⌃⌘S) — saves the displayed frame as a full-resolution PNG at the source's coded dimensions |
+
+`menu.saveFrame` is a File-menu item in the standard position (after Save). It enables
+and acts on whichever surface publishes the `\.saveFrame` scene value — the **output
+preview** while a frame is on screen. In the **cut-editor** (a separate top-level window
+outside the document scene) the ⌃⌘S shortcut still works, handled by a local hidden
+button in that window's view hierarchy; the menu item itself reads as disabled while the
+cut-editor is key (a seam #67's responder-chain routing will close). Both surfaces open a
+save panel (never an instant save), pre-filled `"<clip stem> — HH.MM.SS.FF.png"` and
+starting on the configured export folder (issue #87). Saved dimensions are the source's
+**coded** (storage) pixels — anamorphic content saves at its storage shape, not the
+SAR-corrected display shape shown on screen; a field-coded source is saved matching the
+displayed deinterlacing.
+
 ## Modal-panel bypass (issue #37)
 
 System file dialogs can't be driven reliably, so a launch-gated bypass skips them.

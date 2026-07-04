@@ -30,6 +30,25 @@ struct CutEditorView: View {
         .sheet(isPresented: $showingAudioSettings) {
             AudioSettingsView(document: document, clipIDs: [model.clip.id])
         }
+        // "Save Frame as Image…" (issue #89). The cut-editor is a separate top-level
+        // window outside the document scene, so it can't drive the File-menu item's
+        // focused value — it registers the same ⌃⌘S shortcut locally (the key window's
+        // view hierarchy handles the equivalent before the menu). Disabled with no frame,
+        // so the key falls through to the (also disabled) menu item. #67 will unify this.
+        .background(
+            Button("") { saveFrame() }
+                .keyboardShortcut("s", modifiers: [.control, .command])
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+                .disabled(!model.canSaveFrame)
+        )
+    }
+
+    /// Runs the shared save pipeline for the displayed frame (issue #89).
+    private func saveFrame() {
+        guard let request = model.frameSnapshotRequest() else { return }
+        FrameSnapshot.save(request)
     }
 
     /// The clip's live state in the document (the model's copy is a snapshot from

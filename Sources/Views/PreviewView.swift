@@ -40,6 +40,18 @@ struct PreviewView: View {
         .navigationTitle("Preview")
         .task { await model.load() }
         .onDisappear { model.teardown() }
+        // Publish the "Save Frame as Image…" command (issue #89) while the preview owns
+        // the key window's scene, so the File-menu item enables and acts on the frame on
+        // screen. Re-evaluated as `canSaveFrame` (reads `model.image`) changes.
+        .focusedSceneValue(\.saveFrame, SaveFrameCommand(isEnabled: model.canSaveFrame) {
+            saveFrame()
+        })
+    }
+
+    /// Runs the shared save pipeline for the frame under the playhead (issue #89).
+    private func saveFrame() {
+        guard let request = model.frameSnapshotRequest() else { return }
+        FrameSnapshot.save(request)
     }
 
     // MARK: - Preview area

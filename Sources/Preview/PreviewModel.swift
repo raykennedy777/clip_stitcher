@@ -219,6 +219,45 @@ final class PreviewModel: ObservableObject {
     func goToStart() { seek(to: 0) }
     func goToEnd() { seek(to: lastFrame) }
 
+    // MARK: - Save frame as image (issue #89)
+
+    /// Whether a frame is on screen to save — the menu item's enabled state.
+    var canSaveFrame: Bool { image != nil && timeline != nil }
+
+    /// A request to save the frame under the playhead as a full-resolution PNG (issue
+    /// #89). Saves the **source** frame of the clip under the playhead at that clip's
+    /// coded dimensions (storage pixels; anamorphic content saves at its storage shape).
+    /// The deinterlace decision matches the on-screen display: a conformed
+    /// interlaced→progressive clip whose preview chain deinterlaces (`bwdif`) is saved
+    /// deinterlaced too, so what-you-see-is-what-saves for field-coded sources. `nil`
+    /// when nothing is loaded. The filename uses the output timecode shown in the readout.
+    func frameSnapshotRequest() -> FrameSnapshotRequest? {
+        guard let timeline, image != nil,
+              let (segmentIndex, local) = timeline.locate(currentFrame) else { return nil }
+        let segment = timeline.segments[segmentIndex]
+        guard let runtime = runtimes[segment.clipID],
+              let clip = document?.project.clips.first(where: { $0.id == segment.clipID }),
+              let video = clip.video, video.width > 0, video.height > 0 else { return nil }
+        let source = timeline.sourceFrame(in: segment, local: local, pts: runtime.index.pts)
+        // Mirror the display's deinterlace decision exactly: the preview's conform chain
+        // begins with bwdif iff it deinterlaces this clip (PreviewFilter.spatialConformChain).
+        let deinterlaces = runtime.filter?.hasPrefix("bwdif") ?? false
+        let filter = deinterlaces ? "bwdif=mode=0,scale=\(video.width):\(video.height)" : nil
+        let url = runtime.url
+        let index = runtime.index
+        let start = runtime.containerStart
+        let (w, h) = (video.width, video.height)
+        return FrameSnapshotRequest(
+            suggestedName: FrameSnapshot.fileName(
+                clipName: clip.displayName, timecode: timecode(forFrame: currentFrame)),
+            defaultDirectory: url.deletingLastPathComponent()
+        ) {
+            try? await FrameExtractor.imageData(
+                url: url, index: index, frame: source,
+                width: w, height: h, containerStart: start, filter: filter)
+        }
+    }
+
     /// Jump to the previous keyframe anchor (⇧← — the cut-editor's keys). Anchors
     /// include the joins, so the jump walks back across clips; like the cut-editor's
     /// frame-0 floor, the timeline start is always an anchor.

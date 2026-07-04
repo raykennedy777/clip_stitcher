@@ -244,6 +244,35 @@ final class CutEditorModel: ObservableObject {
     func goToStart() { seek(to: 0) }
     func goToEnd() { seek(to: lastFrame) }
 
+    // MARK: - Save frame as image (issue #89)
+
+    /// Whether a frame is on screen to save — the menu item's / shortcut's enabled state.
+    var canSaveFrame: Bool { image != nil && index != nil }
+
+    /// A request to save the displayed frame as a full-resolution PNG (issue #89) at the
+    /// source's **coded** dimensions (storage pixels — anamorphic content saves at its
+    /// storage shape, not the SAR-corrected display shape shown on screen). The cut-editor
+    /// never deinterlaces its preview (`FrameStreamDecoder` scales only), so the still is
+    /// woven exactly as displayed — matching what-you-see for a field-coded source. `nil`
+    /// when nothing is loaded.
+    func frameSnapshotRequest() -> FrameSnapshotRequest? {
+        guard let index, image != nil,
+              let video = clip.video, video.width > 0, video.height > 0 else { return nil }
+        let url = self.url
+        let frame = currentFrame
+        let start = containerStartTime
+        let (w, h) = (video.width, video.height)
+        return FrameSnapshotRequest(
+            suggestedName: FrameSnapshot.fileName(
+                clipName: clip.displayName, timecode: timecode(forFrame: frame)),
+            defaultDirectory: url.deletingLastPathComponent()
+        ) {
+            try? await FrameExtractor.imageData(
+                url: url, index: index, frame: frame,
+                width: w, height: h, containerStart: start)
+        }
+    }
+
     /// Jump to the nearest keyframe before the current frame. Landing on a keyframe
     /// is the decoder's cheapest seek, so these jumps feel instant.
     func stepToPreviousKeyframe() {
