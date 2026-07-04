@@ -155,6 +155,24 @@ final class ProjectDocument: ReferenceFileDocument {
         if shares != copyShares { copyShares = shares }
     }
 
+    /// Whether the clip's source has a **truncated ending** — a video damage zone reaching the
+    /// file's end that the export trims rather than fps-fills (CONTEXT.md "Truncated ending").
+    /// The single shared classification (`ExportPlanner.truncatedEndingTrim`) read off the
+    /// clip's cached frame index, so the inspector (issue #88) names it exactly as the engine
+    /// trims it — never a private re-derivation. Adds no probing: returns false when the index
+    /// isn't cached yet (e.g. a just-opened saved project whose sources aren't resolved).
+    /// Classifies the whole source (window start 0, reaches EOF) to mirror the row's damage line,
+    /// which shows every source zone regardless of the clip's in/out points.
+    func hasTruncatedEnding(_ clip: Clip) -> Bool {
+        guard let index = frameIndexCache[clip.id], let lastPts = index.pts.last else { return false }
+        let interval = ExportPlanner.frameDuration(clip.video?.frameRate)
+        let containerStart = containerStartCache[clip.id] ?? 0
+        let fileEnd = lastPts + (interval ?? 0) - containerStart
+        return ExportPlanner.truncatedEndingTrim(
+            zones: clip.damageZones, windowStart: nil, fileEnd: fileEnd,
+            reachesFileEnd: true, frameInterval: interval) != nil
+    }
+
     /// Imports `urls`, inserting them at `index` (clamped) or appending when nil.
     func addFiles(_ urls: [URL], at index: Int? = nil) {
         var p = project

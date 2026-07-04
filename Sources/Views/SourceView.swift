@@ -5,6 +5,10 @@ struct SourceView: View {
     @ObservedObject var document: ProjectDocument
     @EnvironmentObject private var cutEditor: CutEditorPresenter
     @State private var selection: Set<Clip.ID> = []
+    /// Whether the clip inspector is showing (issue #88). `@SceneStorage` so each window
+    /// remembers its own inspector state across relaunch — HIG-natural for a per-window
+    /// inspector, unlike an app-wide `@AppStorage` default.
+    @SceneStorage("source.inspector.shown") private var inspectorShown = false
     @State private var importing = false
     @State private var importPurpose: ImportPurpose = .add
     @State private var isDropTargeted = false
@@ -71,6 +75,25 @@ struct SourceView: View {
                 document.addFiles(urls)
             case .relink(let ids):
                 if let url = urls.first { document.relink(ids: ids, to: url) }
+            }
+        }
+        // The trailing clip inspector (issue #88): a full technical read-out of the selected
+        // clip and why it does or doesn't match the target. Updates live as the selection
+        // moves (arrow keys included) — it reads the same `selection` the List drives.
+        .inspector(isPresented: $inspectorShown) {
+            ClipInspectorView(document: document, selection: selection)
+        }
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    inspectorShown.toggle()
+                } label: {
+                    Label("Clip Inspector", systemImage: "sidebar.right")
+                }
+                .help("Show or hide the clip inspector")
+                // Finder's inspector shortcut; ⌘I alone is "Get Info" on files.
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .accessibilityIdentifier("inspector.toggle")
             }
         }
     }

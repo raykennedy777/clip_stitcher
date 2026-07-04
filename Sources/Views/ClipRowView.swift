@@ -273,23 +273,18 @@ struct ClipRowView: View {
 
     // MARK: - Formatting
 
+    // Frame-rate and duration formatting live in the shared `MediaFormatting` so the row
+    // and the clip inspector (issue #88) can't drift on how a rate or duration reads.
     private nonisolated static func fps(_ raw: String) -> Double? {
-        let parts = raw.split(separator: "/")
-        guard parts.count == 2, let num = Double(parts[0]), let den = Double(parts[1]), den != 0 else {
-            return nil
-        }
-        return num / den
+        MediaFormatting.fps(raw)
     }
 
     private nonisolated static func formattedFrameRate(_ raw: String) -> String {
-        guard let fps = fps(raw) else { return raw }
-        return fps == fps.rounded() ? String(format: "%.0f", fps) : String(format: "%.3f", fps)
+        MediaFormatting.frameRate(raw)
     }
 
     private func formattedDuration(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+        MediaFormatting.duration(seconds)
     }
 }
 

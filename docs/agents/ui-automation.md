@@ -110,6 +110,38 @@ the readable text (e.g. `92% copied`, `0% copied`) is its accessibility value (r
 via `AXValueDescription`, like the badge). Absent until the clip's frame index is
 built (import still running, or source missing).
 
+### Clip inspector (`ClipInspectorView`, issue #88)
+
+A trailing inspector column toggled by `inspector.toggle` (toolbar button, also ⌥⌘I);
+its shown/hidden state is per-window `@SceneStorage`. Shows the single selected clip; a
+zero- or multi-selection shows a placeholder instead. Every read-out row is an
+`AXStaticText`-style element whose text is exposed in `AXValue` (read via
+`AXValueDescription` over the raw AX API, as with the row badge).
+
+| Identifier | Element |
+| --- | --- |
+| `inspector.toggle` | Toolbar Show/Hide button |
+| `inspector.placeholder` | No-selection / N-selected placeholder (present only then; text in `AXValue`, e.g. "No Clip Selected", "3 Clips Selected") |
+| `inspector.name` | Clip file name |
+| `inspector.container` | Container (from the source extension, e.g. "MKV") |
+| `inspector.duration` | Duration (present only when probed) |
+| `inspector.fileSize` | Source file size (present only when the source resolves) |
+| `inspector.importState` | Import state ("Ready", "Reading properties…", "Source missing", or the failure message) |
+| `inspector.damage` | Damage read-out (present only for a scanned clip; "None detected", "N damage zones", or naming a truncated ending) |
+| `inspector.video.codec` | Codec · profile @ level (present only when video is probed) |
+| `inspector.video.dimensions` | Stored width×height |
+| `inspector.video.aspect` | Display aspect ratio (+ "PAR …" when pixels aren't square) |
+| `inspector.video.frameRate` | Frame rate ("25 fps") |
+| `inspector.video.scan` | Scan type / field order (+ field-coded gloss when applicable) |
+| `inspector.video.color` | Color primaries · transfer · matrix · range (present only when tagged) |
+| `inspector.audio.<n>` | Audio track N (0-based): "AAC · 48 kHz · stereo" |
+| `inspector.match.verdict` | The match headline — "This is the target clip.", "No target clip set.", "Matches the target — will smart render.", or "N differences from the target — will re-encode." (text in `AXValue`) |
+| `inspector.match.diff.<n>` | One strict-compare difference (0-based). `AXLabel` is the property ("Frame rate"); `AXValue` is "clip → target" ("25 → 29.970"). Present only for a re-encode verdict |
+
+The `inspector.match.diff.*` list is driven by `MatchEvaluator.differences`, the same
+comparison the row's role badge (`source.clip.<index>.role`) derives from — so the inspector
+verdict and the row verdict can never disagree (pinned by `MatchEvaluatorTests`).
+
 ### Settings window (`SettingsView`, issue #87)
 
 Opened with ⌘, (the standard `Settings` scene). Two preferences, both `@AppStorage`-backed:

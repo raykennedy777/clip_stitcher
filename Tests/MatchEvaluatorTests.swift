@@ -121,4 +121,111 @@ struct MatchEvaluatorTests {
         let target = clip(video: video(), audio: nil)
         #expect(MatchEvaluator.matches(clip(video: video(), audio: nil), target: target))
     }
+
+    // MARK: - Per-property difference list (issue #88)
+
+    /// A fully-tagged base so every strict-compare field has a value to mutate, including the
+    /// colour matrix (`colorSpace`), which the shared `video()` leaves nil.
+    private func tagged() -> VideoProperties {
+        VideoProperties(codec: "h264", profile: "High", level: "40", width: 1920, height: 1080,
+                        frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: "progressive",
+                        sampleAspectRatio: "1:1", colorPrimaries: "bt709", colorTransfer: "bt709",
+                        colorSpace: "bt709", colorRange: "tv")
+    }
+
+    /// The Bool verdict and the difference list are one source of truth: for every mutation the
+    /// list is empty exactly when `videoMatches` is true. This is the invariant the inspector
+    /// leans on to never disagree with the routing verdict.
+    @Test func differencesEmptyIffVideoMatches() {
+        let base = tagged()
+        var mutations: [VideoProperties] = [base]  // identical → matches, empty list
+        mutations.append({ var v = base; v.codec = "hevc"; return v }())
+        mutations.append({ var v = base; v.profile = "Main"; return v }())
+        mutations.append({ var v = base; v.level = "41"; return v }())
+        mutations.append({ var v = base; v.width = 1280; return v }())
+        mutations.append({ var v = base; v.height = 720; return v }())
+        mutations.append({ var v = base; v.frameRate = "30000/1001"; return v }())
+        mutations.append({ var v = base; v.pixelFormat = "yuv422p"; return v }())
+        mutations.append({ var v = base; v.fieldOrder = "tt"; return v }())
+        mutations.append({ var v = base; v.sampleAspectRatio = "16:15"; return v }())
+        mutations.append({ var v = base; v.colorPrimaries = "bt470bg"; return v }())
+        mutations.append({ var v = base; v.colorTransfer = "smpte170m"; return v }())
+        mutations.append({ var v = base; v.colorSpace = "bt470bg"; return v }())
+        mutations.append({ var v = base; v.colorRange = "pc"; return v }())
+        for cv in mutations {
+            #expect(MatchEvaluator.videoDifferences(cv, base).isEmpty == MatchEvaluator.videoMatches(cv, base))
+        }
+    }
+
+    /// Each single-field mutation surfaces exactly one named difference — the label the
+    /// inspector shows. Width and height fold into one "Dimensions" difference by design.
+    @Test func eachPropertyProducesOneNamedDifference() {
+        let base = tagged()
+        func onlyDiff(_ mutate: (inout VideoProperties) -> Void) -> MatchEvaluator.VideoDifference? {
+            var v = base; mutate(&v)
+            let diffs = MatchEvaluator.videoDifferences(v, base)
+            return diffs.count == 1 ? diffs[0] : nil
+        }
+        #expect(onlyDiff { $0.codec = "hevc" }?.label == "Codec")
+        #expect(onlyDiff { $0.profile = "Main" }?.label == "Profile")
+        #expect(onlyDiff { $0.level = "41" }?.label == "Level")
+        #expect(onlyDiff { $0.width = 1280 }?.label == "Dimensions")
+        #expect(onlyDiff { $0.height = 720 }?.label == "Dimensions")
+        #expect(onlyDiff { $0.frameRate = "30000/1001" }?.label == "Frame rate")
+        #expect(onlyDiff { $0.pixelFormat = "yuv422p" }?.label == "Pixel format")
+        #expect(onlyDiff { $0.fieldOrder = "tt" }?.label == "Scan type")
+        #expect(onlyDiff { $0.sampleAspectRatio = "16:15" }?.label == "Pixel aspect ratio")
+        #expect(onlyDiff { $0.colorPrimaries = "bt470bg" }?.label == "Color primaries")
+        #expect(onlyDiff { $0.colorTransfer = "smpte170m" }?.label == "Color transfer")
+        #expect(onlyDiff { $0.colorSpace = "bt470bg" }?.label == "Color matrix")
+        #expect(onlyDiff { $0.colorRange = "pc" }?.label == "Color range")
+    }
+
+    /// The named values read the way the inspector shows them: the frame rate is the
+    /// formatted fps, so "30000/1001 → 25/1" surfaces as "29.970 → 25".
+    @Test func frameRateDifferenceFormatsBothValues() {
+        var cv = tagged(); cv.frameRate = "30000/1001"
+        let diff = MatchEvaluator.videoDifferences(cv, tagged()).first
+        #expect(diff?.label == "Frame rate")
+        #expect(diff?.clipValue == "29.970")
+        #expect(diff?.targetValue == "25")
+    }
+
+    /// The normalized scan-type compare carries into the list: a missing field order equals
+    /// progressive (no difference), an interlaced order does not.
+    @Test func scanTypeDifferenceHonoursNormalization() {
+        var progressive = tagged(); progressive.fieldOrder = nil
+        #expect(MatchEvaluator.videoDifferences(progressive, tagged()).isEmpty)
+        var interlaced = tagged(); interlaced.fieldOrder = "tt"
+        let diff = MatchEvaluator.videoDifferences(interlaced, tagged()).first
+        #expect(diff?.label == "Scan type")
+        #expect(diff?.clipValue == "Interlaced (tt)")
+        #expect(diff?.targetValue == "Progressive")
+    }
+
+    /// Several mismatched fields accumulate in canonical order — no early exit.
+    @Test func multipleDifferencesAccumulateInOrder() {
+        var cv = tagged()
+        cv.width = 1280
+        cv.frameRate = "50/1"
+        cv.colorRange = "pc"
+        let labels = MatchEvaluator.videoDifferences(cv, tagged()).map(\.label)
+        #expect(labels == ["Dimensions", "Frame rate", "Color range"])
+    }
+
+    /// The clip-level convenience agrees with `matches` for two video-bearing clips, and
+    /// yields an empty list when either lacks probed video (the inspector guards that case).
+    @Test func clipDifferencesAgreeWithMatches() {
+        let target = clip(video: tagged(), audio: audio())
+        var mismatchVideo = tagged(); mismatchVideo.width = 640
+        let mismatch = clip(video: mismatchVideo, audio: audio())
+        #expect(MatchEvaluator.differences(mismatch, target: target).isEmpty == MatchEvaluator.matches(mismatch, target: target))
+        let same = clip(video: tagged(), audio: audio())
+        #expect(MatchEvaluator.differences(same, target: target).isEmpty)
+        #expect(MatchEvaluator.matches(same, target: target))
+        // Missing video: no comparison, empty list (matches() is false, guarded in the UI).
+        let noVideo = clip(video: nil, audio: audio())
+        #expect(MatchEvaluator.differences(noVideo, target: target).isEmpty)
+        #expect(!MatchEvaluator.matches(noVideo, target: target))
+    }
 }

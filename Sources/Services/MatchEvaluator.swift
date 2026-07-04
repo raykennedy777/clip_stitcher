@@ -16,24 +16,78 @@ enum MatchEvaluator {
     /// Compares the video properties alone on the strict dimensions (ADR-0005). Exposed so a
     /// conformed video piece — which carries no audio yet — can be verified against the
     /// target's video spec before the audio is muxed in (ADR-0011).
+    ///
+    /// Derived from `videoDifferences` so the verdict and the inspector's per-property
+    /// mismatch list (issue #88) come from one comparison — they can never disagree.
     static func videoMatches(_ cv: VideoProperties, _ tv: VideoProperties) -> Bool {
-        cv.codec == tv.codec &&
-        cv.profile == tv.profile &&
-        cv.level == tv.level &&
-        cv.width == tv.width &&
-        cv.height == tv.height &&
-        cv.frameRate == tv.frameRate &&
-        cv.pixelFormat == tv.pixelFormat &&
-        normalizedFieldOrder(cv.fieldOrder) == normalizedFieldOrder(tv.fieldOrder) &&
-        cv.sampleAspectRatio == tv.sampleAspectRatio &&
-        cv.colorPrimaries == tv.colorPrimaries &&
-        cv.colorTransfer == tv.colorTransfer &&
-        // The matrix joins the strict compare like the other two color dimensions (issue #35):
-        // a matrix-only difference between stream-copied neighbours is a visible color shift at
-        // the join — the exact glitch ADR-0005's strict rule exists to prevent. A clip differing
-        // only here now routes to conform instead of smart render, deliberately.
-        cv.colorSpace == tv.colorSpace &&
-        cv.colorRange == tv.colorRange
+        videoDifferences(cv, tv).isEmpty
+    }
+
+    /// One strict-compare video property whose value differs between a clip and the target,
+    /// named and value-formatted for display (issue #88).
+    struct VideoDifference: Equatable {
+        /// The human property name, e.g. "Frame rate".
+        let label: String
+        /// The clip's value, display-formatted (e.g. "25").
+        let clipValue: String
+        /// The target's value, display-formatted (e.g. "29.997").
+        let targetValue: String
+    }
+
+    /// Every strict-compare (ADR-0005) video property on which `cv` differs from the target
+    /// `tv`, in the canonical compare order. This is the single source of truth for both the
+    /// smart-render routing verdict (`videoMatches` = this list is empty) and the inspector's
+    /// "why it doesn't match" section, so the two can never drift.
+    ///
+    /// The comparison operators are exactly those the strict rule uses: raw equality on every
+    /// field, but `normalizedFieldOrder` on scan type (a clean progressive stream may report no
+    /// field order — ADR-0011) and the color matrix included as the third color leg (issue #35).
+    static func videoDifferences(_ cv: VideoProperties, _ tv: VideoProperties) -> [VideoDifference] {
+        var diffs: [VideoDifference] = []
+        func check(_ label: String, equal: Bool,
+                   _ clipValue: @autoclosure () -> String, _ targetValue: @autoclosure () -> String) {
+            if !equal {
+                diffs.append(VideoDifference(label: label, clipValue: clipValue(), targetValue: targetValue()))
+            }
+        }
+        check("Codec", equal: cv.codec == tv.codec, cv.codec.uppercased(), tv.codec.uppercased())
+        check("Profile", equal: cv.profile == tv.profile, display(cv.profile), display(tv.profile))
+        check("Level", equal: cv.level == tv.level, display(cv.level), display(tv.level))
+        // Width and height are two strict fields but one user-facing property: any difference in
+        // either surfaces as a single "Dimensions" mismatch.
+        check("Dimensions", equal: cv.width == tv.width && cv.height == tv.height,
+              "\(cv.width)×\(cv.height)", "\(tv.width)×\(tv.height)")
+        check("Frame rate", equal: cv.frameRate == tv.frameRate,
+              MediaFormatting.frameRate(cv.frameRate), MediaFormatting.frameRate(tv.frameRate))
+        check("Pixel format", equal: cv.pixelFormat == tv.pixelFormat, cv.pixelFormat, tv.pixelFormat)
+        check("Scan type", equal: normalizedFieldOrder(cv.fieldOrder) == normalizedFieldOrder(tv.fieldOrder),
+              MediaFormatting.scanType(cv.fieldOrder), MediaFormatting.scanType(tv.fieldOrder))
+        check("Pixel aspect ratio", equal: cv.sampleAspectRatio == tv.sampleAspectRatio,
+              display(cv.sampleAspectRatio), display(tv.sampleAspectRatio))
+        check("Color primaries", equal: cv.colorPrimaries == tv.colorPrimaries,
+              display(cv.colorPrimaries), display(tv.colorPrimaries))
+        check("Color transfer", equal: cv.colorTransfer == tv.colorTransfer,
+              display(cv.colorTransfer), display(tv.colorTransfer))
+        check("Color matrix", equal: cv.colorSpace == tv.colorSpace,
+              display(cv.colorSpace), display(tv.colorSpace))
+        check("Color range", equal: cv.colorRange == tv.colorRange,
+              display(cv.colorRange), display(tv.colorRange))
+        return diffs
+    }
+
+    /// The strict-compare video differences between a clip and the target, for the inspector's
+    /// Match section (issue #88). Empty when they match (⟺ `matches` for two video-bearing
+    /// clips); also empty — with no meaningful comparison — when either clip lacks probed video,
+    /// which the inspector guards separately (it names "No video track" rather than a match).
+    static func differences(_ clip: Clip, target: Clip) -> [VideoDifference] {
+        guard let cv = clip.video, let tv = target.video else { return [] }
+        return videoDifferences(cv, tv)
+    }
+
+    /// A nil/empty property value shown as an em dash so an "unspecified → bt709" difference
+    /// still reads clearly.
+    private static func display(_ value: String?) -> String {
+        (value?.isEmpty == false) ? value! : "—"
     }
 
     /// Whether a conformed output satisfies its target for the self-verify gate (ADR-0011). The
