@@ -26,6 +26,15 @@ struct FrameIndex {
 
     var count: Int { pts.count }
 
+    /// The presentation span the index covers in seconds: last pts − first pts. A
+    /// progress-denominator fallback when a clip's probed `duration` is unknown (issue
+    /// #81) — the mux and verify bands need *some* positive expectation to advance, and
+    /// read as 0 (a frozen bar) without one. Zero for an empty or single-frame index.
+    var durationSpan: Double {
+        guard let first = pts.first, let last = pts.last, last > first else { return 0 }
+        return last - first
+    }
+
     /// The nearest keyframe at or before frame `n` — the safe seek anchor for
     /// decoding forward to `n`.
     func keyframeIndex(atOrBefore n: Int) -> Int {

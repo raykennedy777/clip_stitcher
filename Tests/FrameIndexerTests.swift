@@ -99,6 +99,58 @@ struct FrameIndexerAllStreamsTests {
     }
 }
 
+/// The streamed verify-scan progress signal (issue #81): the greatest `pts_time` seen so
+/// far, rebased to the first stamp, over the scan duration. Drives the Clip Doctor
+/// 0.97→1.0 band so a multi-minute network re-scan advances instead of freezing.
+struct ScanProgressTests {
+    /// pts climbs with the scan; the fraction tracks it against the total duration.
+    @Test func reportsPtsFractionOfDuration() {
+        var p = FrameIndexer.ScanProgress(duration: 10)
+        #expect(p.feed("video,0,0.0,0.0,K__\naudio,1,0.0,0.0,K__\n") == 0.0)
+        #expect(p.feed("video,0,2.5,2.5,___\n") == 0.25)
+        #expect(p.feed("video,0,10.0,10.0,___\n") == 1.0)
+    }
+
+    /// A TS pts starts at an arbitrary clock offset, so progress rebases to the first
+    /// stamp — a scan whose pts begins at 1000 s isn't reported as already complete.
+    @Test func rebasesToTheFirstTimestamp() {
+        var p = FrameIndexer.ScanProgress(duration: 100)
+        #expect(p.feed("video,0,1000.0,1000.0,K__\n") == 0.0)
+        #expect(p.feed("video,0,1050.0,1050.0,___\n") == 0.5)
+    }
+
+    /// A chunk can split a line anywhere; the partial tail is held until its newline.
+    @Test func assemblesLinesSplitAcrossChunks() {
+        var p = FrameIndexer.ScanProgress(duration: 10)
+        #expect(p.feed("video,0,0.0,0.0,K__\nvideo,0,5.") == 0.0)   // "5." held back
+        #expect(p.feed("0,5.0,___\n") == 0.5)
+    }
+
+    /// Strictly non-decreasing: an out-of-order or lower pts never rewinds the bar, and a
+    /// chunk that adds no later timestamp returns nil rather than re-poking it.
+    @Test func staysMonotonicAndReturnsNilWhenNotAdvanced() {
+        var p = FrameIndexer.ScanProgress(duration: 10)
+        #expect(p.feed("video,0,0.0,0.0,K__\n") == 0.0)   // baseline
+        #expect(p.feed("video,0,5.0,5.0,___\n") == 0.5)
+        #expect(p.feed("audio,1,3.0,3.0,___\n") == nil)   // earlier stamp: no advance
+        #expect(p.feed("video,0,8.0,8.0,___\n") == 0.8)
+    }
+
+    /// A missing pts (a damaged truncated packet) is skipped, not read as zero.
+    @Test func skipsPacketsWithNoPts() {
+        var p = FrameIndexer.ScanProgress(duration: 10)
+        #expect(p.feed("video,0,0.0,0.0,K__\n") == 0.0)   // baseline
+        #expect(p.feed("video,0,4.0,4.0,K__\n") == 0.4)
+        #expect(p.feed("video,0,,4.0,___\n") == nil)      // empty pts_time field
+    }
+
+    /// A non-positive duration yields no signal rather than dividing by zero.
+    @Test func nonPositiveDurationReportsNothing() {
+        var p = FrameIndexer.ScanProgress(duration: 0)
+        #expect(p.feed("video,0,4.0,4.0,K__\n") == nil)
+    }
+}
+
 /// `makeIndex` is the shared index-assembly core (the same rules `parseIndex` and
 /// `parseAllStreams` both feed into): fill a missing pts from the dts, a missing dts from
 /// the pts, skip a packet that carries neither, then sort into presentation order.

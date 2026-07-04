@@ -477,7 +477,10 @@ enum ClipDoctorEngine {
             onProgress: { w in progress(0.85 * w) })
 
         // 2. Mux the repaired video with the in-codec, gap-filled audio into the staged file.
-        let totalSpan = clip.duration
+        //    A clip whose probed `duration` is unknown falls back to the index's presentation
+        //    span so the mux band still advances rather than freezing at 85 % (issue #81):
+        //    `runFraction` reads a nil/zero expectation as 0.
+        let totalSpan = clip.duration ?? index.durationSpan
         try await runFFmpeg(ffmpeg, repairedMuxArguments(
             videoPiece: videoPiece, source: source, tracks: tracks, output: staged)) { t in
             progress(0.85 + 0.12 * ExportProgress.runFraction(outTime: t, expectedSeconds: totalSpan))
@@ -505,7 +508,16 @@ enum ClipDoctorEngine {
 
         // 4. Auto-verify: re-run detection on the output. A failed re-scan is inconclusive,
         //    never a discard — the produced piece already passed its own verify gate.
-        let scan = try? await FrameIndexer.scanAllStreams(url: finalDest)
+        //    The re-scan is a full sequential read, linear in file size — minutes on a
+        //    multi-GB network file — so it drives the 0.97→1.0 band off its own streamed
+        //    pts progress rather than freezing the bar for the whole scan (issue #81). The
+        //    detection pass that follows only decodes short windows around any surviving
+        //    damage (a clean output decodes just the EOF tail), so the scan is the band's
+        //    dominant cost. Duration falls back to the source index span when unknown.
+        let verifyDuration = clip.duration ?? index.durationSpan
+        let scan = try? await FrameIndexer.scanAllStreams(
+            url: finalDest, expectedDuration: verifyDuration
+        ) { f in progress(0.97 + 0.03 * f) }
         let verdict: Verdict
         if let scan {
             let outStart = await MediaProbe.containerStartTime(url: finalDest)

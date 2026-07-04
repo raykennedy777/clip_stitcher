@@ -34,6 +34,22 @@ struct FrameIndexTests {
         #expect(index.keyframeIndex(after: 4) == nil)
         #expect(index.keyframeIndex(after: 5) == nil)
     }
+
+    /// The progress-denominator fallback when a clip's probed duration is unknown (issue
+    /// #81): the index's presentation span, last pts − first pts.
+    @Test func durationSpanIsTheLastMinusFirstPts() {
+        #expect(index.durationSpan == 0.20)   // 0.20 − 0.00
+        // Rebases off a non-zero first pts (a TS starting mid-clock).
+        let offset = FrameIndex(pts: [10.0, 11.0, 13.0], keyframeFlags: [true, false, false])
+        #expect(offset.durationSpan == 3.0)
+    }
+
+    /// Zero for an index too thin to span anything, so the fallback never fabricates a
+    /// bogus positive expectation.
+    @Test func durationSpanIsZeroForEmptyOrSingleFrame() {
+        #expect(FrameIndex(pts: [], keyframeFlags: []).durationSpan == 0)
+        #expect(FrameIndex(pts: [5.0], keyframeFlags: [true]).durationSpan == 0)
+    }
 }
 
 /// With B-frames, packets are reordered: a keyframe's decode time (DTS) is earlier

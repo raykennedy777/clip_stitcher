@@ -72,6 +72,14 @@ private final class StderrTail: @unchecked Sendable {
 /// the callback must be thread-safe, and around termination chunk *order* isn't
 /// guaranteed either (the tail drain can race a last in-flight read) — and the
 /// result's `stdout` is then empty.
+///
+/// `stdoutTo` **and** `onStdout` together *tee* stdout (issue #81): the authoritative
+/// stream is still written whole to the file, while each chunk is also handed to the
+/// callback for a live progress signal (e.g. the verify scan's pts vs duration). Unlike
+/// the pure-`onStdout` streaming path, the tee has a *single* serial reader that both
+/// writes the file (so the on-disk order is exact) and reports progress, and it signals
+/// EOF via a semaphore the termination handler waits on — so no second read races the
+/// last write and truncates the file the caller then parses.
 enum ProcessRunner {
     static func run(_ executable: URL, _ arguments: [String], stdoutTo fileURL: URL? = nil,
                     stderrTo errFileURL: URL? = nil,
@@ -118,16 +126,47 @@ enum ProcessRunner {
 
         let outHandle: FileHandle?
         let outPipe: Pipe?
+        let outDone: DispatchSemaphore?
+        let teeToFile: Bool
         if let fileURL {
             FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-            outHandle = try? FileHandle(forWritingTo: fileURL)
-            process.standardOutput = outHandle
-            outPipe = nil
+            let handle = try? FileHandle(forWritingTo: fileURL)
+            outHandle = handle
+            if let onStdout {
+                // Tee: report each chunk for progress while still writing the whole
+                // authoritative stream to the file (issue #81). A single serial reader
+                // does both, so the on-disk order is exact; it signals EOF and the
+                // termination handler waits on that before closing, so nothing races the
+                // final write and truncates the file the caller parses.
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                outPipe = pipe
+                teeToFile = true
+                let done = DispatchSemaphore(value: 0)
+                outDone = done
+                pipe.fileHandleForReading.readabilityHandler = { fh in
+                    let chunk = fh.availableData
+                    if chunk.isEmpty {            // EOF — write end closed; stop observing
+                        fh.readabilityHandler = nil
+                        done.signal()
+                    } else {
+                        try? handle?.write(contentsOf: chunk)
+                        onStdout(chunk)
+                    }
+                }
+            } else {
+                process.standardOutput = handle
+                outPipe = nil
+                teeToFile = false
+                outDone = nil
+            }
         } else {
             let pipe = Pipe()
             process.standardOutput = pipe
             outHandle = nil
             outPipe = pipe
+            teeToFile = false
+            outDone = nil
             if let onStdout {
                 pipe.fileHandleForReading.readabilityHandler = { handle in
                     let chunk = handle.availableData
@@ -160,7 +199,14 @@ enum ProcessRunner {
                     try? errHandle?.close()
                     var out = Data()
                     if let outPipe {
-                        if let onStdout {
+                        if teeToFile {
+                            // Wait for the live tee to reach EOF so every chunk has been
+                            // written to the file before it's closed. The timeout is a
+                            // backstop so a termination can never hang here.
+                            if outDone?.wait(timeout: .now() + 5) == .timedOut {
+                                outPipe.fileHandleForReading.readabilityHandler = nil
+                            }
+                        } else if let onStdout {
                             // Streaming mode: hand any unread tail to the callback.
                             outPipe.fileHandleForReading.readabilityHandler = nil
                             let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
