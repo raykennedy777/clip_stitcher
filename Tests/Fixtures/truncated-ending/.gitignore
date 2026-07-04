@@ -1,0 +1,6 @@
+# No copyrighted media may ever be committed (ADR-0023). This folder caches a slice cut on
+# demand from the file END of a private stopped-live-capture for the truncated-ending repair
+# integration test (issues #61/#79); the bytes are copyrighted, so every file here is
+# unstageable — only this .gitignore is tracked. Ignore everything, keep the rule itself.
+*
+!.gitignore

@@ -377,6 +377,27 @@ struct ExportPlannerTests {
             == "Repaired a damage zone in “match.ts” at 1:35.")
     }
 
+    @Test func repairReportNamesATruncatedEnding() {
+        // A video zone reaching the window end is a truncated ending — repaired by trimming,
+        // not the interior drop+fill — so it is named rather than counted (issue #79).
+        let ending = [DamageZone(start: 599.6, end: 600.0, affectsVideo: true)]
+        #expect(ExportPlanner.repairReport(clipName: "live.ts", zones: ending,
+                                           windowStart: nil, windowEnd: 600.0)
+            == "Repaired a truncated ending in “live.ts”.")
+        // An interior zone plus the truncated ending: the ending is called out alongside.
+        let mixed = [DamageZone(start: 95.5, end: 96.0, affectsVideo: true)] + ending
+        #expect(ExportPlanner.repairReport(clipName: "live.ts", zones: mixed,
+                                           windowStart: nil, windowEnd: 600.0)
+            == "Repaired a damage zone in “live.ts” at 1:35 and a truncated ending.")
+        let twoPlus = [
+            DamageZone(start: 95.5, end: 96.0, affectsVideo: true),
+            DamageZone(start: 300.0, end: 300.5, affectsVideo: true),
+        ] + ending
+        #expect(ExportPlanner.repairReport(clipName: "live.ts", zones: twoPlus,
+                                           windowStart: nil, windowEnd: 600.0)
+            == "Repaired 2 damage zones in “live.ts” at 1:35, 5:00 and a truncated ending.")
+    }
+
     @Test func repairReportFiltersZonesOutsideTheKeptWindow() {
         let zones = [
             DamageZone(start: 95.5, end: 96.0, affectsVideo: true),

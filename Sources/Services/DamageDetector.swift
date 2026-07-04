@@ -270,19 +270,33 @@ enum DamageDetector {
     /// `decodedFrameCount == 0` means the confirm decode produced nothing (a kill, a missing
     /// binary) — it can't veto a gap it never looked at, so a gap candidate stays video damage.
     static func resolveZone(candidate: Candidate, span: (start: Double, end: Double)?,
-                            decodedFrameCount: Int, containerStart: Double) -> DamageZone? {
+                            decodedFrameCount: Int, containerStart: Double,
+                            frameInterval: Double) -> DamageZone? {
         let videoReal = span != nil
             || candidate.hasOpaqueVideoAnomaly
             || (candidate.hasVideoAnomaly && decodedFrameCount == 0)
         if videoReal {
-            return DamageZone(
+            return nonZeroWidth(DamageZone(
                 start: min(candidate.start, span?.start ?? .infinity) - containerStart,
                 end: max(candidate.end, span?.end ?? -.infinity) - containerStart,
-                affectsVideo: true)
+                affectsVideo: true), frameInterval: frameInterval)
         }
         guard candidate.hasAudioAnomaly else { return nil }
-        return DamageZone(start: candidate.start - containerStart,
-                          end: candidate.end - containerStart, affectsVideo: false)
+        return nonZeroWidth(DamageZone(start: candidate.start - containerStart,
+                                       end: candidate.end - containerStart, affectsVideo: false),
+                            frameInterval: frameInterval)
+    }
+
+    /// Guarantees a zone is never zero-width — the invariant every emission point upholds so
+    /// nothing downstream ever plans around a span with no frames in it. A truncated ending
+    /// (a partial final frame the recording cut off) and a timestamp-less truncated picture
+    /// both surface as `start == end`; each is really the one incomplete frame, so the zone is
+    /// widened to span a single frame interval (CONTEXT.md "Truncated ending"). A zone already
+    /// at least one interval wide is returned unchanged.
+    static func nonZeroWidth(_ zone: DamageZone, frameInterval: Double) -> DamageZone {
+        guard zone.end - zone.start < frameInterval else { return zone }
+        return DamageZone(start: zone.start, end: zone.start + frameInterval,
+                          affectsVideo: zone.affectsVideo)
     }
 
     // MARK: - Orchestration
@@ -335,7 +349,7 @@ enum DamageDetector {
             // to its audio evidence or drops. (`resolveZone`.)
             if let zone = resolveZone(candidate: candidate, span: span,
                                       decodedFrameCount: absolute.count,
-                                      containerStart: containerStart) {
+                                      containerStart: containerStart, frameInterval: local) {
                 zones.append(zone)
             }
         }
@@ -381,24 +395,34 @@ enum DamageDetector {
         // Decoded-local cadence, like the candidate windows: a field-coded source's
         // index runs at 2× the decoder's frame rate.
         let local = medianInterval(absolute.map(\.pts)) ?? frameInterval
+        return eofZoneFromDecode(frames: absolute, lastPts: lastPts, seekPts: seekPts,
+                                 localInterval: local, containerStart: containerStart)
+    }
 
+    /// The truncated-ending zone from an EOF confirm decode's frames (already mapped to
+    /// absolute time). Pure, so the truncation math is unit-tested without ffmpeg. Two
+    /// signatures of a cut-off final frame: a corrupt-flagged tail frame, or a **dropped**
+    /// final frame that ends the decode a full frame short of the last index pts (threshold ¾
+    /// of a decoded interval — a field-coded source's index legitimately ends half an interval
+    /// past the last decoded frame, its final frame's second field, which must stay quiet).
+    /// The zone is a real one-frame video zone reaching the file end (never zero-width,
+    /// CONTEXT.md "Truncated ending"), so the repair trims to the last complete frame. `nil`
+    /// when the tail decoded clean all the way to the last index frame.
+    static func eofZoneFromDecode(frames: [DecodedFrame], lastPts: Double, seekPts: Double,
+                                  localInterval local: Double, containerStart: Double) -> DamageZone? {
         var span: (start: Double, end: Double)? = nil
-        for frame in absolute where frame.corrupt && frame.pts >= seekPts {
+        for frame in frames where frame.corrupt && frame.pts >= seekPts {
             span = (min(span?.start ?? .infinity, frame.pts - local / 2),
                     max(span?.end ?? -.infinity, frame.pts + local / 2))
         }
-        // A dropped (not just flagged) final frame ends the decode a full frame short
-        // of the index. The threshold sits at ¾ of a decoded interval: a field-coded
-        // source's index legitimately ends half an interval past the last decoded
-        // frame (the final frame's second field), which must stay quiet.
-        if let lastDecoded = absolute.last?.pts, lastDecoded < lastPts - local * 0.75 {
+        if let lastDecoded = frames.last?.pts, lastDecoded < lastPts - local * 0.75 {
             let missingStart = lastDecoded + local / 2
             span = (min(span?.start ?? missingStart, missingStart),
                     max(span?.end ?? 0, lastPts + local))
         }
         guard let s = span else { return nil }
-        return DamageZone(start: s.start - containerStart, end: s.end - containerStart,
-                          affectsVideo: true)
+        return nonZeroWidth(DamageZone(start: s.start - containerStart, end: s.end - containerStart,
+                                       affectsVideo: true), frameInterval: local)
     }
 
     /// One seek-anchored confirm decode: video only, showinfo for per-frame

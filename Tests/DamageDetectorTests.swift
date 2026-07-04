@@ -204,7 +204,8 @@ struct DamageDetectorTests {
                                             hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false)
         // Old logic was `span != nil || hasVideoAnomaly` → true here (a false video zone).
         #expect(DamageDetector.resolveZone(candidate: seam, span: nil,
-                                           decodedFrameCount: 2000, containerStart: 0) == nil)
+                                           decodedFrameCount: 2000, containerStart: 0,
+                                           frameInterval: 0.04) == nil)
     }
 
     @Test func gapVideoWithACompanionAudioGapDegradesToAnAudioZone() {
@@ -214,7 +215,8 @@ struct DamageDetectorTests {
         let c = DamageDetector.Candidate(start: 80.0, end: 96.0, hasVideoAnomaly: true,
                                          hasOpaqueVideoAnomaly: false, hasAudioAnomaly: true)
         let zone = DamageDetector.resolveZone(candidate: c, span: nil,
-                                              decodedFrameCount: 2000, containerStart: 0)
+                                              decodedFrameCount: 2000, containerStart: 0,
+                                              frameInterval: 0.04)
         #expect(zone == DamageZone(start: 80.0, end: 96.0, affectsVideo: false))
     }
 
@@ -224,7 +226,8 @@ struct DamageDetectorTests {
         let dead = DamageDetector.Candidate(start: 8132.0, end: 8171.0, hasVideoAnomaly: true,
                                             hasOpaqueVideoAnomaly: true, hasAudioAnomaly: true)
         let zone = DamageDetector.resolveZone(candidate: dead, span: nil,
-                                              decodedFrameCount: 1500, containerStart: 0)
+                                              decodedFrameCount: 1500, containerStart: 0,
+                                              frameInterval: 0.04)
         #expect(zone?.affectsVideo == true)
     }
 
@@ -234,7 +237,8 @@ struct DamageDetectorTests {
         let c = DamageDetector.Candidate(start: 80.0, end: 96.0, hasVideoAnomaly: true,
                                          hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false)
         #expect(DamageDetector.resolveZone(candidate: c, span: nil,
-                                           decodedFrameCount: 0, containerStart: 0)?.affectsVideo == true)
+                                           decodedFrameCount: 0, containerStart: 0,
+                                           frameInterval: 0.04)?.affectsVideo == true)
     }
 
     @Test func decodeCorroboratedGapIsStillVideoDamage() {
@@ -243,9 +247,73 @@ struct DamageDetectorTests {
         let c = DamageDetector.Candidate(start: 41.96, end: 42.84, hasVideoAnomaly: true,
                                          hasOpaqueVideoAnomaly: false, hasAudioAnomaly: false)
         let zone = DamageDetector.resolveZone(candidate: c, span: (start: 41.9, end: 42.9),
-                                              decodedFrameCount: 200, containerStart: 0)
+                                              decodedFrameCount: 200, containerStart: 0,
+                                              frameInterval: 0.04)
         #expect(zone?.affectsVideo == true)
         #expect(zone?.start == 41.9 && zone?.end == 42.9)
+    }
+
+    // MARK: zero-width invariant + truncated-ending widening (issue #79)
+
+    @Test func truncatedPictureOnlyClusterWidensToOneFrameNotZeroWidth() {
+        // A timestamp-less truncated picture (DamageDetector line ~77) clusters to a candidate
+        // with start == end — an opaque video anomaly. Resolving it must never emit a
+        // zero-width zone: it is the one partial frame, so it spans a single frame interval.
+        let c = DamageDetector.Candidate(start: 100.0, end: 100.0, hasVideoAnomaly: true,
+                                         hasOpaqueVideoAnomaly: true, hasAudioAnomaly: false)
+        let zone = DamageDetector.resolveZone(candidate: c, span: nil,
+                                              decodedFrameCount: 500, containerStart: 0,
+                                              frameInterval: 0.04)
+        #expect(zone?.affectsVideo == true)
+        #expect(zone?.start == 100.0)
+        #expect(abs((zone?.end ?? 0) - 100.04) < 1e-9)   // widened by one frame, never zero-width
+    }
+
+    @Test func nonZeroWidthLeavesRealZonesUntouchedButWidensCollapsedOnes() {
+        // The invariant helper: a zone already at least one frame wide is unchanged; a collapsed
+        // (start == end) or sub-frame span is widened to exactly one interval. No code path may
+        // emit a zero-width DamageZone (issue #79).
+        let wide = DamageZone(start: 10.0, end: 12.0, affectsVideo: true)
+        #expect(DamageDetector.nonZeroWidth(wide, frameInterval: 0.04) == wide)
+
+        let collapsed = DamageZone(start: 5.0, end: 5.0, affectsVideo: true)
+        let widened = DamageDetector.nonZeroWidth(collapsed, frameInterval: 0.04)
+        #expect(widened.start == 5.0 && abs(widened.end - 5.04) < 1e-9)
+
+        let audio = DamageDetector.nonZeroWidth(DamageZone(start: 1.0, end: 1.0, affectsVideo: false),
+                                                frameInterval: 0.02)
+        #expect(audio.affectsVideo == false && audio.end > audio.start)
+    }
+
+    @Test func eofTruncatedFinalFrameYieldsAOneFrameZone() throws {
+        // The last-GOP EOF check's pure core (`eofZoneFromDecode`): the final index frame never
+        // decodes (a truncated ending), so the decode stops one frame short of the last index
+        // pts. The zone is a real video zone spanning that partial frame, ending at the file end
+        // so the repair trims to it — never zero-width.
+        let interval = 0.04
+        let frames = (0..<50).map {
+            DamageDetector.DecodedFrame(pts: 100.0 + Double($0) * interval, corrupt: false)
+        }
+        let lastDecoded = frames.last!.pts            // 101.96
+        let lastPts = lastDecoded + interval          // 102.00 — the final index frame, undecoded
+        let zone = DamageDetector.eofZoneFromDecode(
+            frames: frames, lastPts: lastPts, seekPts: 100.0,
+            localInterval: interval, containerStart: 0)
+        let z = try #require(zone)
+        #expect(z.affectsVideo)
+        #expect(z.end - z.start >= interval - 1e-9)   // never zero-width
+        #expect(z.end >= lastPts - 1e-9)              // reaches the file end so the repair trims
+    }
+
+    @Test func eofCleanTailYieldsNoZone() {
+        // A clean tail that decodes to the last index frame is not a truncated ending.
+        let interval = 0.04
+        let frames = (0..<50).map {
+            DamageDetector.DecodedFrame(pts: 100.0 + Double($0) * interval, corrupt: false)
+        }
+        #expect(DamageDetector.eofZoneFromDecode(
+            frames: frames, lastPts: frames.last!.pts, seekPts: 100.0,
+            localInterval: interval, containerStart: 0) == nil)
     }
 
     // MARK: confirm-decode parsing

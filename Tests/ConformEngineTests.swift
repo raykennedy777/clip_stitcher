@@ -343,6 +343,33 @@ struct ConformEngineTests {
             windowStart: nil, windowEnd: nil, targetFrameRate: "25/1") == 0)
     }
 
+    /// A truncated ending shortens a conformed clip's read to the last complete frame so the
+    /// piece is trimmed rather than fps-filled (issue #79): the effective end is the trailing
+    /// video zone's start. No trailing video zone (or no window) leaves the window unchanged,
+    /// keeping a clean or interior-only clip byte-identical.
+    @Test func truncatedEndingEndTrimsToTheTrailingZoneStart() {
+        // Trailing video zone near window end 1000 → conform reads only up to its start.
+        #expect(ConformEngine.truncatedEndingEnd(
+            damage: [DamageZone(start: 999.6, end: 1000.0, affectsVideo: true)],
+            windowStart: nil, windowEnd: 1000) == 999.6)
+        // Interior zone: no trim.
+        #expect(ConformEngine.truncatedEndingEnd(
+            damage: [DamageZone(start: 500, end: 510, affectsVideo: true)],
+            windowStart: nil, windowEnd: 1000) == nil)
+        // Audio-only trailing gap: no video trim (the audio legs silence-fill it).
+        #expect(ConformEngine.truncatedEndingEnd(
+            damage: [DamageZone(start: 999.6, end: 1000.0, affectsVideo: false)],
+            windowStart: nil, windowEnd: 1000) == nil)
+        // A zone spanning the whole window would leave nothing — not a trim.
+        #expect(ConformEngine.truncatedEndingEnd(
+            damage: [DamageZone(start: 400, end: 1000.0, affectsVideo: true)],
+            windowStart: 400, windowEnd: 1000) == nil)
+        // No known window end: no trim.
+        #expect(ConformEngine.truncatedEndingEnd(
+            damage: [DamageZone(start: 999.6, end: 1000.0, affectsVideo: true)],
+            windowStart: nil, windowEnd: nil) == nil)
+    }
+
     /// A zone reaching back to (or past) the window start is clamped so the window's
     /// first frame survives as the fps fill's hold material — a glitched held frame
     /// beats a shifted timeline. An open window start anchors at 0.

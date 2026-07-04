@@ -171,11 +171,26 @@ enum ExportPlanner {
                 && (windowEnd.map { zone.start < $0 } ?? true)
         }
         guard !repaired.isEmpty else { return nil }
-        let shown = repaired.prefix(6).map { formattedClipTime($0.start) }
-        let times = shown.joined(separator: ", ") + (repaired.count > 6 ? ", …" : "")
-        return repaired.count == 1
-            ? "Repaired a damage zone in “\(clipName)” at \(times)."
-            : "Repaired \(repaired.count) damage zones in “\(clipName)” at \(times)."
+        // A truncated ending — a video zone reaching the kept window's end — is repaired by
+        // trimming to the last complete frame, not the interior drop+fill, so it is named
+        // rather than counted (CONTEXT.md "Truncated ending"). The margin absorbs a container
+        // whose reported end overshoots the last decodable frame (a TS header can, by ~0.2 s).
+        let isTruncatedEnding = { (zone: DamageZone) in
+            windowEnd.map { zone.end >= $0 - 0.5 } ?? false
+        }
+        let hasTruncatedEnding = repaired.contains(where: isTruncatedEnding)
+        let interior = repaired.filter { !isTruncatedEnding($0) }
+        let shown = interior.prefix(6).map { formattedClipTime($0.start) }
+        let times = shown.joined(separator: ", ") + (interior.count > 6 ? ", …" : "")
+        let ending = hasTruncatedEnding ? " and a truncated ending" : ""
+        switch interior.count {
+        case 0 where hasTruncatedEnding:
+            return "Repaired a truncated ending in “\(clipName)”."
+        case 1:
+            return "Repaired a damage zone in “\(clipName)” at \(times)\(ending)."
+        default:
+            return "Repaired \(interior.count) damage zones in “\(clipName)” at \(times)\(ending)."
+        }
     }
 
     /// h:mm:ss (or m:ss under an hour), rounded down — the cut-editor's jump popover

@@ -131,7 +131,10 @@ enum BoundaryReencodeEngine {
     ///   timeline when damage touches the span head.
     /// - **`-frames:v` is the span's slot budget**: `fps` pads its end-of-stream flush
     ///   to the last *decoded* frame (dropped or kept), so the budget is what truncates
-    ///   the fill exactly at the span end.
+    ///   the fill exactly at the span end. A **truncated ending** (a video zone reaching
+    ///   the file end) caps the budget at the frames *before* it, so the output ends on
+    ///   the last complete frame instead of `fps` refilling the dropped final slot — the
+    ///   sole trim exception to repair's length preservation (CONTEXT.md "Repair").
     static func repairedSegmentArguments(
         source: URL, range: Range<Int>, index: FrameIndex, zones: [DamageZone],
         containerStart: Double, frameRate: String, encoder: [String], output: URL,
@@ -162,25 +165,49 @@ enum BoundaryReencodeEngine {
         if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
             args += ["-video_track_timescale", String(trackTimescale)]
         }
-        args += ["-frames:v", String(slotBudget(range: range, index: index, fps: fps)), "-an", output.path]
+        args += ["-frames:v", String(trimmedSlotBudget(range: range, index: index, zones: zones,
+                                                        fps: fps, containerStart: containerStart)),
+                 "-an", output.path]
         return args
     }
 
-    /// The frame count a repaired piece must come out at: the span's slot budget
-    /// (duration × fps — holes filled, corrupt frames dropped and held over), plus how
-    /// far short it may legitimately fall. The allowance is non-zero only when a damage
-    /// window runs through the **file end** (EOF truncation): the fps fill stops at the
-    /// last decoded frame, which the index cannot predict — the truncated packet sits
-    /// in the index but never decodes — so the piece may end anywhere between the last
-    /// clean frame and the full budget. Interior spans always fill exactly: their right
-    /// boundary is a clean keyframe that decodes, and the fill pads to it.
+    /// The output slot count for a repaired segment: normally the full `slotBudget` (interior
+    /// zones drop + `fps`-fill, source length preserved), but a **truncated ending** trims.
+    /// A video zone reaching the file end has nothing after it to keep in sync, so the output
+    /// ends on the last complete frame (up to one frame shorter than the source) rather than
+    /// `fps` refilling the dropped final slot — repair's sole length-preservation exception
+    /// (CONTEXT.md "Repair"/"Truncated ending"). The cap is the frames from the span start up
+    /// to the trailing zone's start; interior zones before it are untouched (they still fill).
+    static func trimmedSlotBudget(range: Range<Int>, index: FrameIndex, zones: [DamageZone],
+                                  fps: Double, containerStart: Double) -> Int {
+        let full = slotBudget(range: range, index: index, fps: fps)
+        guard range.upperBound == index.count else { return full }   // interior span: no EOF to trim
+        let interval = 1 / fps
+        let spanStart = index.pts[range.lowerBound] - containerStart
+        let spanEnd = segmentEndTime(range: range, index: index, frameDuration: interval) - containerStart
+        // A zone is a truncated ending when it runs through the span's final slot.
+        guard let cut = zones
+            .filter({ $0.affectsVideo && $0.start < spanEnd && $0.end >= spanEnd - interval })
+            .map(\.start).min() else { return full }
+        return max(1, min(full, Int(((cut - spanStart) * fps).rounded())))
+    }
+
+    /// The frame count a repaired piece must come out at: the (possibly trimmed) slot budget,
+    /// plus how far short it may legitimately fall. Interior spans fill exactly to
+    /// `duration × fps` (holes filled, corrupt frames dropped and held over) — their right
+    /// boundary is a clean keyframe that decodes, and the fill pads to it. A **truncated
+    /// ending** (a zone through the file end) trims instead of filling (`trimmedSlotBudget`),
+    /// so the budget already ends on the last complete frame; the residual shortfall allowance
+    /// covers the one uncertainty left — whether that last frame itself decoded (the truncated
+    /// packet sits in the index but may not), so the piece may end a frame or two short.
     static func repairedSegmentExpectation(
         range: Range<Int>, index: FrameIndex, zones: [DamageZone],
         containerStart: Double, frameRate: String
     ) -> (frames: Int, shortfallAllowance: Int) {
         let fps = ConformEngine.frameRateValue(frameRate) ?? 25
         let interval = 1 / fps
-        let budget = slotBudget(range: range, index: index, fps: fps)
+        let budget = trimmedSlotBudget(range: range, index: index, zones: zones,
+                                       fps: fps, containerStart: containerStart)
         guard range.upperBound == index.count else { return (budget, 0) }
         let spanStart = index.pts[range.lowerBound] - containerStart
         let spanEnd = segmentEndTime(range: range, index: index, frameDuration: interval)

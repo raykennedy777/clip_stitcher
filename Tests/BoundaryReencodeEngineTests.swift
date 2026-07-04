@@ -352,20 +352,21 @@ struct BoundaryReencodeEngineTests {
         #expect(e.shortfallAllowance == 0)
     }
 
-    /// When the damage window runs through the **file end** (EOF truncation), the fill
-    /// stops at the last decoded frame — unknowable from the index (the truncated
-    /// packet sits in the index but never decodes) — so the expectation allows a
-    /// shortfall as deep as the trailing window.
-    @Test func repairedExpectationAllowsShortfallAtAnEofWindow() {
+    /// A damage window running through the **file end** is a truncated ending: it has
+    /// nothing after it to keep in sync, so the repair *trims* to the last complete frame
+    /// rather than fps-filling the dropped slots (issue #79, CONTEXT.md "Repair"). The
+    /// budget is capped at the frames before the zone's start — the sole trim exception to
+    /// repair's length preservation — so the piece simply ends there.
+    @Test func repairedExpectationTrimsAtAnEofTruncatedEnding() {
         let index = cleanIndex(count: 100)   // ends at pts 3.96, T1 = 4.0
         let e = BoundaryReencodeEngine.repairedSegmentExpectation(
             range: 75..<100, index: index,
             zones: [DamageZone(start: 3.5, end: 4.1, affectsVideo: true)],
             containerStart: 0, frameRate: "25/1")
-        #expect(e.frames == 25)
-        // The last clean frame before the window (3.48) guarantees 13 frames; up to 12
-        // of the trailing window's slots may go unfilled.
-        #expect(e.shortfallAllowance == 12)
+        // Span [3.0, 4.0); the trailing zone starts at 3.5, so the piece is trimmed to the
+        // 13 frames from 3.0 up to 3.5 (0.5 s × 25) instead of the full 25-slot budget.
+        #expect(e.frames == 13)
+        #expect(e.shortfallAllowance == 0)
     }
 
     /// The allowance is EOF-only: a mid-file zone at the range's tail still fills to
@@ -382,6 +383,48 @@ struct BoundaryReencodeEngineTests {
             range: 75..<100, index: cleanIndex(count: 100),
             zones: [DamageZone(start: 3.2, end: 3.5, affectsVideo: true)],
             containerStart: 0, frameRate: "25/1").shortfallAllowance == 0)
+    }
+
+    // MARK: - Truncated-ending trim (issue #79)
+
+    /// A truncated ending — a video zone reaching the file end — trims the slot budget to the
+    /// frames before it, so the repaired piece ends on the last complete frame instead of the
+    /// `fps` fill padding the dropped final slot to the full budget (CONTEXT.md "Repair").
+    @Test func trimmedSlotBudgetCapsAtATruncatedEnding() {
+        let index = cleanIndex(count: 100)   // pts 0…3.96, spanEnd 4.0
+        // EOF span [3.0, 4.0); the trailing zone runs from 3.7 to the end.
+        let budget = BoundaryReencodeEngine.trimmedSlotBudget(
+            range: 75..<100, index: index,
+            zones: [DamageZone(start: 3.7, end: 4.05, affectsVideo: true)],
+            fps: 25, containerStart: 0)
+        #expect(budget == 18)   // (3.7 − 3.0) × 25, trimmed from the full 25
+    }
+
+    /// The trim is EOF-only: an interior span (not reaching the file end) keeps its full slot
+    /// budget and fps-fills as before — length preserved everywhere except a true file-end.
+    @Test func trimmedSlotBudgetIsFullForAnInteriorSpan() {
+        let index = cleanIndex(count: 200)
+        #expect(BoundaryReencodeEngine.trimmedSlotBudget(
+            range: 100..<150, index: index,
+            zones: [DamageZone(start: 4.5, end: 5.0, affectsVideo: true)],
+            fps: 25, containerStart: 0) == 50)
+        // An EOF span whose zone ends before the final slot is not a truncated ending either.
+        #expect(BoundaryReencodeEngine.trimmedSlotBudget(
+            range: 75..<100, index: cleanIndex(count: 100),
+            zones: [DamageZone(start: 3.2, end: 3.5, affectsVideo: true)],
+            fps: 25, containerStart: 0) == 25)
+    }
+
+    /// End to end through the argument builder: an EOF truncated ending emits the trimmed
+    /// `-frames:v`, so ffmpeg stops on the last complete frame.
+    @Test func repairedSegmentArgumentsTrimFramesVAtEof() {
+        let args = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: src, range: 75..<100, index: cleanIndex(count: 100),
+            zones: [DamageZone(start: 3.7, end: 4.05, affectsVideo: true)],
+            containerStart: 0, frameRate: "25/1",
+            encoder: ["-c:v", "libx264"], output: out)
+        let fv = args.firstIndex(of: "-frames:v").map { args[$0 + 1] }
+        #expect(fv == "18")
     }
 
     // MARK: - Bounded keyframe copy (Clip Doctor repair-only export, #52)

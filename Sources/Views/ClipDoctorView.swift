@@ -183,7 +183,7 @@ struct ClipDoctorView: View {
     private var supportingReport: String? {
         guard let clip = model.clip else { return nil }
         return ExportPlanner.repairReport(clipName: clip.displayName, zones: clip.damageZones,
-                                          windowStart: nil, windowEnd: nil)
+                                          windowStart: nil, windowEnd: clip.duration)
     }
 
     private func verdictIcon(_ outcome: ClipDoctorEngine.Verdict.Outcome) -> String {

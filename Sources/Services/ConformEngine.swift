@@ -175,8 +175,14 @@ enum ConformEngine {
         } else {
             windowEnd = try await MediaProbe.probe(url: source).duration
         }
-        let windowDuration = windowEnd.map { $0 - (start ?? 0) }
-        let args = conformArguments(source: source, start: start, end: end,
+        // A truncated ending — a video zone reaching the kept window's end — is repaired by
+        // trimming to the last complete frame, not fps-filled (CONTEXT.md "Repair"): shorten
+        // the input read to the zone's start so the piece ends there. `nil` for a clean or
+        // interior-only clip keeps the window (and the command) byte-identical to before.
+        let trimEnd = truncatedEndingEnd(damage: conform.damage, windowStart: start, windowEnd: windowEnd)
+        let effectiveEnd = trimEnd ?? end
+        let windowDuration = (trimEnd ?? windowEnd).map { $0 - (start ?? 0) }
+        let args = conformArguments(source: source, start: start, end: effectiveEnd,
                                     sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
                                     output: piece,
                                     trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil,
@@ -197,7 +203,7 @@ enum ConformEngine {
         try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected,
                                   shortfallAllowance: eofShortfallAllowance(
                                       damage: conform.damage, windowStart: start,
-                                      windowEnd: windowEnd,
+                                      windowEnd: trimEnd ?? windowEnd,
                                       targetFrameRate: conform.targetVideo.frameRate))
         return piece
     }
@@ -209,6 +215,22 @@ enum ConformEngine {
     static func expectedFrameCount(windowDuration: Double, targetFrameRate: String) -> Int? {
         guard windowDuration > 0, let fps = frameRateValue(targetFrameRate) else { return nil }
         return Int((windowDuration * fps).rounded())
+    }
+
+    /// The effective window end when the kept range ends in a **truncated ending** (issue #79):
+    /// a video zone reaching the window end is repaired by *trimming* to the last complete
+    /// frame — nothing follows it to keep in sync — rather than the interior drop+fps-fill, so
+    /// the conform's input read stops at the zone's start. Returns that start, or `nil` when no
+    /// video zone reaches the end (a clean or interior-only clip keeps its window, byte-for-byte
+    /// identical to before repair). A zone spanning the whole window (start ≤ the window start)
+    /// isn't a trim — it would leave nothing — so it is ignored here.
+    static func truncatedEndingEnd(damage: [DamageZone], windowStart: Double?,
+                                   windowEnd: Double?) -> Double? {
+        guard let end = windowEnd else { return nil }
+        let start = windowStart ?? 0
+        return damage
+            .filter { $0.affectsVideo && $0.end >= end - 1.0 && $0.start > start }
+            .map(\.start).min()
     }
 
     /// How far below `duration × fps` a conformed piece may legitimately fall
