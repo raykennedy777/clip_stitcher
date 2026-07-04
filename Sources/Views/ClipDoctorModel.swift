@@ -10,6 +10,11 @@ final class ClipDoctorModel: ObservableObject {
     enum Phase {
         case configuring
         case running(progress: Double, eta: String?)
+        /// Re-verifying an already-finished output after a cancelled verify (issue #82):
+        /// the finished result is carried through so the file path and prior verdict stay
+        /// on screen while the re-scan runs; on completion it swaps to `.finished` with the
+        /// fresh verdict.
+        case verifying(result: ClipDoctorEngine.Result, progress: Double)
         case finished(ClipDoctorEngine.Result)
         case failed(String)
     }
@@ -67,9 +72,29 @@ final class ClipDoctorModel: ObservableObject {
         return false
     }
 
+    /// Whether a Verify Now re-scan is in flight (issue #82) — drives the outcome view's
+    /// re-verify progress bar in place of the verdict.
+    var isVerifying: Bool {
+        if case .verifying = phase { return true }
+        return false
+    }
+
     var progress: Double {
         if case .running(let p, _) = phase { return p }
         return 0
+    }
+
+    /// The re-verify scan's 0…1 fraction (issue #82); 0 unless a Verify Now is running.
+    var verifyProgress: Double {
+        if case .verifying(_, let p) = phase { return p }
+        return 0
+    }
+
+    /// Whether the finished verdict is a cancelled verification (issue #82) — the trigger
+    /// for the Verify Now affordance in the finished footer. False for a normal verdict.
+    var canVerifyNow: Bool {
+        if case .finished(let result) = phase { return result.verdict.outcome == .notVerified }
+        return false
     }
 
     /// The damped "About X remaining" label while running — nil until there's enough
@@ -96,8 +121,10 @@ final class ClipDoctorModel: ObservableObject {
     var canRepair: Bool { !isFieldCoded || fieldCodedAcknowledged }
 
     var result: ClipDoctorEngine.Result? {
-        if case .finished(let r) = phase { return r }
-        return nil
+        switch phase {
+        case .finished(let r), .verifying(let r, _): return r
+        default: return nil
+        }
     }
 
     var errorMessage: String? {
@@ -168,13 +195,49 @@ final class ClipDoctorModel: ObservableObject {
         phase = .running(progress: p, eta: ExportProgress.etaLabel(remaining: remaining, fraction: p))
     }
 
-    /// Cancels the running repair — `ProcessRunner` terminates the live ffmpeg, the
-    /// engine cleans its temp work, and the phase returns to configuring (issue #53).
+    /// Cancels the running repair or re-verify — `ProcessRunner` terminates the live
+    /// ffmpeg/ffprobe at once, so the scan stops immediately, not just its result discarded.
+    /// A cancel *before* the repaired file lands returns to configuring with nothing on disk
+    /// (issue #53); a cancel *during* the verify pass — the file already written — lands on
+    /// finished with a "not verified" verdict, the file kept (issue #82); a cancel during a
+    /// Verify Now re-scan leaves the not-verified verdict in place.
     func cancel() {
         task?.cancel()
     }
 
     // MARK: - Outcome actions
+
+    /// Re-runs verification on the repaired output after a cancelled verify (issue #82):
+    /// the same scan + detection the auto-verify runs, on the file already on disk — no new
+    /// machinery beyond re-invoking `verifyOutput` on the destination. Only from the finished
+    /// state; the fresh verdict replaces the old one in place. Cancellable (`cancel()` stops
+    /// the scan and lands back on `.finished` with the not-verified verdict — the output is
+    /// untouched either way).
+    func verifyNow() {
+        guard case .finished(let result) = phase, let clip else { return }
+        let output = result.output
+        let clipName = clip.displayName
+        let expectedDuration = clip.duration
+        phase = .verifying(result: result, progress: 0)
+        task = Task { [weak self] in
+            guard let self else { return }
+            let verdict = await ClipDoctorEngine.verifyOutput(
+                output, clipName: clipName, expectedDuration: expectedDuration
+            ) { f in
+                Task { @MainActor [weak self] in self?.advanceVerify(f) }
+            }
+            var updated = result
+            updated.verdict = verdict
+            self.phase = .finished(updated)
+        }
+    }
+
+    /// Keeps the re-verify progress bar monotonic — progress arrives from a background
+    /// reader (issue #82), mirroring `advance` for the repair run.
+    private func advanceVerify(_ f: Double) {
+        guard case .verifying(let result, let shown) = phase, f > shown else { return }
+        phase = .verifying(result: result, progress: f)
+    }
 
     /// Relinks the project clip to the repaired file (issue #53), reusing the relink
     /// path so it re-imports and re-runs detection — the doctored file becomes the

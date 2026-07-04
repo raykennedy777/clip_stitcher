@@ -20,9 +20,10 @@ struct ClipDoctorView: View {
             header
             Divider()
             Group {
-                if case .finished = model.phase {
+                switch model.phase {
+                case .finished, .verifying:
                     outcome
-                } else {
+                default:
                     configuration
                 }
             }
@@ -144,7 +145,18 @@ struct ClipDoctorView: View {
     @ViewBuilder
     private var outcome: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let verdict = model.result?.verdict {
+            if model.isVerifying {
+                // Re-verify in flight (issue #82): show the scan's progress in place of the
+                // stale not-verified verdict; the footer offers Cancel.
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Verifying the repaired file…", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    ProgressView(value: model.verifyProgress)
+                        .accessibilityIdentifier("clipDoctor.verifyProgress")
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            } else if let verdict = model.result?.verdict {
                 Label {
                     Text(verdict.message)
                 } icon: {
@@ -191,13 +203,14 @@ struct ClipDoctorView: View {
         case .clean: return "checkmark.seal.fill"
         case .zonesRemain: return "exclamationmark.triangle.fill"
         case .inconclusive: return "questionmark.circle.fill"
+        case .notVerified: return "pause.circle.fill"
         }
     }
 
     private func verdictColor(_ outcome: ClipDoctorEngine.Verdict.Outcome) -> Color {
         switch outcome {
         case .clean: return .green
-        case .zonesRemain, .inconclusive: return .orange
+        case .zonesRemain, .inconclusive, .notVerified: return .orange
         }
     }
 
@@ -216,7 +229,7 @@ struct ClipDoctorView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(!model.canRepair)
                     .accessibilityIdentifier("clipDoctor.repair")
-            case .running:
+            case .running, .verifying:
                 Spacer()
                 Button("Cancel") { model.cancel() }
                     .accessibilityIdentifier("clipDoctor.cancel")
@@ -224,6 +237,12 @@ struct ClipDoctorView: View {
                 Button("Reveal in Finder") { model.reveal() }
                     .accessibilityIdentifier("clipDoctor.reveal")
                 Spacer()
+                // A cancelled verify (issue #82) left the file unchecked — offer to re-run
+                // verification on the kept file rather than only reporting the cancel.
+                if model.canVerifyNow {
+                    Button("Verify Now") { model.verifyNow() }
+                        .accessibilityIdentifier("clipDoctor.verifyNow")
+                }
                 Button("Use Repaired File in This Project") {
                     model.useRepaired()
                     dismiss()

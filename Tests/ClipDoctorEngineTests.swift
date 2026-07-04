@@ -129,6 +129,42 @@ struct ClipDoctorEngineTests {
         #expect(v.message.contains("could not be re-scanned"))
     }
 
+    // MARK: - Cancelled verify vs involuntary failure (issue #82)
+
+    @Test func aCancelledVerifyIsNotVerifiedAndStatesBothFacts() {
+        // A user cancel during verify: the file is saved AND the check was cancelled — both
+        // facts stated plainly, and the outcome is its own case, not a discard.
+        let v = ClipDoctorEngine.makeVerdict(clipName: "race", scanned: false, cancelled: true, survivingZones: [])
+        #expect(v.outcome == .notVerified)
+        #expect(!v.clean)
+        #expect(v.message.contains("saved the file"))
+        #expect(v.message.contains("cancelled"))
+    }
+
+    @Test func aCancelledVerifyIsDistinctFromAnInvoluntaryReScanFailure() {
+        // The whole point of #82: a user cancel (`.notVerified`) must not be confused with an
+        // involuntary re-scan failure (`.inconclusive`) — different outcome, different wording.
+        let cancelled = ClipDoctorEngine.makeVerdict(clipName: "race", scanned: false, cancelled: true, survivingZones: [])
+        let failed = ClipDoctorEngine.makeVerdict(clipName: "race", scanned: false, cancelled: false, survivingZones: [])
+        #expect(cancelled.outcome == .notVerified)
+        #expect(failed.outcome == .inconclusive)
+        #expect(cancelled.outcome != failed.outcome)
+        #expect(cancelled.message != failed.message)
+    }
+
+    @Test func verifyOutputReportsACancelAsNotVerifiedNotInconclusive() async {
+        // `verifyOutput`'s first statement is a cancellation check, so a task cancelled before
+        // it is awaited resolves to the cancelled (not-verified) verdict without touching
+        // ffprobe — a cancel must never escape as a thrown error (the file is already written).
+        let task = Task { () -> ClipDoctorEngine.Verdict in
+            await ClipDoctorEngine.verifyOutput(
+                URL(fileURLWithPath: "/nonexistent/out.ts"), clipName: "race", expectedDuration: 10)
+        }
+        task.cancel()
+        let verdict = await task.value
+        #expect(verdict.outcome == .notVerified)
+    }
+
     // MARK: - Non-AV stream notice (ADR-0021: video + audio only)
 
     @Test func noOtherStreamsHasNoNotice() {

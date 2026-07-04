@@ -80,10 +80,12 @@ running → finished):
 | `clipDoctor.repair` | Repair / **Replace** button (label is Replace when the destination already exists; disabled until `clipDoctor.reencodeOptIn` for a field-coded source) |
 | `clipDoctor.progress` | Determinate progress bar (running only) |
 | `clipDoctor.eta` | Time-remaining label beside the progress percent (running only, once estimable; text in `AXValue`) |
-| `clipDoctor.cancel` | Cancel button (running only — cancels the engine, leaves no output) |
-| `clipDoctor.verdict` | The verdict headline (finished only; full message in `AXValue`) |
+| `clipDoctor.cancel` | Cancel button (running **or** verifying). Cancels the live engine at once. Before the repaired file lands → configuring, nothing written; during the verify pass → finished with a "not verified" verdict, the output kept (issue #82); during a Verify Now re-scan → leaves the not-verified verdict |
+| `clipDoctor.verdict` | The verdict headline (finished only; full message in `AXValue`). Outcomes: re-scanned clean / zones remain / inconclusive (re-scan failed) / **not verified** (verify was cancelled — see `clipDoctor.verifyNow`) |
+| `clipDoctor.verifyProgress` | Determinate progress bar for a Verify Now re-scan (verifying only; replaces the verdict while it runs) |
 | `clipDoctor.status` | Failure message (failed only; message in `AXValue`) |
 | `clipDoctor.reveal` | Reveal in Finder (finished only) |
+| `clipDoctor.verifyNow` | Verify Now button — re-runs verification on the kept output (finished only, present only when the verdict is "not verified", i.e. a cancelled verify — issue #82) |
 | `clipDoctor.useRepaired` | Use Repaired File in This Project — relinks the clip (finished only) |
 | `clipDoctor.done` | Done (finished only) |
 

@@ -46,10 +46,16 @@ enum ClipDoctorEngine {
     }
 
     /// The auto-verify outcome (issue #52). The repaired file is **never discarded** — a
-    /// surviving zone is a soft warning, an unreadable re-scan is inconclusive; either way
-    /// the file is kept for review.
+    /// surviving zone is a soft warning, an unreadable re-scan is inconclusive, a cancelled
+    /// verify is "not verified" (issue #82); in every case the file is kept for review.
+    ///
+    /// `.notVerified` (issue #82) is a **user cancel** during the verify pass — the repaired
+    /// file is already on disk, the user stopped the check, so it simply hasn't been examined
+    /// yet and a Verify Now action can re-run it. It is deliberately distinct from
+    /// `.inconclusive`, which is an *involuntary* failure of the re-scan (ffprobe error,
+    /// unreadable output) — the machine couldn't verify, versus the user chose not to wait.
     struct Verdict: Equatable {
-        enum Outcome { case clean, zonesRemain, inconclusive }
+        enum Outcome { case clean, zonesRemain, inconclusive, notVerified }
         var outcome: Outcome
         /// Zones detection still found on the output (empty when clean/inconclusive).
         var survivingZones: [DamageZone]
@@ -274,9 +280,18 @@ enum ClipDoctorEngine {
 
     /// The auto-verify verdict from the re-scan (issue #52). Clean = zero zones; surviving
     /// zones are named (clip time, capped at six like the source row's damage line); an
-    /// unscanned output is inconclusive. The file is kept in every case.
-    static func makeVerdict(clipName: String, scanned: Bool, survivingZones: [DamageZone]) -> Verdict {
+    /// unscanned output is either a user cancel (`.notVerified`, issue #82) or an involuntary
+    /// re-scan failure (`.inconclusive`). The file is kept in every case.
+    static func makeVerdict(clipName: String, scanned: Bool,
+                            cancelled: Bool = false, survivingZones: [DamageZone]) -> Verdict {
         guard scanned else {
+            if cancelled {
+                // A user cancel during verify (issue #82): both facts, plainly — the file is
+                // saved, and its condition simply hasn't been checked yet. The Verify Now
+                // action re-runs the same scan on the kept file.
+                return Verdict(outcome: .notVerified, survivingZones: [],
+                               message: "Repaired “\(clipName)” and saved the file. Verification was cancelled, so it hasn’t been checked yet.")
+            }
             return Verdict(outcome: .inconclusive, survivingZones: [],
                            message: "Repaired “\(clipName)”, but the output could not be re-scanned to verify — the file was kept.")
         }
@@ -506,30 +521,57 @@ enum ClipDoctorEngine {
         }
         progress(0.97)
 
-        // 4. Auto-verify: re-run detection on the output. A failed re-scan is inconclusive,
-        //    never a discard — the produced piece already passed its own verify gate.
-        //    The re-scan is a full sequential read, linear in file size — minutes on a
-        //    multi-GB network file — so it drives the 0.97→1.0 band off its own streamed
-        //    pts progress rather than freezing the bar for the whole scan (issue #81). The
-        //    detection pass that follows only decodes short windows around any surviving
-        //    damage (a clean output decodes just the EOF tail), so the scan is the band's
-        //    dominant cost. Duration falls back to the source index span when unknown.
+        // 4. Auto-verify: re-run detection on the output. Duration falls back to the source
+        //    index span when unknown. A cancel here lands on `.notVerified` (the file is
+        //    saved, the user stopped the check) — never a thrown `CancellationError`, which
+        //    the caller reads as "repair failed, nothing written"; the file *is* written.
         let verifyDuration = clip.duration ?? index.durationSpan
-        let scan = try? await FrameIndexer.scanAllStreams(
-            url: finalDest, expectedDuration: verifyDuration
+        let verdict = await verifyOutput(
+            finalDest, clipName: clip.displayName, expectedDuration: verifyDuration
         ) { f in progress(0.97 + 0.03 * f) }
-        let verdict: Verdict
-        if let scan {
-            let outStart = await MediaProbe.containerStartTime(url: finalDest)
-            let surviving = await DamageDetector.detectZones(
-                url: finalDest, scan: scan, containerStart: outStart)
-            verdict = makeVerdict(clipName: clip.displayName, scanned: true, survivingZones: surviving)
-        } else {
-            verdict = makeVerdict(clipName: clip.displayName, scanned: false, survivingZones: [])
-        }
         progress(1.0)
         return Result(output: finalDest, verdict: verdict,
                       repairedZoneCount: (clip.damageZones ?? []).count)
+    }
+
+    /// Re-runs the auto-verify on an already-written output (issue #52, #82): scan every
+    /// stream, run damage detection, and turn the result into a verdict. Factored out of
+    /// `repair` so a **Verify Now** action can re-invoke it on the kept file after a cancelled
+    /// verify.
+    ///
+    /// The re-scan is a full sequential read, linear in file size — minutes on a multi-GB
+    /// network file (issue #81) — so it reports its streamed pts progress via `onScanProgress`
+    /// (a 0…1 fraction the caller remaps into whatever band it drives). The detection pass that
+    /// follows only decodes short windows around any surviving damage (a clean output decodes
+    /// just the EOF tail), so the scan is the dominant cost.
+    ///
+    /// **Cancel vs failure (issue #82).** A user cancel is caught here and reported as
+    /// `.notVerified` — the output is on disk and untouched, so a cancel must *never* escape as
+    /// a thrown `CancellationError` (the caller would read that as "repair failed, nothing
+    /// written"). `scanAllStreams` surfaces a cancel as `CancellationError` (its `ProcessRunner`
+    /// terminates ffprobe on cancel and rethrows), while `detectZones` swallows its own probe
+    /// errors, so an explicit `Task.checkCancellation()` after it catches a cancel that lands
+    /// mid-detection. A genuine, involuntary scan failure (ffprobe error, unreadable file) is a
+    /// non-cancel `throw` and stays `.inconclusive` — distinct from the user's cancel.
+    static func verifyOutput(
+        _ output: URL, clipName: String, expectedDuration: Double?,
+        onScanProgress: @escaping @Sendable (Double) -> Void = { _ in }
+    ) async -> Verdict {
+        do {
+            try Task.checkCancellation()
+            let scan = try await FrameIndexer.scanAllStreams(
+                url: output, expectedDuration: expectedDuration, onProgress: onScanProgress)
+            try Task.checkCancellation()   // detectZones swallows its probe cancels; catch one here
+            let outStart = await MediaProbe.containerStartTime(url: output)
+            let surviving = await DamageDetector.detectZones(
+                url: output, scan: scan, containerStart: outStart)
+            try Task.checkCancellation()
+            return makeVerdict(clipName: clipName, scanned: true, survivingZones: surviving)
+        } catch is CancellationError {
+            return makeVerdict(clipName: clipName, scanned: false, cancelled: true, survivingZones: [])
+        } catch {
+            return makeVerdict(clipName: clipName, scanned: false, cancelled: false, survivingZones: [])
+        }
     }
 
     /// Resolves the source's scan order for the MBAFF tail's `-top` flag (issue #60). A
