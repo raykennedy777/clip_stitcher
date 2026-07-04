@@ -19,6 +19,14 @@ actor AsyncSemaphore {
     /// body consumes the flag and resumes-throwing instead of parking — otherwise a
     /// cancel that arrives in that window would be lost and the waiter would suspend forever.
     private var cancelledBeforeRegister: Set<UUID> = []
+    /// IDs of acquires currently inside their parking window — inserted at the start of the
+    /// slow path (before the continuation may register) and removed once the acquire's body
+    /// has fully resumed (normally or throwing). `cancelWaiter` only records a cancellation
+    /// while the id is still live: once the acquire has resumed and left this set there is no
+    /// registering body left to consume the flag, so recording it would leak the id forever —
+    /// exactly the bug where `release()` resumes a waiter just before its late cancel handler
+    /// lands (the handler found no waiter and grew `cancelledBeforeRegister` without bound).
+    private var live: Set<UUID> = []
 
     init(limit: Int) {
         let bounded = max(1, limit)
@@ -42,6 +50,16 @@ actor AsyncSemaphore {
             return
         }
         let id = UUID()
+        live.insert(id)
+        defer {
+            // Runs back on the actor after the awaits complete. Clearing both tracking sets
+            // here covers the two interleavings a late `cancelWaiter` can take relative to a
+            // normal resume: if it runs *after* this, `live` no longer holds the id so it
+            // won't record anything; if it raced *ahead* and inserted the flag just before
+            // this ran, removing it here stops the id from stranding in `cancelledBeforeRegister`.
+            live.remove(id)
+            cancelledBeforeRegister.remove(id)
+        }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 // If the cancel handler already fired for this id, don't park — resume
@@ -66,7 +84,11 @@ actor AsyncSemaphore {
     /// `release()` racing on the same actor can never resume the same continuation twice.
     private func cancelWaiter(_ id: UUID) {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else {
-            cancelledBeforeRegister.insert(id)
+            // No parked waiter: either the body hasn't registered its continuation yet (record
+            // the flag for it to honor) or the acquire has already resumed and left `live` (a
+            // normal resume that beat this handler — recording anything now would leak the id,
+            // since no body remains to consume it).
+            if live.contains(id) { cancelledBeforeRegister.insert(id) }
             return
         }
         let waiter = waiters.remove(at: index)
@@ -82,4 +104,16 @@ actor AsyncSemaphore {
             next.continuation.resume()
         }
     }
+
+    #if DEBUG
+    /// Test seam: the count of ids recorded as cancelled-before-register. Must return to
+    /// zero after every acquire completes — the invariant the leak fix protects.
+    var cancelledBeforeRegisterCount: Int { cancelledBeforeRegister.count }
+    /// Test seam: the count of acquires currently in their parking window.
+    var liveCount: Int { live.count }
+    /// Test seam: drives the off-actor cancellation path directly. The real race (a late
+    /// cancel landing after a normal resume) isn't deterministically reproducible, so tests
+    /// exercise the invariant that a cancel for a non-live id can't grow the tracking set.
+    func simulateCancel(_ id: UUID) { cancelWaiter(id) }
+    #endif
 }

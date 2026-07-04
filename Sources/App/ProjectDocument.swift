@@ -157,20 +157,23 @@ final class ProjectDocument: ReferenceFileDocument {
 
     /// Whether the clip's source has a **truncated ending** — a video damage zone reaching the
     /// file's end that the export trims rather than fps-fills (CONTEXT.md "Truncated ending").
-    /// The single shared classification (`ExportPlanner.truncatedEndingTrim`) read off the
-    /// clip's cached frame index, so the inspector (issue #88) names it exactly as the engine
-    /// trims it — never a private re-derivation. Adds no probing: returns false when the index
-    /// isn't cached yet (e.g. a just-opened saved project whose sources aren't resolved).
-    /// Classifies the whole source (window start 0, reaches EOF) to mirror the row's damage line,
-    /// which shows every source zone regardless of the clip's in/out points.
+    /// Classifies the whole source (window start 0, always reaches EOF) to mirror the row's
+    /// damage line, which shows every source zone regardless of the clip's in/out points — so it
+    /// deliberately does *not* use `truncatedEndingTrim(for:index:…)`, whose `reachesFileEnd` is
+    /// out-point-relative (the kept window's reach, not the file's). It does share that overload's
+    /// file-end reference via `ExportPlanner.fileEnd`, so the two never re-derive it differently.
+    /// Adds no probing: the classification only appears once the clip's frame index is built —
+    /// with a cold cache (e.g. a just-opened saved project whose sources aren't resolved yet) it
+    /// returns false until the import/index task caches the index.
     func hasTruncatedEnding(_ clip: Clip) -> Bool {
-        guard let index = frameIndexCache[clip.id], let lastPts = index.pts.last else { return false }
-        let interval = ExportPlanner.frameDuration(clip.video?.frameRate)
+        guard let index = frameIndexCache[clip.id] else { return false }
         let containerStart = containerStartCache[clip.id] ?? 0
-        let fileEnd = lastPts + (interval ?? 0) - containerStart
         return ExportPlanner.truncatedEndingTrim(
-            zones: clip.damageZones, windowStart: nil, fileEnd: fileEnd,
-            reachesFileEnd: true, frameInterval: interval) != nil
+            zones: clip.damageZones, windowStart: nil,
+            fileEnd: ExportPlanner.fileEnd(index: index, frameRate: clip.video?.frameRate,
+                                           containerStart: containerStart),
+            reachesFileEnd: true,
+            frameInterval: ExportPlanner.frameDuration(clip.video?.frameRate)) != nil
     }
 
     /// Imports `urls`, inserting them at `index` (clamped) or appending when nil.

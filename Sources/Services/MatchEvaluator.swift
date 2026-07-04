@@ -78,10 +78,47 @@ enum MatchEvaluator {
     /// The strict-compare video differences between a clip and the target, for the inspector's
     /// Match section (issue #88). Empty when they match (⟺ `matches` for two video-bearing
     /// clips); also empty — with no meaningful comparison — when either clip lacks probed video,
-    /// which the inspector guards separately (it names "No video track" rather than a match).
+    /// which `matchVerdict` guards separately (it names the missing video rather than a match).
     static func differences(_ clip: Clip, target: Clip) -> [VideoDifference] {
         guard let cv = clip.video, let tv = target.video else { return [] }
         return videoDifferences(cv, tv)
+    }
+
+    /// The inspector's Match-section verdict for a clip against the project's target, as a pure
+    /// value (issue #88). The single source the view renders, so the explanation it shows can
+    /// never disagree with the smart-render router: for every non-target clip,
+    /// `verdict.willSmartRender == matches(clip, target)`. In particular a target with no probed
+    /// video routes to re-encode (`matches` = false because `differences` sees no target video),
+    /// and this verdict names that case rather than falling through to a bogus "matches".
+    enum MatchVerdict: Equatable {
+        /// The clip *is* the target — nothing to compare.
+        case isTarget
+        /// No target clip is set for the project.
+        case noTarget
+        /// The clip has no probed video track to compare.
+        case clipHasNoVideo
+        /// The target has no probed video track yet, so nothing can match it (→ re-encode).
+        case targetHasNoVideo
+        /// Every strict property matches — the clip smart-renders.
+        case smartRender
+        /// The clip differs on the listed properties — it re-encodes.
+        case reEncode([VideoDifference])
+
+        /// Whether this verdict routes to a copy/smart-render rather than a re-encode. Equals
+        /// `matches(clip, target)` for every non-target clip, pinning the inspector to the router.
+        var willSmartRender: Bool {
+            if case .smartRender = self { return true }
+            return false
+        }
+    }
+
+    static func matchVerdict(for clip: Clip, target: Clip?) -> MatchVerdict {
+        guard let target else { return .noTarget }
+        if target.id == clip.id { return .isTarget }
+        guard clip.video != nil else { return .clipHasNoVideo }
+        guard target.video != nil else { return .targetHasNoVideo }
+        let diffs = differences(clip, target: target)
+        return diffs.isEmpty ? .smartRender : .reEncode(diffs)
     }
 
     /// A nil/empty property value shown as an em dash so an "unspecified → bt709" difference

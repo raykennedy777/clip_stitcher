@@ -203,11 +203,21 @@ enum ExportPlanner {
     static func truncatedEndingTrim(for clip: Clip, index: FrameIndex,
                                     containerStart: Double, windowStart: Double?) -> Double? {
         let interval = frameDuration(clip.video?.frameRate)
-        let fileEnd = index.pts.last.map { $0 + (interval ?? 0) - containerStart }
         let reachesFileEnd = clip.outPoint.map { $0 >= index.count - 1 } ?? true
         return truncatedEndingTrim(zones: clip.damageZones, windowStart: windowStart,
-                                   fileEnd: fileEnd, reachesFileEnd: reachesFileEnd,
-                                   frameInterval: interval)
+                                   fileEnd: fileEnd(index: index, frameRate: clip.video?.frameRate,
+                                                    containerStart: containerStart),
+                                   reachesFileEnd: reachesFileEnd, frameInterval: interval)
+    }
+
+    /// The last frame's display end — `lastPts + one frame interval`, container-start-relative
+    /// like the damage zones — or nil for an empty index. The single derivation the
+    /// truncated-ending gate shares between the export planner (kept-window reachability) and the
+    /// inspector's whole-source classification (`ProjectDocument.hasTruncatedEnding`), so the two
+    /// can't re-derive the file-end reference differently.
+    static func fileEnd(index: FrameIndex, frameRate: String?, containerStart: Double) -> Double? {
+        let interval = frameDuration(frameRate)
+        return index.pts.last.map { $0 + (interval ?? 0) - containerStart }
     }
 
     // MARK: - Repair report (#47)

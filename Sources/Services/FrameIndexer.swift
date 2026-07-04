@@ -280,7 +280,15 @@ final class LiveScan: @unchecked Sendable {
     /// Feeds one stdout chunk into the parse; returns the latest progress fraction it advanced
     /// to, if any. The CSV fields are pure ASCII, so a chunk never splits a UTF-8 codepoint.
     func feed(_ data: Data) -> Double? {
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        // The CSV fields are pure ASCII, so UTF-8 decodes cleanly and a chunk never splits a
+        // codepoint. Should a chunk ever carry a stray non-UTF-8 byte, fall back to ISO Latin-1
+        // rather than silently dropping the whole chunk (which would lose real frame rows): it
+        // never fails and maps each byte 1:1, so the positions of the ASCII fields the parser
+        // reads are preserved. Chosen over a corruption flag because the parse can continue
+        // losslessly for the ASCII the scan actually uses.
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
         lock.lock()
         defer { lock.unlock() }
         return scan.feed(text)

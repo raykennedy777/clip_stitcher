@@ -146,7 +146,7 @@ struct MarkingCommands: View {
             CutEditorMarkingMenu(model: model)
         } else {
             MarkingMenuItems(
-                enabled: false, canSplit: false, isSplitAtPlayhead: false,
+                enabled: false, canGoTo: false, canSplit: false, isSplitAtPlayhead: false,
                 setIn: {}, setOut: {}, toggleSplit: {}, goTo: {})
         }
     }
@@ -157,7 +157,7 @@ private struct CutEditorMarkingMenu: View {
 
     var body: some View {
         MarkingMenuItems(
-            enabled: model.canStep, canSplit: model.canToggleSplit,
+            enabled: model.canStep, canGoTo: true, canSplit: model.canToggleSplit,
             isSplitAtPlayhead: model.isSplitAtPlayhead,
             setIn: model.setIn, setOut: model.setOut, toggleSplit: model.toggleSplit,
             goTo: { model.isShowingJump = true })
@@ -166,6 +166,9 @@ private struct CutEditorMarkingMenu: View {
 
 private struct MarkingMenuItems: View {
     let enabled: Bool
+    /// Go To (⌘J) is enabled whenever a cut editor is key — no `canStep`/indexing gate — so it
+    /// matches the timecode-readout tap, which opens the jump popover unconditionally.
+    let canGoTo: Bool
     /// A split at the playhead is only valid strictly inside the selection range.
     let canSplit: Bool
     let isSplitAtPlayhead: Bool
@@ -195,7 +198,7 @@ private struct MarkingMenuItems: View {
 
         Button("Go To…") { goTo() }
             .keyboardShortcut("j", modifiers: .command)
-            .disabled(!enabled)
+            .disabled(!canGoTo)
             .accessibilityIdentifier("menu.marking.goTo")
     }
 }

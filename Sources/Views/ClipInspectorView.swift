@@ -216,31 +216,35 @@ struct ClipInspectorView: View {
     @ViewBuilder
     private func matchSection(_ clip: Clip) -> some View {
         Section("Match") {
-            if let target = document.project.targetClip, target.id == clip.id {
+            // The verdict is the single pure source (`MatchEvaluator.matchVerdict`), so the
+            // explanation shown here can never disagree with the smart-render router — including
+            // the target-has-no-video case, which routes to re-encode rather than a bogus match.
+            switch MatchEvaluator.matchVerdict(for: clip, target: document.project.targetClip) {
+            case .isTarget:
                 verdictRow("This is the target clip.", systemImage: "target", tint: .accentColor)
-            } else if document.project.targetClip == nil {
+            case .noTarget:
                 verdictRow("No target clip set.", systemImage: "questionmark.circle", tint: .secondary)
-            } else if clip.video == nil {
+            case .clipHasNoVideo:
                 verdictRow("No video track to compare.", systemImage: "exclamationmark.triangle", tint: .orange)
-            } else {
-                matchBody(clip, target: document.project.targetClip!)
+            case .targetHasNoVideo:
+                verdictRow("The target has no video track to compare — will re-encode.",
+                           systemImage: "arrow.triangle.2.circlepath", tint: .orange)
+            case .smartRender:
+                verdictRow("Matches the target — will smart render.", systemImage: "bolt", tint: .green)
+            case .reEncode(let diffs):
+                reEncodeRows(diffs)
             }
         }
     }
 
     @ViewBuilder
-    private func matchBody(_ clip: Clip, target: Clip) -> some View {
-        let diffs = MatchEvaluator.differences(clip, target: target)
-        if diffs.isEmpty {
-            verdictRow("Matches the target — will smart render.", systemImage: "bolt", tint: .green)
-        } else {
-            verdictRow(
-                diffs.count == 1 ? "1 difference from the target — will re-encode."
-                                 : "\(diffs.count) differences from the target — will re-encode.",
-                systemImage: "arrow.triangle.2.circlepath", tint: .orange)
-            ForEach(Array(diffs.enumerated()), id: \.offset) { index, diff in
-                differenceRow(diff, index: index)
-            }
+    private func reEncodeRows(_ diffs: [MatchEvaluator.VideoDifference]) -> some View {
+        verdictRow(
+            diffs.count == 1 ? "1 difference from the target — will re-encode."
+                             : "\(diffs.count) differences from the target — will re-encode.",
+            systemImage: "arrow.triangle.2.circlepath", tint: .orange)
+        ForEach(Array(diffs.enumerated()), id: \.offset) { index, diff in
+            differenceRow(diff, index: index)
         }
     }
 

@@ -72,6 +72,19 @@ struct ClipDetailLineTests {
                 == "H264 1024×576 · 50 fps · progressive")
     }
 
+    /// An "unknown" field order reads "progressive", not "interlaced (unknown)" — the row now
+    /// classifies through `MediaFormatting.isProgressive`, so it agrees with the inspector's
+    /// scan-type (which glosses "unknown" as Progressive) instead of drifting. "unknown" is
+    /// genuinely ambiguous; treating it as progressive matches how a clean progressive stream
+    /// that reports no field order is already handled everywhere (ADR-0011 normalization).
+    @Test func unknownFieldOrderReadsProgressive() {
+        var clip = videoClip()
+        clip.video?.fieldOrder = "unknown"
+        clip.audioSelections = []
+        #expect(ClipRowView.detailLine(for: clip)
+                == "H264 1024×576 · 50 fps · progressive")
+    }
+
     @Test func zeroSlotsShowNoAudioSegment() {
         var clip = videoClip()
         clip.audio = track(codec: "mp2")

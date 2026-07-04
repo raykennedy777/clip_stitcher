@@ -228,4 +228,47 @@ struct MatchEvaluatorTests {
         #expect(MatchEvaluator.differences(noVideo, target: target).isEmpty)
         #expect(!MatchEvaluator.matches(noVideo, target: target))
     }
+
+    // MARK: - Inspector Match verdict (issue #88)
+
+    /// The pure seam the inspector renders. For every non-target clip the verdict's
+    /// `willSmartRender` must equal `matches(clip, target)` — the inspector can never contradict
+    /// the router. The pinned case is a target with no probed video: `differences` returns []
+    /// there, so the old inspector fell through to a bogus "matches", while the router re-encodes.
+    @Test func matchVerdictAgreesWithRouterForEveryNonTargetClip() {
+        let withVideo = clip(video: tagged(), audio: audio())
+        let noVideo = clip(video: nil, audio: audio())
+        var mismatchVideo = tagged(); mismatchVideo.width = 640
+        let mismatch = clip(video: mismatchVideo, audio: audio())
+
+        // No target set.
+        #expect(MatchEvaluator.matchVerdict(for: withVideo, target: nil) == .noTarget)
+
+        // This clip is the target.
+        #expect(MatchEvaluator.matchVerdict(for: withVideo, target: withVideo) == .isTarget)
+
+        // Target with no probed video: routes to re-encode, and the verdict names it so — the
+        // regression fix. willSmartRender must equal matches().
+        let noVideoTarget = clip(video: nil, audio: audio())
+        let vsNoVideoTarget = MatchEvaluator.matchVerdict(for: withVideo, target: noVideoTarget)
+        #expect(vsNoVideoTarget == .targetHasNoVideo)
+        #expect(vsNoVideoTarget.willSmartRender == MatchEvaluator.matches(withVideo, target: noVideoTarget))
+
+        // Clip with no video against a video-bearing target.
+        let videoTarget = clip(video: tagged(), audio: audio())
+        let vsClipNoVideo = MatchEvaluator.matchVerdict(for: noVideo, target: videoTarget)
+        #expect(vsClipNoVideo == .clipHasNoVideo)
+        #expect(vsClipNoVideo.willSmartRender == MatchEvaluator.matches(noVideo, target: videoTarget))
+
+        // A clean match smart-renders.
+        let match = clip(video: tagged(), audio: audio())
+        let vsMatch = MatchEvaluator.matchVerdict(for: match, target: videoTarget)
+        #expect(vsMatch == .smartRender)
+        #expect(vsMatch.willSmartRender == MatchEvaluator.matches(match, target: videoTarget))
+
+        // A property mismatch re-encodes and carries the difference list.
+        let vsMismatch = MatchEvaluator.matchVerdict(for: mismatch, target: videoTarget)
+        #expect(vsMismatch == .reEncode(MatchEvaluator.differences(mismatch, target: videoTarget)))
+        #expect(vsMismatch.willSmartRender == MatchEvaluator.matches(mismatch, target: videoTarget))
+    }
 }

@@ -216,6 +216,19 @@ final class FrameStreamDecoder {
     /// Only logs when the tail is non-empty (at `-loglevel error` that means ffmpeg
     /// actually reported an error), so a healthy clip's clean EOF never logs.
     private func logDecodeFailure(target: Int) {
+        // The stderr readability handler drains live, but ffmpeg's final error line may not have
+        // been delivered yet at the instant the stdout loop broke. The decode only ends short when
+        // stdout hit EOF — i.e. ffmpeg closed its output and is exiting — so when the process has
+        // already terminated it's safe to synchronously drain whatever stderr remains into the
+        // tail before snapshotting. We never drain while ffmpeg is still alive (that could block
+        // the decoder queue), so a still-running process just logs the live tail as before.
+        if let errPipe, process?.isRunning != true {
+            let reader = errPipe.fileHandleForReading
+            reader.readabilityHandler = nil
+            if let remaining = try? reader.readToEnd(), !remaining.isEmpty {
+                stderrTail?.append(remaining)
+            }
+        }
         guard let data = stderrTail?.snapshot(), !data.isEmpty,
               let text = String(data: data, encoding: .utf8) else { return }
         Self.log.error("decode failed reaching frame \(target, privacy: .public); falling back to FrameExtractor. ffmpeg: \(text, privacy: .public)")

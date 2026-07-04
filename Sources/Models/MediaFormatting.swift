@@ -21,15 +21,23 @@ enum MediaFormatting {
         return fps == fps.rounded() ? String(format: "%.0f", fps) : String(format: "%.3f", fps)
     }
 
-    /// The scan-type gloss for a field order, plain-language per CONTEXT.md: a missing,
-    /// empty, or "unknown"/"progressive" order reads "Progressive"; an interlaced order
-    /// (`tt`/`bb`/`tb`/`bt`) is named "Interlaced (tt)". Mirrors `MatchEvaluator`'s
-    /// normalization — a clean progressive stream often reports no field order at all.
-    static func scanType(_ fieldOrder: String?) -> String {
+    /// Whether an ffprobe `field_order` denotes a progressive scan: a missing, empty,
+    /// "unknown", or "progressive" value. The single predicate the Source row's detail line
+    /// and the inspector's scan-type both classify through, so they can't disagree on an
+    /// ambiguous "unknown" (which reads as progressive, matching `MatchEvaluator`'s
+    /// normalization — a clean progressive stream often reports no field order at all).
+    static func isProgressive(_ fieldOrder: String?) -> Bool {
         switch fieldOrder {
-        case nil, "", "unknown", "progressive": return "Progressive"
-        default: return "Interlaced (\(fieldOrder!))"
+        case nil, "", "unknown", "progressive": return true
+        default: return false
         }
+    }
+
+    /// The scan-type gloss for a field order, plain-language per CONTEXT.md: a progressive
+    /// order (see `isProgressive`) reads "Progressive"; an interlaced order (`tt`/`bb`/`tb`/`bt`)
+    /// is named "Interlaced (tt)".
+    static func scanType(_ fieldOrder: String?) -> String {
+        isProgressive(fieldOrder) ? "Progressive" : "Interlaced (\(fieldOrder!))"
     }
 
     /// The display aspect ratio as a reduced "W:H" string, folding the sample (pixel)

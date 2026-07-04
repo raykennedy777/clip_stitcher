@@ -120,7 +120,11 @@ struct ClipRowView: View {
             parts.append("\(formattedFrameRate(v.frameRate)) fps")
         }
         if let order = v.fieldOrder {
-            parts.append(order == "progressive" ? "progressive" : "interlaced (\(order))")
+            // Lowercase row style, only shown when the source carries a field order. Classifies
+            // through the shared `MediaFormatting.isProgressive` so an ambiguous "unknown" reads
+            // "progressive" here exactly as the inspector's scan-type does (was "interlaced
+            // (unknown)"), the two can no longer drift.
+            parts.append(MediaFormatting.isProgressive(order) ? "progressive" : "interlaced (\(order))")
         }
         // The edited track list (ADR-0014 slots), not the file's probed streams.
         let tracks = clip.effectiveAudioTracks

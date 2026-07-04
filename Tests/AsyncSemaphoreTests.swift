@@ -52,4 +52,35 @@ struct AsyncSemaphoreTests {
         try await claim.value
         timeout.cancel()
     }
+
+    /// The leak fix: a cancellation that finds no live acquire — the real race is `release()`
+    /// resuming a waiter normally just before its late cancel handler lands — must not grow
+    /// `cancelledBeforeRegister`. The race isn't deterministically reproducible, so this drives
+    /// the off-actor path directly: a cancel for an id that was never (or is no longer) live is a
+    /// no-op. Before the fix it inserted unconditionally, so the set grew without bound.
+    @Test func cancelForANonLiveIdDoesNotGrowTheSet() async {
+        let sem = AsyncSemaphore(limit: 1)
+        await sem.simulateCancel(UUID())
+        await sem.simulateCancel(UUID())
+        #expect(await sem.cancelledBeforeRegisterCount == 0)
+        #expect(await sem.liveCount == 0)
+    }
+
+    /// A completed acquire/release cycle leaves both tracking sets empty — nothing lingers once
+    /// the acquire has resumed, even the parked path resumed by `release()`.
+    @Test func acquireReleaseCycleLeavesTrackingSetsEmpty() async throws {
+        let sem = AsyncSemaphore(limit: 1)
+        try await sem.acquire()                 // fast path
+        await sem.release()
+
+        try await sem.acquire()                 // hold the slot
+        let parked = Task { try await sem.acquire() }   // parks
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await sem.release()                     // hands the slot to `parked`
+        try await parked.value
+        await sem.release()
+
+        #expect(await sem.liveCount == 0)
+        #expect(await sem.cancelledBeforeRegisterCount == 0)
+    }
 }

@@ -31,8 +31,9 @@ enum FrameSnapshot {
 
     /// Presents the save panel (pre-filled name, starting on the configured export
     /// folder — issue #87), then decodes and writes the PNG. A cancelled panel writes
-    /// nothing; a decode failure is silently dropped (the item is only reachable while a
-    /// frame is displayed, so a failure here means an unexpected decode error).
+    /// nothing; a decode failure or a write error surfaces an app-modal alert (the success
+    /// path stays silent). The item is only reachable while a frame is displayed, so a
+    /// failure here means an unexpected decode or filesystem error worth reporting.
     @MainActor
     static func save(_ request: FrameSnapshotRequest) {
         let panel = NSSavePanel()
@@ -53,10 +54,29 @@ enum FrameSnapshot {
         defaults.recordChosenFile(url)
 
         Task {
-            if let data = await request.makePNG() {
-                try? data.write(to: url)
+            guard let data = await request.makePNG() else {
+                presentFailure("The frame could not be rendered for saving.")
+                return
+            }
+            do {
+                try data.write(to: url)
+            } catch {
+                presentFailure(error.localizedDescription)
             }
         }
+    }
+
+    /// Reports a save failure app-modally. The window-owning save panel has already closed by
+    /// the time the async decode/write finishes, so an app-modal alert (not a sheet) is the
+    /// right surface — a document error, not tied to a live window.
+    @MainActor
+    private static func presentFailure(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Couldn’t Save the Frame"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 
