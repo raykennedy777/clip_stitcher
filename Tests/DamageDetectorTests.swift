@@ -194,6 +194,59 @@ struct DamageDetectorTests {
         #expect(found.contains { $0.isVideo })
     }
 
+    // MARK: sustained slow-region detection (issue #80: local-median inflation)
+
+    @Test func sustainedAlternatingDropRegionYieldsACandidate() {
+        // Defect 1 (#80): a 20 s region where every other frame is dropped runs at 2× the baseline
+        // cadence (0.08 vs 0.04). It fills its own 201-delta local-median window, so `max(global,
+        // local)` rises above the very gaps that are the damage and the per-step rule sees nothing.
+        // A bounded slow region that *returns* to the baseline cadence is emitted as one gap
+        // candidate for the decode to confirm — the requirement is ≥ 1 candidate.
+        var packets = stamps(interval: 0.04, count: 300, from: 0)              // baseline 12 s
+        packets += (0..<250).map {                                            // 20 s, every-other-frame gone
+            let t = 12.0 + Double($0) * 0.08
+            return FrameIndexer.PacketStamp(pts: t, dts: t)
+        }
+        packets += stamps(interval: 0.04, count: 300, from: 12.0 + 249 * 0.08 + 0.04)  // baseline resumes
+        let found = DamageDetector.anomalies(streams: [video(packets)])
+        #expect(found.contains { $0.isVideo && $0.needsDecodeConfirm })
+        let candidates = DamageDetector.clusterCandidates(found)
+        #expect(candidates.contains { $0.hasVideoAnomaly && $0.start < 12.5 && $0.end > 31.0 })
+    }
+
+    @Test func sustainedSlowRegionRunningToEOFIsNotFlaggedAsAGap() {
+        // The other side of defect 1: a slower cadence that runs to the file end is the permanent
+        // PAFF→MBAFF cadence change (Clip Doctor's own output), not a bounded dropout — flagging it
+        // makes the whole tail a multi-minute confirm decode. Only a slow region that returns to the
+        // baseline cadence is a bounded excursion worth confirming, so this must stay silent.
+        var packets = stamps(interval: 0.04, count: 400, from: 0)             // baseline
+        packets += (1...300).map {                                           // slower, to EOF
+            let t = 16.0 + Double($0) * 0.08
+            return FrameIndexer.PacketStamp(pts: t, dts: t)
+        }
+        let found = DamageDetector.anomalies(streams: [video(packets)])
+        #expect(!found.contains { $0.needsDecodeConfirm })
+    }
+
+    @Test func aLateResumeHoleWithinTheJudgedWindowIsCorroborated() {
+        // Defect 2 (#80): a hole whose resume frame lands 1.3 s past the candidate end. The confirm
+        // decode and the judged window now share one `tailLookahead` (1.5 s), so a frame exists past
+        // the resume and the span is corroborated — before, the decode stopped at +1.0 s, produced no
+        // frame past the hole, the span came back nil, and resolveZone's clean-decode veto dropped it.
+        let interval = 0.04
+        var frames = (0...250).map {                                          // good frames to 10.0 (candidate end)
+            DamageDetector.DecodedFrame(pts: Double($0) * interval, corrupt: false)
+        }
+        frames += (0..<20).map {                                              // resume at 11.3 (1.3 s past end)
+            DamageDetector.DecodedFrame(pts: 11.3 + Double($0) * interval, corrupt: false)
+        }
+        let candidate = DamageDetector.Candidate(start: 9.8, end: 10.0, hasVideoAnomaly: true)
+        let span = DamageDetector.videoDamageSpan(
+            frames: frames, window: (candidate.start - 1.0)...(candidate.end + 1.5),
+            frameInterval: interval)
+        #expect(span != nil)
+    }
+
     @Test func gapOnlyVideoThatDecodesCleanIsNotVideoDamage() {
         // The seam candidate from the flood above: gap-only video evidence, no audio gap, and
         // a confirm decode that came back clean (span nil, frames produced). Old logic

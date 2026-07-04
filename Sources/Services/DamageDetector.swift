@@ -57,6 +57,12 @@ enum DamageDetector {
     /// Streams with fewer intervals than this have no meaningful cadence to break.
     private static let minIntervals = 30
 
+    /// How far past a candidate's end the confirm decode runs *and* its damage span is judged —
+    /// one shared bound so a late-resume hole the PS-seek slack pushes past the candidate end is
+    /// both decoded and judged (issue #80). Wide enough to cover the seek landing slack, tight
+    /// enough to keep the confirm decode short.
+    private static let tailLookahead = 1.5
+
     static func anomalies(streams: [FrameIndexer.StreamPackets]) -> [Anomaly] {
         var found: [Anomaly] = []
         for stream in streams {
@@ -79,26 +85,13 @@ enum DamageDetector {
                 }
                 if let median = medianInterval(seq) {
                     let deltas = zip(seq.dropFirst(), seq).map { $0 - $1 }
-                    for (i, d) in deltas.enumerated() {
-                        if d >= median * 1.8 {
-                            // A long step is a hole only if it also beats the *local* cadence.
-                            // Clip Doctor's own output splices a PAFF copy-head (two field
-                            // packets per frame) onto an MBAFF re-encoded tail (one packet per
-                            // frame): every normal tail step is ~2× the head-dominated file
-                            // median, so the bare global rule flags the entire tail — one
-                            // file-long candidate and a multi-minute confirm decode (the whole
-                            // point of fast detection lost). `max(global, local)` lifts the bar
-                            // where the stream genuinely runs slower, and never *lowers* it: a
-                            // damage region whose dup bursts collapse the local median (the 39 s
-                            // dead zone) falls back to the global one, unchanged from before.
-                            if d >= 1.8 * Swift.max(median, localMedian(deltas, around: i)) {
-                                found.append(Anomaly(start: seq[i], end: seq[i] + d, isVideo: true,
-                                                     needsDecodeConfirm: true))
-                            }
-                        } else if d <= median * 0.25 {
-                            found.append(Anomaly(start: min(seq[i], seq[i + 1]),
-                                                 end: max(seq[i], seq[i + 1]), isVideo: true))
-                        }
+                    found += videoGapAnomalies(seq: seq, deltas: deltas, median: median)
+                    // Duplicate-DTS bursts (garbled PES headers): micro-increment steps the
+                    // demuxer synthesizes, decoder-invisible, so no confirm — the 39 s dead
+                    // zone's signature. Disjoint from the gap band above.
+                    for (i, d) in deltas.enumerated() where d <= median * 0.25 {
+                        found.append(Anomaly(start: min(seq[i], seq[i + 1]),
+                                             end: max(seq[i], seq[i + 1]), isVideo: true))
                     }
                 } else {
                     // A dts-poor container (e.g. a raw elementary stream): fall back
@@ -108,14 +101,7 @@ enum DamageDetector {
                     let pts = stream.packets.compactMap(\.pts).sorted()
                     guard let median = medianInterval(pts) else { continue }
                     let deltas = zip(pts.dropFirst(), pts).map { $0 - $1 }
-                    for (i, d) in deltas.enumerated() where d >= median * 1.8 {
-                        // Same local-cadence gate as the dts path (a slower-running stretch is
-                        // not a hole); the global pre-check keeps `localMedian` off the hot path.
-                        if d >= 1.8 * Swift.max(median, localMedian(deltas, around: i)) {
-                            found.append(Anomaly(start: pts[i], end: pts[i] + d, isVideo: true,
-                                                 needsDecodeConfirm: true))
-                        }
-                    }
+                    found += videoGapAnomalies(seq: pts, deltas: deltas, median: median)
                 }
             } else {
                 // Audio reads presentation gaps: a pts hole is missing sound whatever
@@ -154,6 +140,61 @@ enum DamageDetector {
             }
         }
         return clusters
+    }
+
+    /// Video gap anomalies from a timestamp sequence (dts in demux order, or sorted pts on a
+    /// dts-poor container), in two bands the confirm decode later arbitrates:
+    ///
+    /// - **Sharp holes** — a single step that beats even the *local* cadence
+    ///   (`1.8 × max(global, local)`). `max(global, local)` lifts the bar where the stream
+    ///   genuinely runs slower and never lowers it: Clip Doctor's own output splices a PAFF
+    ///   copy-head (two field packets per frame) onto an MBAFF re-encoded tail (one packet per
+    ///   frame), so every normal tail step is ~2× the head-dominated file median — the bare
+    ///   global rule would flag the whole tail (a file-long candidate, a multi-minute confirm
+    ///   decode). A dup-burst region that *collapses* the local median (the 39 s dead zone)
+    ///   falls back to the global bar, unchanged.
+    /// - **Sustained slow regions** — the failure mode `max(global, local)` alone introduced
+    ///   (issue #80). A region of moderate gaps ≥ half the `localMedian` window (e.g. an
+    ///   every-other-frame dropout, steps ≈ 2× cadence) fills its *own* window, so `localMedian`
+    ///   becomes the elevated value and the bar rises above the very gaps that are the damage —
+    ///   with no dup burst, truncated picture, or audio companion, the zone would be missed
+    ///   entirely. A run of consecutive steps that clear the global bar but were suppressed by
+    ///   the local gate is emitted as **one** gap candidate for the decode to confirm — *iff* it
+    ///   is a **bounded excursion**: it does not reach the last delta and the cadence *returns to
+    ///   the file baseline* (a normal step follows). A run that instead runs to EOF, or hands off
+    ///   to another hole rather than returning to baseline, is the permanent PAFF→MBAFF cadence
+    ///   change (the slower tail is the new normal), left suppressed. The run-length floor is the
+    ///   local half-window: any shorter region cannot inflate its own local median, so the sharp
+    ///   band already caught it — the floor keeps the two bands from double-emitting.
+    static func videoGapAnomalies(seq: [Double], deltas: [Double], median: Double,
+                                  window: Int = 201) -> [Anomaly] {
+        var found: [Anomaly] = []
+        var runStart: Int? = nil   // start delta-index of the current suppressed-gap run
+        func closeRun(before endExclusive: Int) {
+            guard let rs = runStart else { return }
+            runStart = nil
+            guard endExclusive - rs >= window / 2,          // long enough to have inflated its own local median
+                  endExclusive < deltas.count,              // content resumes (not the run-to-EOF PAFF tail)
+                  deltas[endExclusive] < median * 1.8        // and resumes at the file baseline cadence
+            else { return }
+            found.append(Anomaly(start: seq[rs], end: seq[endExclusive], isVideo: true,
+                                 needsDecodeConfirm: true))
+        }
+        for (i, d) in deltas.enumerated() {
+            if d >= median * 1.8 {
+                if d >= 1.8 * Swift.max(median, localMedian(deltas, around: i, window: window)) {
+                    closeRun(before: i)     // a sharp hole ends any slow run (not a return to baseline)
+                    found.append(Anomaly(start: seq[i], end: seq[i] + d, isVideo: true,
+                                         needsDecodeConfirm: true))
+                } else if runStart == nil {
+                    runStart = i
+                }
+            } else {
+                closeRun(before: i)
+            }
+        }
+        closeRun(before: deltas.count)
+        return found
     }
 
     /// The local interval cadence around `index`: the median of the deltas in a window
@@ -322,7 +363,12 @@ enum DamageDetector {
             var keyframe = index.keyframeIndex(atOrBefore: anchorFrame)
             keyframe = index.keyframeIndex(atOrBefore: max(0, keyframe - 1))
             let seekPts = index.pts[keyframe]
-            let windowEnd = candidate.end + 1.0
+            // The decode must reach as far as the span is judged (`tailLookahead` below): a hole
+            // whose resume frame lands in the PS-seek slack past the candidate end is invisible
+            // unless the decode actually produced frames out there. Decoding only to +1.0 while
+            // judging to +1.5 left no frame past a late resume — the span came back nil and
+            // `resolveZone`'s clean-decode veto silently dropped a corroborated dropout (#80).
+            let windowEnd = candidate.end + tailLookahead
             guard windowEnd > seekPts else { continue }
 
             let frames = await confirmDecode(
@@ -340,7 +386,7 @@ enum DamageDetector {
                 ?? medianInterval(absolute.map(\.pts)) ?? interval
             let span = videoDamageSpan(
                 frames: absolute,
-                window: (candidate.start - 1.0)...(candidate.end + 1.5),
+                window: (candidate.start - 1.0)...(candidate.end + tailLookahead),
                 frameInterval: local)
             // The decode is the authority on video damage (corrupt frames, holes); demux-level
             // duplicate-DTS bursts and truncated pictures are trusted on their own (the 39 s
