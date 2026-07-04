@@ -178,9 +178,11 @@ enum ClipDoctorEngine {
     /// players can't decode past the seam. So field-coded repair is H.264-only; the cadence
     /// detector that flags a source field-coded is codec-agnostic, so this guard is what stops
     /// an MPEG-2/HEVC field-coded clip from shipping a broken mixed-codec output. (Progressive
-    /// repair is a same-codec smart render and has no such limit.)
+    /// repair is a same-codec smart render and has no such limit.) Forwards to the shared
+    /// predicate (issue #96) the cut editor's copy-cut snapping also consults, so the two
+    /// H.264-only field-coded gates can't drift apart.
     static func canRepairFieldCoded(codec: String?) -> Bool {
-        codec == "h264"
+        FieldCodedSupport.canRepairFieldCoded(codec: codec)
     }
 
     // MARK: - Field order detection (#60)
@@ -449,11 +451,15 @@ enum ClipDoctorEngine {
 
         // The whole-file repair plan: no trim, no target ⇒ never conform (ADR-0011) ⇒ a
         // pure whole-file smart-render plan (copy spans + repaired re-encode segments).
+        // `.repair` purpose, not the default `.export` (issue #96): an export plan on a
+        // field-coded clip withholds the damage zones and enforces copy-only — this pass
+        // needs the repaired `.reEncode` segments `fieldCodedRepair` collapses below.
         var wholeFile = clip
         wholeFile.inPoint = nil
         wholeFile.outPoint = nil
         let treatment = try ExportPlanner.videoTreatment(
-            for: wholeFile, target: nil, index: index, containerStart: containerStart)
+            for: wholeFile, target: nil, index: index, containerStart: containerStart,
+            purpose: .repair)
         guard case .smartRender(let segments, let progressiveEncoder) = treatment else {
             throw ExportError.invalidPlan   // target nil never yields .conform; defensive.
         }

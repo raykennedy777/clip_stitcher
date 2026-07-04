@@ -167,10 +167,39 @@ _Avoid_: fix tool, restoration, error concealment
 
 **Field-coded (PAFF)**:
 A source that stores each displayed frame as two field pictures (top + bottom), ~2 packets per
-frame, so the app's packet-based frame index runs at 2× the display rate — frame-accurate
-cutting and joining are off by 2× and stay unsupported. Clip Doctor *can* repair a field-coded
-source (issue #54), via damage-to-EOF.
+frame, so the app's packet-based frame index runs at 2× the display rate. An H.264 field-coded
+source takes the **copy-cut route** (issue #96, ADR-0024): cutting and joining are supported via
+pure stream copy, with every mark snapped to a copy-safe keyframe (see Copy-safe keyframe,
+Snapped marks) — frame-accurate cutting remains impossible (ADR-0022), so the trade is a mark
+that may land up to ~1 GOP from where it was set, never a re-encode. A field-coded source in any
+other codec has no validated recipe and stays warn-only, frame-accurate cutting and joining off
+by 2×. Clip Doctor *can* repair a field-coded H.264 source (issue #54), via damage-to-EOF,
+independent of the copy-cut route.
 _Avoid_: interlaced (ambiguous — MBAFF is also interlaced), PAFF without the plain-language gloss
+
+**Copy-cut route**:
+The field-coded (H.264) cut/join path (issue #96, ADR-0024): every in point, out point, and
+split point snaps to a copy-safe boundary so the resulting export plan is pure stream copy with
+no re-encoded segment — re-encoding a field-coded boundary hits the same resume-seam wall ADR-0022
+proved fatal for repair. `ExportPlanner` refuses a plan on this route that contains a re-encode
+segment as a programming-error backstop. Damage inside the kept range copies through unrepaired;
+Clip Doctor first is the workflow for a damaged field-coded source.
+_Avoid_: PAFF cutting, field-coded export mode
+
+**Copy-safe keyframe**:
+A keyframe with zero leading pictures — the only kind an in point or split point may snap to on
+the copy-cut route, since a copy may only *start* where no leading picture would be orphaned at
+the seam. An out point may snap to any keyframe (copy-safe or not), landing just before its
+leading pictures so they fall in the discarded range (see Leading pictures).
+_Avoid_: clean keyframe (that's the closed-GOP cut-point concept from ADR-0008), safe cut point
+
+**Snapped marks**:
+An in/out/split point moved by `CopyCutSnapper` from the requested frame to the nearest valid
+copy-safe boundary on a field-coded copy-cut clip; ties keep the requested frame inside the kept
+range. The playhead follows the snap so the move is never silent. Re-applied whenever a fresh
+frame index confirms a clip is field-coded (import, relink, reopen) so stale marks set before
+that was known never reach export unsnapped.
+_Avoid_: adjusted marks, corrected points
 
 **Damage-to-EOF**:
 How Clip Doctor repairs a field-coded source: copy the clean head byte-for-byte up to the

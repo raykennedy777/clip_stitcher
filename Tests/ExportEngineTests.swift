@@ -933,3 +933,193 @@ struct ExportSourceCollisionTests {
         }
     }
 }
+
+/// Slice 4 of the field-coded copy-cut route (issue #96): the export path's pure
+/// decisions for a confirmed field-coded (PAFF) H.264 clip — whose plan the planner has
+/// already forced to copy segments only (`fieldCodedPlanNotCopyOnly`). Every shape here
+/// pins the shell de-risk on the real capture: cut pieces are always `.ts` (an MKV piece
+/// carries no independent DTS and collapses the B-field PTS dips on concat; TS pieces
+/// feed TS/MKV/MP4 finals cleanly), the concat list drops all `duration` directives, and
+/// the *final* outputs keep the chosen container extension.
+struct FieldCodedCopyCutExportTests {
+    /// A copy-only plan trimmed at both ends — the shape the cut editor's snapped marks
+    /// produce on a field-coded clip.
+    private let trimmed = [PlannedSegment(kind: .copy, range: 100..<2000, outCutKeyframe: 2010)]
+
+    // MARK: piece extension (issue #96)
+
+    @Test func aFieldCodedCutAlwaysProducesTsPieces() {
+        // …whatever the output container — MKV pieces are the trap, and the MP4 shape
+        // was never the validated one either; TS feeding all three finals is.
+        #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: trimmed) == "ts")
+        #expect(ExportEngine.pieceExtension(container: "mp4", fieldCoded: true, plan: trimmed) == "ts")
+        #expect(ExportEngine.pieceExtension(container: "ts", fieldCoded: true, plan: trimmed) == "ts")
+    }
+
+    @Test func aSingleEndedTrimIsStillACutAndStillTs() {
+        // In-cut only (the copy runs to the clip end)…
+        let headCut = [PlannedSegment(kind: .copy, range: 100..<2000, outCutKeyframe: nil)]
+        #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: headCut) == "ts")
+        // …and out-cut only (the copy starts at the file head) both go through the
+        // segment muxer, so both take the `.ts` piece.
+        let tailCut = [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: 2010)]
+        #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: tailCut) == "ts")
+    }
+
+    @Test func aWholeClipFieldCodedKeepStaysOnThePlainRemuxPath() {
+        // A single copy segment cutting neither end is today's whole-clip remux — no
+        // piece seam for MKV's DTS regeneration to collapse — and must stay
+        // byte-for-byte unchanged (same nil-cut shape `needsCut` reads).
+        let whole = [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: nil)]
+        #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: whole) == "mkv")
+        #expect(ExportEngine.pieceExtension(container: "mp4", fieldCoded: true, plan: whole) == "mp4")
+        #expect(ExportEngine.pieceExtension(container: "ts", fieldCoded: true, plan: whole) == "ts")
+    }
+
+    // MARK: whole-clip-copy predicate (the remux criterion's single owner)
+
+    @Test func theWholeClipCopyShapeIsOneUncutCopySegment() {
+        #expect(ExportEngine.isWholeClipCopy(
+            [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: nil)]))
+        // Any cut end, a re-encode, or a multi-segment plan is not the remux shape —
+        // the same verdicts `copySegmentPlan` + `needsCut` reach on a lone copy segment.
+        #expect(!ExportEngine.isWholeClipCopy(
+            [PlannedSegment(kind: .copy, range: 100..<2000, outCutKeyframe: nil)]))
+        #expect(!ExportEngine.isWholeClipCopy(
+            [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: 2010)]))
+        #expect(!ExportEngine.isWholeClipCopy(
+            [PlannedSegment(kind: .reEncode, range: 0..<2000, outCutKeyframe: nil)]))
+        #expect(!ExportEngine.isWholeClipCopy(
+            [PlannedSegment(kind: .copy, range: 0..<1000, outCutKeyframe: 1000),
+             PlannedSegment(kind: .copy, range: 1000..<2000, outCutKeyframe: nil)]))
+        #expect(!ExportEngine.isWholeClipCopy([]))
+    }
+
+    @Test func nonFieldCodedClipsKeepTheContainerExtension() {
+        #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: false, plan: trimmed) == "mkv")
+        #expect(ExportEngine.pieceExtension(container: "mp4", fieldCoded: false, plan: trimmed) == "mp4")
+    }
+
+    /// The MP4 timescale pin (#18/#24) rides the *piece* extension: an MP4 piece still
+    /// carries `-segment_format_options video_track_timescale=…`, while the cut command
+    /// for a field-coded clip's `.ts` piece — built with no timescale, exactly as the
+    /// engine's ext-gated `copyTimescale` passes it — has no such flag.
+    @Test func theMp4TimescalePinNeverReachesATsPiece() {
+        let src = URL(fileURLWithPath: "/tmp/clip.ts")
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
+        let mp4Cut = ExportEngine.cutArguments(source: src, plan: plan,
+                                               segmentPattern: "/tmp/p_%03d.mp4", trackTimescale: 450000)
+        #expect(mp4Cut.contains("-segment_format_options"))
+        let tsCut = ExportEngine.cutArguments(source: src, plan: plan,
+                                              segmentPattern: "/tmp/p_%03d.ts")
+        #expect(!tsCut.contains("-segment_format_options"))
+        #expect(!tsCut.joined().contains("video_track_timescale"))
+    }
+
+    // MARK: join-level piece containers (issue #96)
+
+    private func item(_ path: String, fieldCoded: Bool = false,
+                      segments: [PlannedSegment]? = nil) -> ExportItem {
+        let index = FrameIndex(pts: [0.0, 0.04, 0.08, 0.12],
+                               keyframeFlags: [true, false, false, false])
+        var item = ExportItem(source: URL(fileURLWithPath: path),
+                              segments: segments ?? [PlannedSegment(kind: .copy, range: 0..<2)],
+                              index: index)
+        item.fieldCoded = fieldCoded
+        return item
+    }
+
+    @Test func aFieldCodedItemForcesEveryPieceOfAConnectJoinToTs() {
+        // A mixed-container concat list is misplaced outright by the demuxer (the MKV
+        // piece's duration re-read in the TS timebase pushed its neighbour ~90× late;
+        // reversed, the MKV piece collapsed onto duplicate PTS), so the whole join —
+        // the other clips' cut pieces AND a whole-clip keep — cuts as `.ts`.
+        let whole = [PlannedSegment(kind: .copy, range: 0..<4, outCutKeyframe: nil)]
+        let items = [item("/tmp/paff.ts", fieldCoded: true),
+                     item("/tmp/plain.mkv"),
+                     item("/tmp/wholekeep.mkv", segments: whole)]
+        #expect(ExportEngine.pieceExtensions(container: "mkv", mode: .connect, items: items)
+                == ["ts", "ts", "ts"])
+        #expect(ExportEngine.pieceExtensions(container: "mp4", mode: .connect, items: items)
+                == ["ts", "ts", "ts"])
+    }
+
+    @Test func withoutAFieldCodedItemTheJoinKeepsPerItemContainers() {
+        let items = [item("/tmp/a.ts"), item("/tmp/b.ts")]
+        #expect(ExportEngine.pieceExtensions(container: "mkv", mode: .connect, items: items)
+                == ["mkv", "mkv"])
+    }
+
+    @Test func aSingleClipConnectAndSeparateItemsKeepThePerItemRule() {
+        // Each `.separate` item — and a lone `.connect` clip — is its own join, so the
+        // per-item `pieceExtension` verdicts apply unchanged: the field-coded cut is
+        // `.ts`, the whole-clip keep and every other clip stay the container.
+        let whole = [PlannedSegment(kind: .copy, range: 0..<4, outCutKeyframe: nil)]
+        let cut = [PlannedSegment(kind: .copy, range: 1..<3, outCutKeyframe: 3)]
+        let separate = [item("/tmp/paff.ts", fieldCoded: true, segments: cut),
+                        item("/tmp/wholepaff.ts", fieldCoded: true, segments: whole),
+                        item("/tmp/plain.mkv")]
+        #expect(ExportEngine.pieceExtensions(container: "mkv", mode: .separate, items: separate)
+                == ["ts", "mkv", "mkv"])
+        let lone = [item("/tmp/wholepaff.ts", fieldCoded: true, segments: whole)]
+        #expect(ExportEngine.pieceExtensions(container: "mkv", mode: .connect, items: lone)
+                == ["mkv"])
+    }
+
+    // MARK: cross-clip concat durations (issue #96)
+
+    @Test func onlyFieldCodedEntriesDropTheirConcatDurationDirective() {
+        // Per-entry, not all-or-nothing: dropping every directive for one field-coded
+        // item would reopen the issue-#6/ADR-0008 seam gap for the other clips. The
+        // field-coded entry emits none (its `.ts` piece self-reports its true span;
+        // the whole-keep estimate even under-states a ragged tail and overlapped the
+        // next clip in the shell); the progressive entry keeps its exact kept span.
+        let leading = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts", fieldCoded: true),
+                                                              item("/tmp/b.ts")])
+        #expect(leading.count == 2)
+        #expect(leading[0] == nil)
+        #expect(leading[1] == nil)   // the last clip offsets nothing (clipSpans)
+        let trailing = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts"),
+                                                               item("/tmp/b.ts", fieldCoded: true)])
+        #expect(trailing.count == 2)
+        #expect(abs((trailing[0] ?? -1) - 0.08) < 1e-9)   // pts[2] - pts[0], kept
+        #expect(trailing[1] == nil)
+        let sandwich = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts", fieldCoded: true),
+                                                               item("/tmp/b.ts"),
+                                                               item("/tmp/c.ts", fieldCoded: true)])
+        #expect(sandwich.count == 3)
+        #expect(sandwich[0] == nil)
+        #expect(abs((sandwich[1] ?? -1) - 0.08) < 1e-9)
+        #expect(sandwich[2] == nil)
+        // The written list carries exactly the surviving directives, aligned by entry.
+        let pieces = [URL(fileURLWithPath: "/tmp/a_piece.ts"), URL(fileURLWithPath: "/tmp/b_piece.ts")]
+        #expect(ExportEngine.concatListContents(pieces: pieces, durations: leading)
+                == "file '/tmp/a_piece.ts'\nfile '/tmp/b_piece.ts'\n")
+        #expect(ExportEngine.concatListContents(pieces: pieces, durations: trailing)
+                == "file '/tmp/a_piece.ts'\nduration 0.08\nfile '/tmp/b_piece.ts'\n")
+    }
+
+    @Test func withoutAFieldCodedPieceTheDirectivesAreUnchanged() {
+        // The seam-closing `clipSpans` directives (issue #6) still flow through — the
+        // first clip pins its exact kept span, the last emits none.
+        let durations = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts"), item("/tmp/b.ts")])
+        #expect(durations.count == 2)
+        #expect(abs((durations[0] ?? -1) - 0.08) < 1e-9)   // pts[2] - pts[0]
+        #expect(durations[1] == nil)
+    }
+
+    // MARK: final outputs keep the container extension
+
+    @Test func plannedOutputsNameTheContainerExtensionForAFieldCodedClip() {
+        // The `.ts` decision is per *piece*; the final files — what the collision guard
+        // compares against the sources — are always the chosen container (a `.ts` piece
+        // is rewrapped on its way there, never placed under a container name it isn't).
+        var settings = OutputSettings(); settings.mode = .separate
+        let items = [item("/tmp/paff.ts", fieldCoded: true), item("/tmp/plain.ts")]
+        let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
+                                                  ext: "mkv", audioCodec: "aac",
+                                                  to: URL(fileURLWithPath: "/tmp/out"))
+        #expect(outputs.count == 2)
+        #expect(outputs.allSatisfy { $0.url.pathExtension == "mkv" })
+    }
+}

@@ -298,6 +298,40 @@ struct ClipDoctorEngineTests {
         #expect(encoder == BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt"))
     }
 
+    /// `repair`'s planning flow end-to-end for a damaged field-coded clip (the #96
+    /// regression pin): the whole-file `videoTreatment` with the `.repair` purpose still
+    /// yields the interleaved copy/repair segments — the copy-only invariant is an
+    /// `.export`-purpose rule and must not throw here — and `fieldCodedRepair` collapses
+    /// them to the copy-head + re-encode-to-EOF shape (issue #54, ADR-0022).
+    @Test func repairPurposeTreatmentFeedsTheFieldCodedCollapse() throws {
+        let index = keyframeGridIndex()
+        let zone = DamageZone(start: 30.0, end: 31.0, affectsVideo: true)
+        var clip = Clip(bookmark: Data(), displayName: "race")
+        clip.video = VideoProperties(
+            codec: "h264", profile: "High", level: "40", width: 1920, height: 1080,
+            frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: "tt",
+            sampleAspectRatio: "1:1", colorPrimaries: nil, colorTransfer: nil,
+            colorRange: nil)
+        clip.fieldCoded = true
+        clip.damageZones = [zone]
+        let treatment = try ExportPlanner.videoTreatment(
+            for: clip, target: nil, index: index, containerStart: 0, purpose: .repair)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments.contains { $0.kind == .reEncode && $0.damage == [zone] })
+        let (plan, encoder) = ClipDoctorEngine.fieldCodedRepair(
+            from: segments, index: index, zones: [zone], fieldOrder: "tt")
+        #expect(plan.count == 2)
+        #expect(plan[0].kind == .copy)
+        #expect(plan[0].range.lowerBound == 0)
+        #expect(plan[1].kind == .reEncode)
+        #expect(plan[1].range.upperBound == index.count)   // the tail runs to EOF
+        #expect(plan[1].damage == [zone])
+        #expect(encoder == BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt"))
+    }
+
     // MARK: - H.264-only field-coded guard (issue #57)
 
     /// The damage-to-EOF tail is always MBAFF H.264, so only an H.264 field-coded source can

@@ -33,6 +33,14 @@ struct ExportItem {
     /// segments too, so a clean kept window still chokes on damage elsewhere (the
     /// 1844 control-window failure, issue #47).
     var sourceDamaged: Bool = false
+    /// Whether this clip is on the field-coded copy-cut route (issue #96): a confirmed
+    /// field-coded (PAFF) H.264 source (`FieldCodedSupport.requiresCopyOnlyCuts`). When
+    /// true the planner has already enforced that `segments` are **copy only**
+    /// (`ExportError.fieldCodedPlanNotCopyOnly`) — the engine may rely on that and must
+    /// use the field-coded execution recipe: the frame index counts *fields*, so any
+    /// duration/frame arithmetic derived from it is 2× off for the whole-frame encoder
+    /// (ADR-0022). `false` for every other clip; nothing reads it on the conform path.
+    var fieldCoded: Bool = false
     var audioStart: Double? = nil
     var audioEnd: Double? = nil
     /// What feeds each of this clip's audio legs, by output track (ADR-0014): the clip's
@@ -86,6 +94,15 @@ enum ExportError: LocalizedError {
     /// user-readable reason rather than routing an unprobed clip (`video == nil`) into
     /// smart render, where the encoder would silently default to libx264 (ADR-0009).
     case clipNotReady(String)
+    /// A field-coded (PAFF) H.264 clip's plan contains a re-encode segment (issue #96).
+    /// The cut editor pre-snaps every mark on such a clip to a copy-valid boundary
+    /// (`CopyCutSnapper`), so its plan is copy-only *by construction* — a re-encode
+    /// segment here can only be a programming error (stale points marked before the
+    /// clip was known field-coded, a snapper bug, or a path that bypassed snapping),
+    /// never a fallback to take: re-encoding PAFF is structurally broken, the
+    /// field-counting frame index and the whole-frame encoder disagree by 2×
+    /// (ADR-0022). The planner refuses loudly instead of silently producing it.
+    case fieldCodedPlanNotCopyOnly(clip: String)
 
     var errorDescription: String? {
         switch self {
@@ -100,6 +117,8 @@ enum ExportError: LocalizedError {
             return "The export would overwrite the source of “\(clip)” at \(path); the original would be destroyed. Choose a different destination."
         case .cancelled: return "The export was cancelled."
         case .clipNotReady(let reason): return reason
+        case .fieldCodedPlanNotCopyOnly(let clip):
+            return "Internal error: the cut points of “\(clip)” don’t sit on clean copy boundaries, but the clip is field-coded and can only be cut by pure stream copy. Re-mark the in and out points in the cut editor and export again."
         }
     }
 }
@@ -154,6 +173,62 @@ enum ExportEngine {
     /// keyframe (it only honours explicit cut points).
     static func needsCut(_ plan: SegmentPlan) -> Bool {
         plan.inSegmentTime != nil || plan.outSegmentTime != nil
+    }
+
+    /// Whether a plan is the whole-clip single-copy keep: one copy segment cutting
+    /// neither end (starts at frame 0, no out-cut keyframe). This is the shape whose
+    /// `BoundaryReencodeEngine.copySegmentPlan` carries no segment time at either end —
+    /// the nil-cut plan `needsCut` rejects — so the clip goes through the plain remux
+    /// (`remuxArguments`), never the segment muxer. The single owner of that remux
+    /// criterion; `pieceExtension` keys its whole-clip exception off it.
+    static func isWholeClipCopy(_ plan: [PlannedSegment]) -> Bool {
+        plan.count == 1 && plan[0].kind == .copy
+            && plan[0].range.lowerBound == 0 && plan[0].outCutKeyframe == nil
+    }
+
+    /// The container one clip's intermediate video **pieces** are produced in — the
+    /// per-item rule, i.e. the clip alone in its own join (a `.separate` item, or a
+    /// single-clip `.connect`; a multi-clip join layers `pieceExtensions` on top):
+    /// normally the output container itself, so pieces feed the concat/final mux without
+    /// a rewrap. A **field-coded (PAFF) clip that is actually cut** is the exception
+    /// (issue #96): its pieces are always `.ts`, whatever the output container.
+    /// Matroska stores no independent DTS, so an MKV piece of a field-coded cut
+    /// collapses the B-field PTS dips into duplicate timestamps when the concat demuxer
+    /// regenerates DTS from PTS; TS pieces carry the real DTS, and TS pieces feeding
+    /// TS, MKV *and* MP4 final outputs were all validated clean on the real capture in
+    /// the shell. The `.ts` piece also sidesteps the MP4 `-segment_format_options
+    /// video_track_timescale` pin (#18/#24) by construction — every timescale flag
+    /// downstream is gated on the *piece* extension, and a TS piece imposes the
+    /// container's fixed 1/90000 timebase.
+    ///
+    /// A field-coded clip **kept whole** (`isWholeClipCopy`) stays on today's
+    /// plain-remux path in the output container, byte-for-byte unchanged: no cut means
+    /// no piece boundary for MKV's DTS regeneration to collapse.
+    static func pieceExtension(container: String, fieldCoded: Bool, plan: [PlannedSegment]) -> String {
+        guard fieldCoded else { return container }
+        return isWholeClipCopy(plan) ? container : "ts"
+    }
+
+    /// The piece container for **every** item of one export, aligned by index. `.separate`
+    /// items are each their own single-clip join, so the per-item `pieceExtension` rule
+    /// applies unchanged — as it does to a single-clip `.connect`. A multi-clip `.connect`
+    /// join containing any field-coded item instead produces **every** video piece in the
+    /// join as `.ts` — other clips' cut pieces, whole-clip remuxes, and conform re-encodes
+    /// included — because the concat demuxer misplaces a mixed-container list outright
+    /// (issue #96 shell de-risk on the real capture): an MKV piece next to a `.ts` piece
+    /// put the following clip ~90× late (the MKV piece's duration re-read in the TS
+    /// piece's 1/90000 timebase — a 39.9 s piece pushed its neighbour to ~3593 s), and the
+    /// reversed order collapsed the MKV piece's 998 frames onto duplicate PTS. All-`.ts`
+    /// lists fed TS, MKV and MP4 finals cleanly — exact packet sums, single-field seam
+    /// steps, strictly monotonic DTS where the container carries DTS — in both clip
+    /// orders, for cut pieces and whole-keep remux pieces alike.
+    static func pieceExtensions(container: String, mode: OutputMode, items: [ExportItem]) -> [String] {
+        if mode == .connect, items.count > 1, items.contains(where: \.fieldCoded) {
+            return Array(repeating: "ts", count: items.count)
+        }
+        return items.map {
+            pieceExtension(container: container, fieldCoded: $0.fieldCoded, plan: $0.segments)
+        }
     }
 
     /// The segment the wanted piece lands in: index 0 when the clip starts at its own
@@ -339,6 +414,32 @@ enum ExportEngine {
     static func clipSpans(items: [ExportItem]) -> [Double?] {
         items.enumerated().map { i, item in
             i < items.count - 1 ? clipSpan(item) : nil
+        }
+    }
+
+    /// The `duration` directives the **cross-clip** concat list actually carries:
+    /// `clipSpans`, **per entry**, with a field-coded item's entry nil'd (issue #96).
+    /// Dropping the whole list for one field-coded item would reopen the issue-#6 /
+    /// ADR-0008 seam gap for every *other* clip in the join — the directive exists
+    /// precisely because a container-native piece can report a start_time-inflated
+    /// duration — so non-field-coded entries keep theirs unconditionally. In a
+    /// field-coded join every piece is `.ts` anyway (`pieceExtensions`), where the
+    /// progressive entry's directive is a byte-identical no-op (measured in the shell:
+    /// list with and without it produced identical MKV finals) because a cut `.ts`
+    /// piece self-reports exactly its true content span.
+    ///
+    /// A field-coded entry emits none. Its *cut* piece's directive would equally be a
+    /// no-op (the field index's `pts[hi] − pts[lo]` matches the mpegts-reported
+    /// duration exactly — 60.52 s over 3026 fields on the real capture), but its
+    /// *whole-keep remux* piece's span is the mean-interval estimate, which
+    /// under-states a ragged-tail broadcast capture's true content span; the too-short
+    /// directive then overlapped the next clip into the tail (a duplicate video PTS in
+    /// the MKV final, measured on the real capture), while the directive-free entry
+    /// seamed at exactly one frame step. The mpegts-reported duration is the accurate
+    /// value for every `.ts` piece, so the demuxer's own placement is the proven form.
+    static func crossClipDurations(items: [ExportItem]) -> [Double?] {
+        zip(clipSpans(items: items), items).map { span, item in
+            item.fieldCoded ? nil : span
         }
     }
 
@@ -748,8 +849,14 @@ enum ExportEngine {
         // is handled by the pts-refill bitstream filter (issue #2).
 
         let ffmpeg = try FFTools.ffmpegURL()
-        // Video pieces always use the container extension; an audio-only output has no video
-        // pieces and is written as an audio-elementary file (ADR-0010 / #1).
+        // Video pieces use the container extension — except a field-coded clip's cut
+        // pieces, and every piece of a multi-clip connect join that contains one, which
+        // are all `.ts` whatever the container (`pieceExtensions`, issue #96); an
+        // audio-only output has no video pieces and is written as an audio-elementary
+        // file (ADR-0010 / #1). The *final* outputs — what `plannedOutputs` names and
+        // the collision guard checks — are always the container extension: a `.ts`
+        // piece is rewrapped on its way there, never placed under a container name it
+        // isn't.
         let ext = AudioCodecPolicy.outputExtension(type: settings.type, container: settings.container, audioEncoder: audioCodec)
         // Refuse before touching disk if any planned output equals a source file (issue
         // #77): `-y` and `placeFile`'s remove-then-move would truncate the source before
@@ -794,6 +901,13 @@ enum ExportEngine {
                     ffmpeg: ffmpeg, sources: items.map(\.source), work: work)
                 exportTimescale = exportWideTimescale(probes: probes)
             }
+            // One piece container per item (issue #96): per-item `pieceExtension` for
+            // `.separate` and single-clip joins; all-`.ts` for a multi-clip connect
+            // join containing a field-coded item — a mixed-container concat list is
+            // misplaced outright by the demuxer (see `pieceExtensions`). The engine's
+            // internal MP4 timescale pins (#18/#24) key off the *piece* extension, so
+            // they never reach a `.ts` piece.
+            let pieceExts = pieceExtensions(container: ext, mode: settings.mode, items: items)
             for (i, item) in items.enumerated() {
                 let withinClip: @Sendable (Double) -> Void = { w in
                     progress(ExportProgress.clipFraction(clipIndex: i, clipCount: items.count, withinClip: w))
@@ -801,15 +915,21 @@ enum ExportEngine {
                 if let conform = item.conform {
                     videoPieces.append(try await ConformEngine.produceConformedPiece(
                         ffmpeg, source: item.source, conform: conform,
-                        start: item.audioStart, end: item.audioEnd, work: work, ext: ext, clipIndex: i,
+                        start: item.audioStart, end: item.audioEnd, work: work,
+                        ext: pieceExts[i], clipIndex: i,
                         trackTimescale: exportTimescale, onProgress: withinClip))
                 } else {
+                    // The planner already guarantees a field-coded item's plan is
+                    // copy-only (`fieldCodedPlanNotCopyOnly`), so `item.fieldCoded` is
+                    // passed through as the gated value — never re-derived from the
+                    // codec here.
                     videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
                         ffmpeg, source: item.source, plan: item.segments, index: item.index,
-                        encoder: item.encoder, work: work, ext: ext, clipIndex: i,
+                        encoder: item.encoder, work: work, ext: pieceExts[i], clipIndex: i,
                         codec: item.codec, trackTimescale: exportTimescale,
                         containerStart: item.containerStart, frameRate: item.frameRate,
                         sourceDamaged: item.sourceDamaged,
+                        fieldCoded: item.fieldCoded,
                         onProgress: withinClip))
                 }
                 progress(0.7 * Double(i + 1) / Double(items.count))
@@ -828,7 +948,15 @@ enum ExportEngine {
             var videoInput: URL? = nil
             if wantsVideo {
                 if videoPieces.count == 1 {
-                    videoInput = videoPieces[0]
+                    // A lone piece feeds the final mux directly: with audio the mux
+                    // itself rewrites it into the chosen container; video-only goes
+                    // through the shared rewrap funnel (`containerReadyPiece`), which
+                    // is the plain move for a container-native piece and the one-entry
+                    // concat for a field-coded clip's `.ts` piece (issue #96).
+                    videoInput = wantsAudio ? videoPieces[0]
+                        : try await containerReadyPiece(videoPieces[0], ext: ext, item: items[0],
+                                                        ffmpeg: ffmpeg, work: work,
+                                                        name: "joined_video")
                 } else {
                     let joined = work.appendingPathComponent("joined_video.\(ext)")
                     try await concatVideo(ffmpeg, pieces: videoPieces, items: items, to: joined, work: work)
@@ -863,7 +991,12 @@ enum ExportEngine {
                             withinMux: ExportProgress.runFraction(outTime: t, expectedSeconds: keptDuration(item))))
                     }
                 } else {
-                    try placeFile(videoInput!, at: out)
+                    // Video-only: the placed file must already be the chosen container,
+                    // so the piece goes through the same rewrap funnel as connect mode.
+                    try placeFile(try await containerReadyPiece(videoInput!, ext: ext, item: item,
+                                                                ffmpeg: ffmpeg, work: work,
+                                                                name: "rewrapped_\(i)"),
+                                  at: out)
                 }
                 currentOutput = nil
                 finishedFiles = i + 1
@@ -880,9 +1013,24 @@ enum ExportEngine {
         progress(1.0)
     }
 
+    /// The one rewrap funnel: a produced video piece that is placed (or fed onward)
+    /// without an audio mux must already *be* the chosen container. A piece whose
+    /// extension mismatches — a field-coded clip's `.ts` piece (issue #96) — is
+    /// rewrapped through the same one-entry concat the multi-piece join uses (`.ts`
+    /// pieces feeding TS/MKV/MP4 finals is the shell-validated recipe); a piece already
+    /// in the container passes through untouched, keeping today's plain move
+    /// byte-identical.
+    private static func containerReadyPiece(_ piece: URL, ext: String, item: ExportItem,
+                                            ffmpeg: URL, work: URL, name: String) async throws -> URL {
+        guard piece.pathExtension.lowercased() != ext.lowercased() else { return piece }
+        let rewrapped = work.appendingPathComponent("\(name).\(ext)")
+        try await concatVideo(ffmpeg, pieces: [piece], items: [item], to: rewrapped, work: work)
+        return rewrapped
+    }
+
     private static func concatVideo(_ ffmpeg: URL, pieces: [URL], items: [ExportItem], to output: URL, work: URL) async throws {
         let listFile = work.appendingPathComponent("concat-\(UUID().uuidString).txt")
-        try concatListContents(pieces: pieces, durations: clipSpans(items: items))
+        try concatListContents(pieces: pieces, durations: crossClipDurations(items: items))
             .write(to: listFile, atomically: true, encoding: .utf8)
         try await runFFmpeg(ffmpeg, concatArguments(listFile: listFile, output: output), failure: ExportError.concatFailed)
     }

@@ -274,9 +274,16 @@ struct ReconcileInOutTests {
         return (d, c.id)
     }
 
+    /// A keyframe-less progressive-shaped index — these clips carry no `fieldCoded`,
+    /// so only the range check (issue #74) applies.
+    private func plainIndex(count: Int) -> FrameIndex {
+        FrameIndex(pts: (0..<count).map { Double($0) / 25 },
+                   keyframeFlags: Array(repeating: false, count: count))
+    }
+
     @Test func staleOutPointResetsBothAndQueuesTheNotice() {
         let (d, id) = doc(inPoint: 10, outPoint: 500)
-        d.reconcileInOut(id: id, frameCount: 100)
+        d.reconcileInOut(id: id, index: plainIndex(count: 100))
         #expect(d.project.clips[0].inPoint == nil)
         #expect(d.project.clips[0].outPoint == nil)
         #expect(d.inOutResets.contains(id))
@@ -284,7 +291,7 @@ struct ReconcileInOutTests {
 
     @Test func fittingPointsAreKeptAndNothingIsQueued() {
         let (d, id) = doc(inPoint: 10, outPoint: 20)
-        d.reconcileInOut(id: id, frameCount: 100)
+        d.reconcileInOut(id: id, index: plainIndex(count: 100))
         #expect(d.project.clips[0].inPoint == 10)
         #expect(d.project.clips[0].outPoint == 20)
         #expect(d.inOutResets.isEmpty)
@@ -292,7 +299,7 @@ struct ReconcileInOutTests {
 
     @Test func nilPointsAreLeftAloneAndNotQueued() {
         let (d, id) = doc(inPoint: nil, outPoint: nil)
-        d.reconcileInOut(id: id, frameCount: 100)
+        d.reconcileInOut(id: id, index: plainIndex(count: 100))
         #expect(d.project.clips[0].inPoint == nil)
         #expect(d.project.clips[0].outPoint == nil)
         #expect(d.inOutResets.isEmpty)
@@ -300,10 +307,99 @@ struct ReconcileInOutTests {
 
     @Test func aClipIsNeverQueuedTwice() {
         let (d, id) = doc(inPoint: 10, outPoint: 500)
-        d.reconcileInOut(id: id, frameCount: 100)
+        d.reconcileInOut(id: id, index: plainIndex(count: 100))
         // A second fresh build (e.g. export after reopen already reset) must not re-queue.
-        d.reconcileInOut(id: id, frameCount: 100)
+        d.reconcileInOut(id: id, index: plainIndex(count: 100))
         #expect(d.inOutResets.filter { $0 == id }.count == 1)
+    }
+}
+
+/// The copy-cut re-validation `reconcileInOut` gained for issue #96: whenever a fresh
+/// index lands for a clip on the field-coded copy-cut route (confirmed field-coded
+/// H.264), stored marks re-snap to copy-valid boundaries — covering pre-#96 saves,
+/// marks set while the field-coded probe was still running (the probe's completion
+/// funnels through here), relink's re-probe, and split-derived pieces (just clips with
+/// in/out). Progressive, still-probing (`fieldCoded == nil`), and non-H.264 clips are
+/// untouched, and already-snapped marks come back identical with no notice.
+@MainActor
+struct ReconcileCopyCutSnapTests {
+    /// A 16-frame closed-GOP shape: keyframes at 0 and 8, `pts == dts` → both have
+    /// leading count 0. In-point candidates {0, 8}; out-point candidates {7}
+    /// (k=8 → 8−0−1; the file-start keyframe at 0 ends nothing).
+    private func closedGopIndex() -> FrameIndex {
+        var flags = Array(repeating: false, count: 16)
+        flags[0] = true
+        flags[8] = true
+        return FrameIndex(pts: (0..<16).map { Double($0) / 25 }, keyframeFlags: flags)
+    }
+
+    private func doc(inPoint: Int?, outPoint: Int?, fieldCoded: Bool?, codec: String = "h264")
+        -> (ProjectDocument, Clip.ID) {
+        let d = ProjectDocument()
+        var c = Clip(bookmark: Data(), displayName: "a.ts")
+        c.video = VideoProperties(codec: codec, width: 720, height: 576,
+                                  frameRate: "25/1", pixelFormat: "yuv420p")
+        c.fieldCoded = fieldCoded
+        c.inPoint = inPoint
+        c.outPoint = outPoint
+        d.project.clips = [c]
+        return (d, c.id)
+    }
+
+    @Test func rawMidGopMarksResnapAndQueueTheNotice() {
+        let (d, id) = doc(inPoint: 1, outPoint: 5, fieldCoded: true)
+        d.reconcileInOut(id: id, index: closedGopIndex())
+        #expect(d.project.clips[0].inPoint == 0)  // nearest count-0 keyframe to 1
+        #expect(d.project.clips[0].outPoint == 7) // the only out candidate (8−0−1)
+        #expect(d.inOutResets.contains(id))
+    }
+
+    @Test func aCrossedSnappedPairResetsBothAndQueuesTheNotice() {
+        // in 7 → 8 (nearest count-0 keyframe), out 5 → 7: the snapped pair crosses.
+        let (d, id) = doc(inPoint: 7, outPoint: 5, fieldCoded: true)
+        d.reconcileInOut(id: id, index: closedGopIndex())
+        #expect(d.project.clips[0].inPoint == nil)
+        #expect(d.project.clips[0].outPoint == nil)
+        #expect(d.inOutResets.contains(id))
+    }
+
+    @Test func anUnsnappablePointResetsBothAndQueuesTheNotice() {
+        // No keyframes at all → no valid copy boundary exists anywhere.
+        let (d, id) = doc(inPoint: 2, outPoint: 9, fieldCoded: true)
+        let headless = FrameIndex(pts: (0..<16).map { Double($0) / 25 },
+                                  keyframeFlags: Array(repeating: false, count: 16))
+        d.reconcileInOut(id: id, index: headless)
+        #expect(d.project.clips[0].inPoint == nil)
+        #expect(d.project.clips[0].outPoint == nil)
+        #expect(d.inOutResets.contains(id))
+    }
+
+    @Test func alreadySnappedMarksAreLeftIdenticalWithNoNotice() {
+        let (d, id) = doc(inPoint: 8, outPoint: nil, fieldCoded: true)
+        d.reconcileInOut(id: id, index: closedGopIndex())
+        #expect(d.project.clips[0].inPoint == 8)
+        #expect(d.project.clips[0].outPoint == nil)
+        #expect(d.inOutResets.isEmpty)
+    }
+
+    @Test func progressiveStillProbingAndNonH264ClipsAreUntouched() {
+        let shapes: [(Bool?, String)] = [(false, "h264"), (nil, "h264"), (true, "hevc")]
+        for (fieldCoded, codec) in shapes {
+            let (d, id) = doc(inPoint: 1, outPoint: 5, fieldCoded: fieldCoded, codec: codec)
+            d.reconcileInOut(id: id, index: closedGopIndex())
+            #expect(d.project.clips[0].inPoint == 1)
+            #expect(d.project.clips[0].outPoint == 5)
+            #expect(!d.inOutResets.contains(id))
+        }
+    }
+
+    @Test func outOfRangePointsOnACopyCutClipStillResetToWholeClip() {
+        // The range check (issue #74) runs first; the snap of the resulting nils is a no-op.
+        let (d, id) = doc(inPoint: 1, outPoint: 500, fieldCoded: true)
+        d.reconcileInOut(id: id, index: closedGopIndex())
+        #expect(d.project.clips[0].inPoint == nil)
+        #expect(d.project.clips[0].outPoint == nil)
+        #expect(d.inOutResets.contains(id))
     }
 }
 

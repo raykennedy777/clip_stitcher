@@ -71,6 +71,11 @@ targets:
       Release: Config/Signing.xcconfig
     sources:
       - path: Tests
+        excludes:
+          # The gitignored media fixtures (ADR-0023) must never be copied into the test
+          # bundle as resources: tests locate them via #filePath, and a multi-GB cached
+          # slice would otherwise be re-copied on every test build.
+          - "Fixtures/**"
     dependencies:
       - target: ClipStitcher
     settings:

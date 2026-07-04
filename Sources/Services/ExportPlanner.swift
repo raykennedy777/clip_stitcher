@@ -31,6 +31,22 @@ enum ExportPlanner {
         case conform(ConformEngine.VideoConform)
     }
 
+    /// What a `videoTreatment` plan is for (issue #96) — the field-coded copy-cut route
+    /// treats the two differently; everywhere else the purposes plan identically.
+    enum PlanPurpose {
+        /// The join/cut export. On the copy-cut route (`FieldCodedSupport.requiresCopyOnlyCuts`)
+        /// the plan must be copy segments only: damage copies through **verbatim** — copy-only
+        /// cutting doesn't repair; the workflow stays "Clip Doctor first if damage is inside
+        /// the kept range" — and a `.reEncode` segment (an unsnapped cut edge) is refused
+        /// (`ExportError.fieldCodedPlanNotCopyOnly`).
+        case export
+        /// Clip Doctor's whole-file repair pass. Damage zones plan their repaired `.reEncode`
+        /// segments as always and the copy-only invariant does not apply — on a field-coded
+        /// clip those segments are exactly what `ClipDoctorEngine.fieldCodedRepair` collapses
+        /// into the copy-head + MBAFF-tail plan (issue #54, ADR-0022).
+        case repair
+    }
+
     /// One clip's video treatment. A clip that doesn't match the target is conformed:
     /// a full re-encode of its kept range to the target spec (ADR-0011). A matching
     /// clip — or any clip when there is no target video spec or no probed clip video
@@ -41,9 +57,12 @@ enum ExportPlanner {
     ///
     /// `containerStart` maps the clip's recorded damage zones (issue #45) onto index
     /// frames — each zone in range forces a repaired re-encode segment (issue #47).
-    /// A clip with no zones plans byte-identically to before repair existed.
+    /// A clip with no zones plans byte-identically to before repair existed. Exception:
+    /// an `.export` plan on the field-coded copy-cut route withholds the zones — damage
+    /// copies through verbatim there (issue #96; see `PlanPurpose`).
     static func videoTreatment(for clip: Clip, target: Clip?, index: FrameIndex,
-                               containerStart: Double = 0) throws -> VideoTreatment {
+                               containerStart: Double = 0,
+                               purpose: PlanPurpose = .export) throws -> VideoTreatment {
         // No probed video means the clip is still importing (or its import failed):
         // the smart-render path below reads `clip.video?.codec` and would default the
         // encoder to libx264, silently re-encoding an HEVC/MPEG-2 source wrong (issue
@@ -63,10 +82,19 @@ enum ExportPlanner {
         }
         let leadingCounts = CopySafeBoundaryDetector.leadingPictureCounts(
             keyframeFlags: index.keyframeFlags, dts: index.dts)
+        let copyCutRoute = FieldCodedSupport.requiresCopyOnlyCuts(
+            fieldCoded: clip.fieldCoded, codec: clip.video?.codec)
         // Repair needs the source rate (the fps fill and slot budget); a clip whose
         // rate doesn't parse plans as before — the verify gates still police the output.
+        // On the copy-cut route an `.export` plan withholds the zones (issue #96): damage
+        // copies through verbatim — a repaired `.reEncode` segment would be a structurally
+        // broken PAFF re-encode (ADR-0022), the copy pieces are decode-gated downstream by
+        // exit code, and Clip Doctor is the repair path. Only a `.repair` plan (the
+        // whole-file pass `fieldCodedRepair` collapses) feeds the zones in.
         let damage: [BoundaryReencodePlanner.DamageSpan]
-        if let zones = clip.damageZones, !zones.isEmpty,
+        if purpose == .export, copyCutRoute {
+            damage = []
+        } else if let zones = clip.damageZones, !zones.isEmpty,
            let rate = clip.video?.frameRate, ConformEngine.frameRateValue(rate) != nil {
             damage = BoundaryReencodePlanner.damageSpans(
                 zones: zones, pts: index.pts, dts: index.dts, containerStart: containerStart)
@@ -77,6 +105,19 @@ enum ExportPlanner {
             leadingCounts: leadingCounts, frameCount: index.count,
             inFrame: clip.inPoint, outFrame: clip.outPoint, damage: damage)
         guard !segments.isEmpty else { throw ExportError.invalidPlan }
+        // The field-coded copy-only invariant (issue #96): an `.export` plan on the
+        // copy-cut route (confirmed field-coded H.264 — the same predicate that made the
+        // cut editor snap its marks) must be copy segments only. With damage withheld
+        // above, the snapped marks make the partial-GOP `.reEncode` edges vanish by
+        // construction, so a re-encode segment here is a programming error (an unsnapped
+        // cut edge) — refuse the plan loudly rather than fall through to a structurally
+        // broken PAFF re-encode (ADR-0022). A whole-clip keep (no trims) is a single pure
+        // copy and passes through untouched. A `.repair` plan is exempt: its damage
+        // `.reEncode` segments are deliberate (see `PlanPurpose.repair`).
+        if purpose == .export, copyCutRoute,
+           segments.contains(where: { $0.kind == .reEncode }) {
+            throw ExportError.fieldCodedPlanNotCopyOnly(clip: clip.displayName)
+        }
         // Re-encode args matched to the source so the edges concat cleanly with the
         // copied middle (ADR-0009).
         let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
@@ -155,6 +196,8 @@ enum ExportPlanner {
                               containerStart: input.containerStart,
                               frameRate: clip.video?.frameRate,
                               sourceDamaged: !(clip.damageZones ?? []).isEmpty,
+                              fieldCoded: FieldCodedSupport.requiresCopyOnlyCuts(
+                                fieldCoded: clip.fieldCoded, codec: clip.video?.codec),
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources,
                               audioMixFilters: input.audioMixFilters,

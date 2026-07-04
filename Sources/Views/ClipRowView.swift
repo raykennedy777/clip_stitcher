@@ -174,15 +174,18 @@ struct ClipRowView: View {
     }
 
     /// The field-coded (PAFF) warning (issue #46): the source stores two field
-    /// pictures per displayed frame, so the app's frame numbering — and with it
-    /// frame-accurate cutting and joining — is off by 2× on this file. Clip Doctor can
-    /// still repair it (issue #54, a damage-to-EOF re-encode); only cutting/joining stay out.
+    /// pictures per displayed frame. For H.264 field-coded clips, cutting is supported but
+    /// cut points snap to clean keyframes (slice 5 of issue #96). For other codecs, the app’s
+    /// frame numbering — and with it frame-accurate cutting and joining — is off by 2× on this file.
+    /// Clip Doctor can still repair it (issue #54, a damage-to-EOF re-encode).
     /// Plain language; warn-only, nothing is blocked.
     @ViewBuilder
     private var fieldCodedWarning: some View {
         if clip.fieldCoded == true {
-            Label("This file stores two half-pictures per frame — frame-accurate cutting and joining aren’t supported for it yet (Clip Doctor can still repair it).",
-                  systemImage: "exclamationmark.triangle")
+            let message = FieldCodedSupport.requiresCopyOnlyCuts(fieldCoded: clip.fieldCoded, codec: clip.video?.codec)
+                ? "Cut points snap to the nearest clean keyframe on this clip."
+                : "This file stores two half-pictures per frame — frame-accurate cutting and joining aren’t supported for it yet (Clip Doctor can still repair it)."
+            Label(message, systemImage: "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .lineLimit(2)

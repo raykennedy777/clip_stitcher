@@ -437,16 +437,17 @@ struct SourceView: View {
         return nil
     }
 
-    /// A non-modal, dismissible notice above the timeline when a relink's re-import
-    /// dropped a clip's in/out points because the new (shorter) file no longer fit them
-    /// (issue #74) — the clip now exports whole. Never silent.
+    /// A non-modal, dismissible notice above the timeline when index reconciliation
+    /// adjusted a clip's stored in/out points: reset to whole-clip after a re-import
+    /// landed a shorter file (issue #74), or moved to copy-valid boundaries on a
+    /// field-coded copy-cut clip (issue #96). Never silent.
     @ViewBuilder
     private var inOutResetBanner: some View {
         if let clip = inOutResetClip {
             HStack(spacing: 12) {
                 Image(systemName: "scissors.badge.ellipsis")
                     .foregroundStyle(.orange)
-                Text("The in/out points for “\(clip.displayName)” didn’t fit the relinked file and were reset — it will export whole.")
+                Text("The in/out points for “\(clip.displayName)” couldn’t be kept as saved and were adjusted — review them before exporting.")
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)

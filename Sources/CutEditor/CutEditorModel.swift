@@ -32,6 +32,11 @@ final class CutEditorModel: ObservableObject {
     var onClose: (() -> Void)?
 
     private var index: FrameIndex?
+    /// Per-keyframe leading-picture counts for the loaded index (issue #96), computed
+    /// once in `load()` and reused by every `setIn`/`setOut` call — `CopySafeBoundaryDetector`'s
+    /// pass over DTS needs no extra ffmpeg probe, so caching just avoids repeating the scan.
+    /// Empty (never populated) for a clip that never finished indexing.
+    private var leadingCounts: [Int?] = []
     private var decoder: FrameStreamDecoder?
     private var playTask: Task<Void, Never>?
     private var sceneScanTask: Task<Void, Never>?
@@ -129,6 +134,8 @@ final class CutEditorModel: ObservableObject {
                 width: w, height: h, useHardware: true, windowSize: cacheCap
             )
             keyframes = built.keyframeFlags.enumerated().filter(\.element).map(\.offset)
+            leadingCounts = CopySafeBoundaryDetector.leadingPictureCounts(
+                keyframeFlags: built.keyframeFlags, dts: built.dts)
             prefetcher = KeyframePrefetcher(
                 url: url, index: built, containerStart: containerStartTime,
                 width: w, height: h
@@ -142,6 +149,29 @@ final class CutEditorModel: ObservableObject {
             isIndexing = false
         }
     }
+
+    #if DEBUG
+    /// Test seam (issue #96): installs a frame count and its leading-picture counts
+    /// directly, standing in for `load()`'s real ffmpeg probe (which derives both from
+    /// an ffprobe-built index) so unit tests can drive `setIn`/`setOut`'s copy-cut
+    /// snapping against a known shape without spawning ffprobe on a fixture. Taking
+    /// `leadingCounts` straight — rather than a keyframe/DTS pair run back through
+    /// `CopySafeBoundaryDetector` — lets a test also hand-craft edge-case shapes the
+    /// detector itself would never produce (e.g. to pin down a defensive clamp in the
+    /// consuming code). `keyframeFlags` in the installed index are irrelevant to
+    /// `setIn`/`setOut` and left empty; `pts` are synthetic but monotonic so `seek`'s
+    /// clamping and cache bookkeeping behave normally. Clears `isIndexing` so the
+    /// transport gates read as loaded.
+    func primeForTesting(frameCount: Int, leadingCounts: [Int?]) {
+        let built = FrameIndex(
+            pts: (0..<frameCount).map { Double($0) / 25 },
+            keyframeFlags: Array(repeating: false, count: frameCount))
+        index = built
+        self.frameCount = built.count
+        self.leadingCounts = leadingCounts
+        isIndexing = false
+    }
+    #endif
 
     // MARK: - Navigation
 
@@ -348,14 +378,57 @@ final class CutEditorModel: ObservableObject {
 
     // MARK: - In / out points
 
-    func setIn() {
-        inPoint = currentFrame
-        if let out = outPoint, out < currentFrame { outPoint = nil }
+    /// Whether a mark on this clip routes through copy-cut snapping (issue #96): a
+    /// field-coded source whose codec the snap-safe recipe covers (H.264 — the same gate
+    /// Clip Doctor's field-coded repair uses, `FieldCodedSupport.canRepairFieldCoded`).
+    /// `fieldCoded == nil` (still probing) does not snap — only a *confirmed*
+    /// field-coded clip needs its cut points kept off partial-GOP boundaries. Every other
+    /// clip (progressive, or field-coded in an unsupported codec) marks the raw playhead
+    /// frame exactly as before. Reads the **live** clip from the document (this model's
+    /// `clip` is a snapshot from when the window opened, like `monitoredAudioSource`),
+    /// so a field-coded probe that resolves while the editor is open routes subsequent
+    /// marks through snapping immediately instead of leaving the whole session raw.
+    private var snapsCutPoints: Bool {
+        let live = document?.project.clips.first { $0.id == clip.id } ?? clip
+        return FieldCodedSupport.requiresCopyOnlyCuts(fieldCoded: live.fieldCoded, codec: live.video?.codec)
     }
 
+    /// The frame a mark at the playhead actually lands on: the raw playhead frame, or —
+    /// on the copy-cut route — its position snapped through `snap`. `nil` means snapping
+    /// was required but no valid boundary exists (no candidate in the index, or the
+    /// index isn't built yet — `leadingCounts` still empty): the caller must treat the
+    /// press as a **non-destructive no-op**, leaving any existing points untouched.
+    private func markTarget(_ snap: (Int, [Int?]) -> Int?) -> Int? {
+        snapsCutPoints ? snap(currentFrame, leadingCounts) : currentFrame
+    }
+
+    /// Marks the in point at the playhead — snapped to the nearest copy-safe keyframe
+    /// first on the copy-cut route (issue #96) — then the existing conflict rule (an out
+    /// point now before the new in point is cleared) applied to the *landed* value, so
+    /// the two points can never straddle a partial-GOP edge the copy-cut export can't
+    /// honor. The playhead follows a snap so the marker visibly lands where the cut will
+    /// happen. No valid boundary (`markTarget` nil) → a non-destructive no-op.
+    func setIn() {
+        guard let target = markTarget(CopyCutSnapper.snapInPoint) else { return }
+        inPoint = target
+        if let out = outPoint, out < target { outPoint = nil }
+        if target != currentFrame { seek(to: target) }
+    }
+
+    /// Marks the out point at the playhead — snapped first (issue #96) as `setIn` does —
+    /// then the conflict rule applied to the landed value. A *snapped* boundary landing
+    /// on the clip's own last frame stores nil (open clip end = copy to EOF) rather than
+    /// the explicit index — `ExportPlanner`/the copy-cut planner only give the no-cut
+    /// copy-to-EOF treatment to `outPoint == nil`, so an explicit last-frame value would
+    /// force a needless tail re-encode; the playhead still moves there so the marker
+    /// visibly lands. (A progressive clip storing an explicit last-frame out is
+    /// unchanged pre-#96 behavior.) No valid boundary → a non-destructive no-op that
+    /// leaves an existing out point untouched.
     func setOut() {
-        outPoint = currentFrame
-        if let start = inPoint, start > currentFrame { inPoint = nil }
+        guard let target = markTarget(CopyCutSnapper.snapOutPoint) else { return }
+        outPoint = snapsCutPoints && target == lastFrame ? nil : target
+        if let start = inPoint, start > target { inPoint = nil }
+        if target != currentFrame { seek(to: target) }
     }
 
     // MARK: - Split points (issue #20)
@@ -380,14 +453,24 @@ final class CutEditorModel: ObservableObject {
         splitPoints.subtracting(liveSplitPoints).sorted()
     }
 
-    /// Adds a split point at the playhead, or removes the one already there.
+    /// Adds a split point at the playhead, or removes the one already there. On the
+    /// copy-cut route (issue #96) the split lands snapped on the nearest copy-safe
+    /// keyframe — `CopyCutSnapper.snapInPoint`, because a split at keyframe `k` is valid
+    /// for BOTH resulting pieces: the next piece starts at `k` (a legal copy start), and
+    /// the previous piece's inclusive out `k − 1` equals `k − count − 1` with count 0 (a
+    /// legal copy end). The toggle operates on the *snapped* frame, so pressing split
+    /// while parked mid-GOP near an existing snapped split removes it instead of
+    /// stacking a second point, and the playhead follows the snap (like `setIn`) so the
+    /// marker lands visibly. No valid boundary (`markTarget` nil) → a no-op.
     func toggleSplit() {
         guard canToggleSplit else { return }
-        if splitPoints.contains(currentFrame) {
-            splitPoints.remove(currentFrame)
+        guard let target = markTarget(CopyCutSnapper.snapInPoint) else { return }
+        if splitPoints.contains(target) {
+            splitPoints.remove(target)
         } else {
-            splitPoints.insert(currentFrame)
+            splitPoints.insert(target)
         }
+        if target != currentFrame { seek(to: target) }
     }
 
     /// OK: write the selection back to the document — as one in/out pair, or as a

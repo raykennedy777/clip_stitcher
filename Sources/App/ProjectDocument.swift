@@ -56,9 +56,11 @@ final class ProjectDocument: ReferenceFileDocument {
     /// (issue #54's damage-to-EOF path). A FIFO queue so a burst of imports surfaces one
     /// banner at a time, never a modal pile-up.
     @Published var doctorSuggestions: [Clip.ID] = []
-    /// Clips whose stored in/out points were reset to whole-clip because a relink's
-    /// re-import landed a shorter file the old points no longer fit (issue #74). The
-    /// Source view surfaces a one-time, dismissible notice — the reset is never silent.
+    /// Clips whose stored in/out points were adjusted by index reconciliation: reset to
+    /// whole-clip because a re-import landed a shorter file the old points no longer fit
+    /// (issue #74), or snapped/reset to copy-valid boundaries because a fresh index put
+    /// the clip on the field-coded copy-cut route with raw marks (issue #96). The
+    /// Source view surfaces a one-time, dismissible notice — the change is never silent.
     /// Runtime-only; a FIFO queue matching `doctorSuggestions`.
     @Published var inOutResets: [Clip.ID] = []
     /// True once the user confirmed a cancel (issue #32) — disables the cancel button
@@ -347,23 +349,64 @@ final class ProjectDocument: ReferenceFileDocument {
         return (nil, nil, true)
     }
 
-    /// Reconciles a clip's stored in/out against a freshly-built frame count (issue #74) —
+    /// Re-snaps a copy-cut clip's stored in/out to copy-valid boundaries (issue #96) —
+    /// the second `reconcileInOut` step, run after the range check for a clip on the
+    /// field-coded copy-cut route. Catches marks that predate the route: projects saved
+    /// before #96, marks set while the field-coded probe was still running (nothing
+    /// snapped them, and the probe's completion lands here), a relink's re-probe, and
+    /// split-derived pieces (just clips with in/out). Already-snapped marks come back
+    /// identical with `didChange == false`. A point with no valid boundary at all, or a
+    /// snapped pair that crosses (in > out), resets both to nil (whole clip) — mirroring
+    /// `validatedInOut`'s reset semantics — so an unsnappable mark can never reach
+    /// `ExportPlanner.videoTreatment`'s copy-only gate (`fieldCodedPlanNotCopyOnly`).
+    nonisolated static func snappedInOut(inPoint: Int?, outPoint: Int?, leadingCounts: [Int?])
+        -> (inPoint: Int?, outPoint: Int?, didChange: Bool) {
+        let snappedIn = inPoint.map { CopyCutSnapper.snapInPoint($0, leadingCounts: leadingCounts) }
+        let snappedOut = outPoint.map { CopyCutSnapper.snapOutPoint($0, leadingCounts: leadingCounts) }
+        // `.some(nil)`: the clip HAS that point but no valid boundary exists for it.
+        if snappedIn == .some(nil) || snappedOut == .some(nil) { return (nil, nil, true) }
+        let newIn = snappedIn.flatMap { $0 }
+        let newOut = snappedOut.flatMap { $0 }
+        if let newIn, let newOut, newIn > newOut { return (nil, nil, true) }
+        return (newIn, newOut, newIn != inPoint || newOut != outPoint)
+    }
+
+    /// Reconciles a clip's stored in/out against a freshly-built frame index (issue #74) —
     /// the single altitude every fresh-index path funnels through: import, relink,
-    /// reopen's lazy rebuild, and the export-time rebuild. A source replaced on disk with a
-    /// shorter file while the app was closed lands here on the next index build; stale points
-    /// reset to whole-clip and queue the notice, instead of trapping the planner as a bare
-    /// `invalidPlan`. A no-op when the points still fit (the common case) or are already nil
-    /// (fresh imports). Mutates `project`/`inOutResets`, so it hops to the main actor.
+    /// reopen's lazy rebuild, and the export-time rebuild. Two checks run in order:
+    ///
+    /// 1. The range check (`validatedInOut`) — a source replaced on disk with a shorter
+    ///    file while the app was closed lands here on the next index build; stale points
+    ///    reset to whole-clip instead of trapping the planner as a bare `invalidPlan`.
+    /// 2. For a clip on the field-coded copy-cut route, the copy-cut snap
+    ///    (`snappedInOut`, issue #96) — raw mid-GOP marks (pre-#96 saves, marks set
+    ///    before the probe flipped `fieldCoded` true) move to copy-valid boundaries
+    ///    instead of surfacing as an export-time internal error.
+    ///
+    /// Any change queues the `inOutResets` notice — never silent. A no-op when the
+    /// points already fit (the common case) or are nil (fresh imports); progressive and
+    /// non-H.264 clips only ever take step 1. Mutates `project`/`inOutResets`, so it
+    /// hops to the main actor.
     @MainActor
-    func reconcileInOut(id: Clip.ID, frameCount: Int) {
+    func reconcileInOut(id: Clip.ID, index: FrameIndex) {
         guard let i = project.clips.firstIndex(where: { $0.id == id }) else { return }
+        let clip = project.clips[i]
         let validated = Self.validatedInOut(
-            inPoint: project.clips[i].inPoint, outPoint: project.clips[i].outPoint,
-            frameCount: frameCount)
-        guard validated.didReset else { return }
+            inPoint: clip.inPoint, outPoint: clip.outPoint, frameCount: index.count)
+        var (newIn, newOut) = (validated.inPoint, validated.outPoint)
+        var changed = validated.didReset
+        if FieldCodedSupport.requiresCopyOnlyCuts(fieldCoded: clip.fieldCoded, codec: clip.video?.codec) {
+            let snapped = Self.snappedInOut(
+                inPoint: newIn, outPoint: newOut,
+                leadingCounts: CopySafeBoundaryDetector.leadingPictureCounts(
+                    keyframeFlags: index.keyframeFlags, dts: index.dts))
+            (newIn, newOut) = (snapped.inPoint, snapped.outPoint)
+            changed = changed || snapped.didChange
+        }
+        guard changed else { return }
         var p = project
-        p.clips[i].inPoint = validated.inPoint
-        p.clips[i].outPoint = validated.outPoint
+        p.clips[i].inPoint = newIn
+        p.clips[i].outPoint = newOut
         commit(p)
         if !inOutResets.contains(id) { inOutResets.append(id) }
     }
@@ -603,10 +646,11 @@ final class ProjectDocument: ReferenceFileDocument {
         let built = try await FrameIndexer.buildIndex(url: url)
         frameIndexCache[clip.id] = built
         // A freshly-built index is the moment to reconcile stored in/out against the real
-        // file (issue #74): reopen's lazy rebuild and the export-time rebuild both land
+        // file (issues #74/#96): reopen's lazy rebuild and the export-time rebuild both land
         // here, not just import — a source shortened on disk while closed resets to
-        // whole-clip and surfaces the notice, rather than trapping the planner.
-        reconcileInOut(id: clip.id, frameCount: built.count)
+        // whole-clip, and a copy-cut clip's raw pre-#96 marks re-snap, each surfacing
+        // the notice rather than trapping the planner.
+        reconcileInOut(id: clip.id, index: built)
         return built
     }
 
@@ -941,11 +985,13 @@ final class ProjectDocument: ReferenceFileDocument {
                     frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
                 commit(p)
             }
-            // Now the new frame count is known, drop any stored in/out that no longer fits
-            // (issue #74) — the shared reconciliation every fresh-index path funnels through
-            // (relink to a shorter file leaves stale points that would trap the planner).
-            // Fresh imports carry nil in/out, so this is a no-op for them.
-            reconcileInOut(id: id, frameCount: index.count)
+            // Now the new index (and the fieldCoded verdict just committed above) is
+            // known, reconcile any stored in/out through the shared funnel (issues
+            // #74/#96): drop points that no longer fit (relink to a shorter file), and
+            // re-snap raw marks on a clip the probe just confirmed field-coded (marks
+            // set while `fieldCoded == nil` never snapped — this is where they catch
+            // up). Fresh imports carry nil in/out, so this is a no-op for them.
+            reconcileInOut(id: id, index: index)
             // Damage detection (issue #45): cluster the demux anomalies, then a few
             // bounded seek-anchored confirm decodes around them — zero decodes on a
             // clean file, never a from-start full decode. Failures degrade to "none

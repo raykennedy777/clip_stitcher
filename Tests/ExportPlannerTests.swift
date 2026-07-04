@@ -540,4 +540,183 @@ struct ExportPlannerTests {
         #expect(ExportPlanner.reencodeDominanceWarning(shares: half) == nil)
         #expect(ExportPlanner.reencodeDominanceWarning(shares: []) == nil)
     }
+
+    // MARK: field-coded copy-only invariant (issue #96)
+
+    private func fieldCodedClip(codec: String = "h264",
+                                inPoint: Int? = nil, outPoint: Int? = nil) -> Clip {
+        var c = clip(video: video(codec: codec), inPoint: inPoint, outPoint: outPoint)
+        c.fieldCoded = true
+        return c
+    }
+
+    /// On the 8-frame index (count-0 keyframes at 0 and 4, dts = pts) the copy-valid
+    /// marks are in ∈ {0, 4} and out ∈ {3} (or nil = EOF) — exactly what the cut
+    /// editor's snapping produces (`CopyCutSnapper`). A field-coded H.264 clip cut on
+    /// those boundaries plans copy segments only and passes the invariant.
+    @Test func fieldCodedClipWithSnappedCutsPlansCopyOnly() throws {
+        let headKeep = try ExportPlanner.videoTreatment(
+            for: fieldCodedClip(inPoint: 0, outPoint: 3), target: nil, index: index)
+        guard case .smartRender(let headSegments, _) = headKeep else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(headSegments == [PlannedSegment(kind: .copy, range: 0..<4, outCutKeyframe: 4)])
+
+        let tailKeep = try ExportPlanner.videoTreatment(
+            for: fieldCodedClip(inPoint: 4), target: nil, index: index)
+        guard case .smartRender(let tailSegments, _) = tailKeep else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(tailSegments == [PlannedSegment(kind: .copy, range: 4..<8)])
+    }
+
+    /// A mid-GOP out point on a field-coded H.264 clip would need a `.reEncode` edge —
+    /// on this clip that can only be a programming error (the editor snaps every mark;
+    /// re-encoding PAFF is structurally broken, ADR-0022), so the planner refuses with
+    /// `fieldCodedPlanNotCopyOnly` instead of silently planning the re-encode.
+    @Test func fieldCodedMidGOPCutIsAProgrammingErrorNotAReencode() {
+        do {
+            _ = try ExportPlanner.videoTreatment(
+                for: fieldCodedClip(inPoint: 0, outPoint: 5), target: nil, index: index)
+            Issue.record("expected the copy-only invariant to refuse the plan")
+        } catch let error as ExportError {
+            guard case .fieldCodedPlanNotCopyOnly = error else {
+                Issue.record("expected fieldCodedPlanNotCopyOnly, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("expected ExportError, got \(error)")
+        }
+    }
+
+    /// A progressive clip is untouched by the invariant: the same mid-GOP cut still
+    /// plans its partial-GOP re-encode edge exactly as before (ADR-0009).
+    @Test func progressiveMidGOPCutStillPlansReencodeEdges() throws {
+        let treatment = try ExportPlanner.videoTreatment(
+            for: clip(video: video(), inPoint: 2), target: nil, index: index)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [
+            PlannedSegment(kind: .reEncode, range: 2..<4),
+            PlannedSegment(kind: .copy, range: 4..<8),
+        ])
+    }
+
+    /// A field-coded clip in a codec the copy-cut route doesn't cover (non-H.264 — the
+    /// shared `FieldCodedSupport` gate) keeps today's warn-only behavior: the source row
+    /// warns, the editor doesn't snap, and the planner still plans re-encode edges for
+    /// its mid-GOP cuts — the invariant never fires for it.
+    @Test func fieldCodedNonH264KeepsTodaysReencodeEdges() throws {
+        let treatment = try ExportPlanner.videoTreatment(
+            for: fieldCodedClip(codec: "mpeg2video", inPoint: 2), target: nil, index: index)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [
+            PlannedSegment(kind: .reEncode, range: 2..<4),
+            PlannedSegment(kind: .copy, range: 4..<8),
+        ])
+    }
+
+    /// A field-coded clip exported whole (no trims) is a single pure copy — the
+    /// plain-remux path — and must sail through the invariant unchanged.
+    @Test func fieldCodedWholeClipKeepStaysAPureCopy() throws {
+        let treatment = try ExportPlanner.videoTreatment(
+            for: fieldCodedClip(), target: nil, index: index)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [PlannedSegment(kind: .copy, range: 0..<8)])
+    }
+
+    /// A field-coded H.264 clip with the interior zone from the repair tests recorded —
+    /// on `longIndex` (keyframes every 25) the zone spans frames 40–45.
+    private func damagedFieldCodedClip(inPoint: Int? = nil, outPoint: Int? = nil) -> Clip {
+        var c = fieldCodedClip(inPoint: inPoint, outPoint: outPoint)
+        c.damageZones = [DamageZone(start: 1.6, end: 1.8, affectsVideo: true)]
+        return c
+    }
+
+    /// Damage on the copy-cut route copies through **verbatim** (issue #96): an `.export`
+    /// plan never repairs a field-coded H.264 clip — a repaired `.reEncode` segment would
+    /// be a structurally broken PAFF re-encode (ADR-0022) — so recorded zones must not
+    /// force repair segments (which would trip the invariant and dead-end the export with
+    /// a re-mark suggestion that can't help). The workflow is Clip Doctor first; the
+    /// whole-clip keep stays a single pure copy.
+    @Test func fieldCodedDamagedClipExportsItsDamageVerbatim() throws {
+        let treatment = try ExportPlanner.videoTreatment(
+            for: damagedFieldCodedClip(), target: nil, index: longIndex, containerStart: 0)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [PlannedSegment(kind: .copy, range: 0..<100)])
+    }
+
+    /// Snapped cuts on a damaged copy-cut clip still plan copy-only: in 25 / out 49 are
+    /// copy-valid marks on `longIndex` (exactly what `CopyCutSnapper` produces), the zone
+    /// (frames 40–45) sits inside the kept range, and it copies verbatim regardless.
+    @Test func fieldCodedDamagedClipWithSnappedCutsStaysCopyOnly() throws {
+        let treatment = try ExportPlanner.videoTreatment(
+            for: damagedFieldCodedClip(inPoint: 25, outPoint: 49), target: nil,
+            index: longIndex, containerStart: 0)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [PlannedSegment(kind: .copy, range: 25..<50, outCutKeyframe: 50)])
+    }
+
+    /// The `.repair` purpose keeps the full pre-#96 behavior (the #54 regression pin):
+    /// damage zones plan their repaired `.reEncode` segments and the copy-only invariant
+    /// does not fire — those segments are exactly what `ClipDoctorEngine.fieldCodedRepair`
+    /// collapses into the copy-head + MBAFF-tail plan (ADR-0022).
+    @Test func repairPurposePlansTheDamageReencodeSegmentsOnAFieldCodedClip() throws {
+        let zone = DamageZone(start: 1.6, end: 1.8, affectsVideo: true)
+        let treatment = try ExportPlanner.videoTreatment(
+            for: damagedFieldCodedClip(), target: nil, index: longIndex,
+            containerStart: 0, purpose: .repair)
+        guard case .smartRender(let segments, _) = treatment else {
+            Issue.record("expected smart render")
+            return
+        }
+        #expect(segments == [
+            PlannedSegment(kind: .copy, range: 0..<25, outCutKeyframe: 25),
+            PlannedSegment(kind: .reEncode, range: 25..<50, damage: [zone]),
+            PlannedSegment(kind: .copy, range: 50..<100),
+        ])
+    }
+
+    /// The row's copied-% badge reads the same `.export` verdict (`copyShare` calls
+    /// `videoTreatment` with the default purpose): a damaged copy-cut clip shows 100 %
+    /// copied, consistent with the verbatim export it gets.
+    @Test func copyShareOfADamagedFieldCodedClipIsAllCopy() throws {
+        let share = try #require(ExportPlanner.copyShare(
+            for: damagedFieldCodedClip(), target: nil, settings: OutputSettings(),
+            index: longIndex, containerStart: 0))
+        #expect(share.copiedFraction == 1.0)
+    }
+
+    /// `planItem` threads the copy-cut route onto the item so the engine can pick the
+    /// field-coded execution recipe (slice 4): true only for a confirmed field-coded
+    /// H.264 clip — progressive and unsupported-codec field-coded clips carry false.
+    @Test func plannedItemCarriesTheFieldCodedRoute() throws {
+        func item(for clip: Clip) throws -> ExportItem {
+            try ExportPlanner.planItem(
+                for: ExportPlanner.ClipInput(clip: clip,
+                                             url: URL(fileURLWithPath: "/tmp/a.ts"),
+                                             index: index, containerStart: 0,
+                                             audioSources: [.stream(0)]),
+                target: nil)
+        }
+        #expect(try item(for: fieldCodedClip()).fieldCoded)
+        #expect(try !item(for: clip(video: video())).fieldCoded)
+        #expect(try !item(for: fieldCodedClip(codec: "mpeg2video")).fieldCoded)
+    }
 }
