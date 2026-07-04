@@ -553,7 +553,9 @@ final class ProjectDocument: ReferenceFileDocument {
         // along — a damaged clip's share needs it to map zones (issue #47).
         for clip in project.clips where importStates[clip.id] == .ready {
             Task { @MainActor in
-                await importThrottle.acquire()
+                // A cancelled acquire throws (and holds no slot), so bail before arming the
+                // release — releasing a slot we never took would corrupt the throttle count.
+                do { try await importThrottle.acquire() } catch { return }
                 defer { Task { await importThrottle.release() } }
                 if (try? await frameIndex(for: clip)) != nil {
                     if let url = url(for: clip), containerStartCache[clip.id] == nil {
@@ -870,7 +872,9 @@ final class ProjectDocument: ReferenceFileDocument {
 
     @MainActor
     private func importClip(id: Clip.ID, url: URL) async {
-        await importThrottle.acquire()
+        // A cancelled acquire throws (and holds no slot), so bail before arming the
+        // release — releasing a slot we never took would corrupt the throttle count.
+        do { try await importThrottle.acquire() } catch { return }
         defer { Task { await importThrottle.release() } }
         do {
             let probe = try await MediaProbe.probe(url: url)
