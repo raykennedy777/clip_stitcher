@@ -781,7 +781,9 @@ final class ProjectDocument: ReferenceFileDocument {
                 if project.output.type != .audioOnly,
                    let note = ExportPlanner.repairReport(
                        clipName: clip.displayName, zones: clip.damageZones,
-                       windowStart: item.audioStart, windowEnd: item.audioEnd) {
+                       windowStart: item.audioStart, windowEnd: item.audioEnd,
+                       trimEnd: item.truncatedEndingTrim,
+                       frameInterval: ExportPlanner.frameDuration(clip.video?.frameRate)) {
                     warnings.append(note)
                 }
                 if cutOnly {

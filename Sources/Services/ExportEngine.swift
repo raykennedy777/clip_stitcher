@@ -55,6 +55,13 @@ struct ExportItem {
     /// each possibly carrying its own encoder — overriding the export-wide track list in
     /// `.separate` mode. `nil` (every other mode) means the export-wide tracks apply.
     var ownTracks: [AudioCodecPolicy.OutputAudioTrack]? = nil
+    /// The point this clip's kept range is trimmed to for a **truncated ending** (issue #79),
+    /// or `nil` when it has none — the single truncated-ending classification
+    /// (`ExportPlanner.truncatedEndingTrim`), decided once at plan time. The conform executor
+    /// consumes it via `conform.trimEnd`; the smart-render engine reaches the same verdict
+    /// through `BoundaryReencodeEngine.trimmedSlotBudget`; the completion report reads this so
+    /// the "and a truncated ending" wording can never disagree with what the engine trimmed.
+    var truncatedEndingTrim: Double? = nil
 }
 
 enum ExportError: LocalizedError {

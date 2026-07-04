@@ -128,6 +128,33 @@ struct TruncatedEndingRepairIntegrationTests {
         #expect(try Self.fileSize(source) == sourceSizeBefore)
     }
 
+    /// `verifyOutput` derives a scan duration from the output file when the caller supplies
+    /// none, so the re-verify progress bar advances for a nil-`duration` clip (issue #79/#82) —
+    /// the Verify Now path has no frame index in scope for the repair path's fallback. With
+    /// `expectedDuration: nil` the scan must still report progress (> 0), which only happens
+    /// when `scanAllStreams` receives a positive duration to fill against.
+    @Test(.enabled(if: Fixture.available,
+                   "truncated-ending capture absent — skipping (see ADR-0023)"))
+    func verifyOutputProbesADurationWhenTheCallerHasNone() async throws {
+        let source = try await Fixture.ensure()
+        let progress = Progress()
+        let verdict = await ClipDoctorEngine.verifyOutput(
+            source, clipName: source.lastPathComponent, expectedDuration: nil
+        ) { f in progress.record(f) }
+        // The scan completed with a real verdict (not the involuntary re-scan failure) …
+        #expect(verdict.outcome != .inconclusive, "re-scan failed: \(verdict.message)")
+        // … and the progress bar advanced — proof the probed-duration fallback fed the scan.
+        #expect(progress.maxSeen > 0, "no scan progress was reported — the duration fallback didn't fire")
+    }
+
+    /// Collects the maximum scan fraction seen across the background progress callbacks.
+    private final class Progress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Double = 0
+        func record(_ f: Double) { lock.lock(); value = max(value, f); lock.unlock() }
+        var maxSeen: Double { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     private static func fileSize(_ url: URL) throws -> Int {
         (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
     }

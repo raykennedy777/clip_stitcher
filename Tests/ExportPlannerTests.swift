@@ -378,24 +378,64 @@ struct ExportPlannerTests {
     }
 
     @Test func repairReportNamesATruncatedEnding() {
-        // A video zone reaching the window end is a truncated ending — repaired by trimming,
-        // not the interior drop+fill — so it is named rather than counted (issue #79).
+        // A truncated ending is named — not counted — from the single classification (`trimEnd`),
+        // never re-derived from window proximity, so the report names exactly what the engine
+        // trimmed (issue #79). Here the ending zone starts at 599.6, so `trimEnd == 599.6`.
         let ending = [DamageZone(start: 599.6, end: 600.0, affectsVideo: true)]
         #expect(ExportPlanner.repairReport(clipName: "live.ts", zones: ending,
-                                           windowStart: nil, windowEnd: 600.0)
+                                           windowStart: nil, windowEnd: 600.0, trimEnd: 599.6)
             == "Repaired a truncated ending in “live.ts”.")
         // An interior zone plus the truncated ending: the ending is called out alongside.
         let mixed = [DamageZone(start: 95.5, end: 96.0, affectsVideo: true)] + ending
         #expect(ExportPlanner.repairReport(clipName: "live.ts", zones: mixed,
-                                           windowStart: nil, windowEnd: 600.0)
+                                           windowStart: nil, windowEnd: 600.0, trimEnd: 599.6)
             == "Repaired a damage zone in “live.ts” at 1:35 and a truncated ending.")
         let twoPlus = [
             DamageZone(start: 95.5, end: 96.0, affectsVideo: true),
             DamageZone(start: 300.0, end: 300.5, affectsVideo: true),
         ] + ending
         #expect(ExportPlanner.repairReport(clipName: "live.ts", zones: twoPlus,
-                                           windowStart: nil, windowEnd: 600.0)
+                                           windowStart: nil, windowEnd: 600.0, trimEnd: 599.6)
             == "Repaired 2 damage zones in “live.ts” at 1:35, 5:00 and a truncated ending.")
+    }
+
+    /// The report consumes the SAME truncated-ending decision the engine trims by, so message
+    /// and engine can never disagree (issue #79). A zone the engine does NOT trim — no `trimEnd`,
+    /// e.g. an interior out point landing just after a real interior zone — is counted as an
+    /// ordinary repaired zone, never named as a truncated ending (the old window-proximity
+    /// predicate would have mis-named it). A zone the engine trims is named, not counted.
+    @Test func repairReportMatchesTheEngineTrimDecision() {
+        // Same trailing zone, but `trimEnd == nil` (the window didn't reach the file end): the
+        // zone is a plain interior repair, not a truncated ending.
+        let ending = [DamageZone(start: 599.6, end: 600.0, affectsVideo: true)]
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: ending,
+                                           windowStart: nil, windowEnd: 600.0, trimEnd: nil)
+            == "Repaired a damage zone in “c” at 9:59.")
+        // With the trim, the same zone is named and dropped from the count.
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: ending,
+                                           windowStart: nil, windowEnd: 600.0, trimEnd: 599.6)
+            == "Repaired a truncated ending in “c”.")
+    }
+
+    /// Naming survives a nil probed duration on the whole-file Doctor path (issue #79): the
+    /// truncated ending comes from the engine's index-based `trimEnd`, not the container
+    /// duration, so a nil `windowEnd` no longer silently drops the "truncated ending" wording.
+    @Test func repairReportNamesATruncatedEndingWithNilDuration() {
+        let ending = [DamageZone(start: 4774.84, end: 4775.5, affectsVideo: true)]
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: ending,
+                                           windowStart: nil, windowEnd: nil, trimEnd: 4774.84)
+            == "Repaired a truncated ending in “c”.")
+    }
+
+    /// A genuine EOF zone (start ≈ lastPts) isn't dropped from the report when a TS-probed
+    /// `windowEnd` undershoots the true tail: the inclusion filter carries a one-frame slack
+    /// (issue #79). Here the zone starts a hair past the undershooting window end.
+    @Test func repairReportKeepsAnEofZoneWhenDurationUndershoots() {
+        let ending = [DamageZone(start: 600.02, end: 600.1, affectsVideo: true)]
+        #expect(ExportPlanner.repairReport(clipName: "c", zones: ending,
+                                           windowStart: nil, windowEnd: 600.0, trimEnd: 600.02,
+                                           frameInterval: 0.04)
+            == "Repaired a truncated ending in “c”.")
     }
 
     @Test func repairReportFiltersZonesOutsideTheKeptWindow() {
@@ -414,6 +454,77 @@ struct ExportPlannerTests {
                                            windowStart: nil, windowEnd: nil) == nil)
         #expect(ExportPlanner.repairReport(clipName: "c", zones: [],
                                            windowStart: nil, windowEnd: nil) == nil)
+    }
+
+    // MARK: truncated-ending classification (#79)
+
+    /// The low-level gate: a truncated ending needs the kept window to actually reach the file
+    /// end AND a video zone to reach it within one frame interval (issue #79). `fileEnd` here is
+    /// 0.32 (lastPts 0.28 + one 0.04 interval), matching the detector's genuine EOF zone end.
+    @Test func truncatedEndingTrimGatesOnFileEndAndAOneIntervalMargin() {
+        let eof = [DamageZone(start: 0.28, end: 0.32, affectsVideo: true)]
+        // Reaches the file end, zone reaches it within one interval → trims to the zone start.
+        #expect(ExportPlanner.truncatedEndingTrim(
+            zones: eof, windowStart: nil, fileEnd: 0.32,
+            reachesFileEnd: true, frameInterval: 0.04) == 0.28)
+        // Same zone, but the window does NOT reach the file end (an interior out point): no trim,
+        // however close the zone sits to the end — the fix for the spurious interior trim.
+        #expect(ExportPlanner.truncatedEndingTrim(
+            zones: eof, windowStart: nil, fileEnd: 0.32,
+            reachesFileEnd: false, frameInterval: 0.04) == nil)
+        // A zone ending well before the file end (0.12 vs 0.32) is interior even at the file end —
+        // the one-interval margin, not the old 1.0 s that would have called this trailing.
+        #expect(ExportPlanner.truncatedEndingTrim(
+            zones: [DamageZone(start: 0.08, end: 0.12, affectsVideo: true)],
+            windowStart: nil, fileEnd: 0.32, reachesFileEnd: true, frameInterval: 0.04) == nil)
+        // A zone spanning the whole window would leave nothing — not a trim.
+        #expect(ExportPlanner.truncatedEndingTrim(
+            zones: [DamageZone(start: 0.10, end: 0.32, affectsVideo: true)],
+            windowStart: 0.10, fileEnd: 0.32, reachesFileEnd: true, frameInterval: 0.04) == nil)
+        // Audio-only trailing gap: no video trim (the audio legs silence-fill it).
+        #expect(ExportPlanner.truncatedEndingTrim(
+            zones: [DamageZone(start: 0.28, end: 0.32, affectsVideo: false)],
+            windowStart: nil, fileEnd: 0.32, reachesFileEnd: true, frameInterval: 0.04) == nil)
+    }
+
+    /// The clip-level helper resolves `reachesFileEnd` from the out point: an open out (or an
+    /// out on the last frame) runs to EOF and can trim; an interior out never trims (issue #79).
+    @Test func truncatedEndingTrimForClipReachesFileEndOnlyAtEOF() {
+        let eof = [DamageZone(start: 0.28, end: 0.32, affectsVideo: true)]
+        // Open out point (nil): the whole tail is kept → the EOF zone trims.
+        var openOut = clip(video: video()); openOut.damageZones = eof
+        #expect(ExportPlanner.truncatedEndingTrim(
+            for: openOut, index: index, containerStart: 0, windowStart: nil) == 0.28)
+        // Out point on the last frame (7 of 8): still reaches EOF → trims.
+        var lastFrameOut = clip(video: video(), outPoint: 7); lastFrameOut.damageZones = eof
+        #expect(ExportPlanner.truncatedEndingTrim(
+            for: lastFrameOut, index: index, containerStart: 0, windowStart: nil) == 0.28)
+        // Interior out point (frame 3): does NOT reach EOF → no trim, even with the tail zone.
+        var interiorOut = clip(video: video(), outPoint: 3); interiorOut.damageZones = eof
+        #expect(ExportPlanner.truncatedEndingTrim(
+            for: interiorOut, index: index, containerStart: 0, windowStart: nil) == nil)
+    }
+
+    /// `planItem` wires the single classification onto both the conform (`trimEnd`, consumed by
+    /// the executor) and the item (`truncatedEndingTrim`, consumed by the report) — decided once
+    /// (issue #79). A conformed clip whose out point reaches an EOF zone carries the trim; an
+    /// interior out point does not.
+    @Test func planItemCarriesTheTruncatedEndingTrim() throws {
+        let target = clip(video: video(codec: "h264"))
+        let eof = [DamageZone(start: 0.28, end: 0.32, affectsVideo: true)]
+        var src = clip(video: video(codec: "mpeg2video")); src.damageZones = eof
+        let inputEof = ExportPlanner.ClipInput(clip: src, url: URL(fileURLWithPath: "/x.ts"),
+                                               index: index, containerStart: 0, audioSources: [])
+        let item = try ExportPlanner.planItem(for: inputEof, target: target)
+        #expect(item.truncatedEndingTrim == 0.28)
+        #expect(item.conform?.trimEnd == 0.28)
+
+        var interior = clip(video: video(codec: "mpeg2video"), outPoint: 3); interior.damageZones = eof
+        let inputInterior = ExportPlanner.ClipInput(clip: interior, url: URL(fileURLWithPath: "/x.ts"),
+                                                    index: index, containerStart: 0, audioSources: [])
+        let itemInterior = try ExportPlanner.planItem(for: inputInterior, target: target)
+        #expect(itemInterior.truncatedEndingTrim == nil)
+        #expect(itemInterior.conform?.trimEnd == nil)
     }
 
     /// The Output warning fires only when re-encode *dominates* (> 50 % of output

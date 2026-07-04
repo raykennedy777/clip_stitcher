@@ -131,16 +131,23 @@ enum ExportPlanner {
             firstPts: index.pts.first, lastPts: index.pts.last,
             frameDuration: frameDuration(clip.video?.frameRate),
             containerStart: input.containerStart)
+        // The truncated-ending classification, decided once here where the clip, its window,
+        // and the file end all coexist (issue #79) — both video treatments and the completion
+        // report consume this same value, never re-derive it.
+        let trimEnd = truncatedEndingTrim(for: clip, index: index,
+                                          containerStart: input.containerStart,
+                                          windowStart: window.start)
         switch try videoTreatment(for: clip, target: target, index: index,
                                   containerStart: input.containerStart) {
-        case .conform(let conform):
+        case .conform(var conform):
+            conform.trimEnd = trimEnd
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: conform.targetVideo.codec,
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources,
                               audioMixFilters: input.audioMixFilters,
                               audioDuration: window.duration,
-                              conform: conform)
+                              conform: conform, truncatedEndingTrim: trimEnd)
         case .smartRender(let segments, let encoder):
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: clip.video?.codec,
@@ -151,8 +158,56 @@ enum ExportPlanner {
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources,
                               audioMixFilters: input.audioMixFilters,
-                              audioDuration: window.duration)
+                              audioDuration: window.duration,
+                              truncatedEndingTrim: trimEnd)
         }
+    }
+
+    // MARK: - Truncated-ending classification (#79)
+
+    /// The point a kept window is trimmed to for a **truncated ending** (issue #79), or `nil`
+    /// when the window has none. A truncated ending is a video damage zone reaching the *file's*
+    /// end — a stopped-live-capture's partial final frame (CONTEXT.md "Truncated ending") —
+    /// repaired by trimming to the last complete frame rather than the interior drop+fps-fill
+    /// (CONTEXT.md "Repair"). This is the **single** place the classification is decided: the
+    /// conform executor consumes it via `ConformEngine.VideoConform.trimEnd`, the smart-render
+    /// engine reaches the same verdict through `BoundaryReencodeEngine.trimmedSlotBudget`, and
+    /// the completion `repairReport` consumes the same value — so message and engine can never
+    /// disagree.
+    ///
+    /// Two gates, mirroring the smart-render sibling `trimmedSlotBudget`: the kept window must
+    /// actually reach the file end (`reachesFileEnd`) — an interior out point never trims,
+    /// however close a real interior zone sits after it — **and** a video zone must reach the
+    /// file end within one frame interval. The detector's genuine EOF zone ends at `lastPts +
+    /// one interval` = `fileEnd` (`DamageDetector.eofZoneFromDecode`), so one interval is the
+    /// right scale — never the 1.0 s that spuriously trimmed interior out points landing just
+    /// after a real interior zone. A zone spanning the whole window (start ≤ windowStart) isn't
+    /// a trim — it would leave nothing. Returns the earliest qualifying zone's start; the
+    /// interior zones before it still fps-fill.
+    static func truncatedEndingTrim(zones: [DamageZone]?, windowStart: Double?, fileEnd: Double?,
+                                    reachesFileEnd: Bool, frameInterval: Double?) -> Double? {
+        guard reachesFileEnd, let fileEnd else { return nil }
+        let start = windowStart ?? 0
+        let margin = frameInterval ?? (1.0 / 25)
+        return (zones ?? [])
+            .filter { $0.affectsVideo && $0.end >= fileEnd - margin && $0.start > start }
+            .map(\.start).min()
+    }
+
+    /// The truncated-ending trim for one clip's kept window, resolving the file-end reference
+    /// and file-end reachability the shared `truncatedEndingTrim` gate needs from the frame
+    /// index (issue #79). `fileEnd` is the last frame's display end (`lastPts + one interval`),
+    /// container-start-relative like the damage zones; `reachesFileEnd` holds for an open out
+    /// point or an out point on the last frame — the kept range runs to EOF — mirroring the
+    /// smart-render `range.upperBound == index.count`.
+    static func truncatedEndingTrim(for clip: Clip, index: FrameIndex,
+                                    containerStart: Double, windowStart: Double?) -> Double? {
+        let interval = frameDuration(clip.video?.frameRate)
+        let fileEnd = index.pts.last.map { $0 + (interval ?? 0) - containerStart }
+        let reachesFileEnd = clip.outPoint.map { $0 >= index.count - 1 } ?? true
+        return truncatedEndingTrim(zones: clip.damageZones, windowStart: windowStart,
+                                   fileEnd: fileEnd, reachesFileEnd: reachesFileEnd,
+                                   frameInterval: interval)
     }
 
     // MARK: - Repair report (#47)
@@ -164,22 +219,28 @@ enum ExportPlanner {
     /// time, formatted like the source row's damage line, capped at six. `nil` when
     /// nothing was repaired: no zones, none in the window, or video wasn't exported.
     static func repairReport(clipName: String, zones: [DamageZone]?,
-                             windowStart: Double?, windowEnd: Double?) -> String? {
+                             windowStart: Double?, windowEnd: Double?,
+                             trimEnd: Double? = nil, frameInterval: Double? = nil) -> String? {
+        // The inclusion filter's upper bound gets a one-frame slack: a TS-probed `windowEnd`
+        // can undershoot the true tail by more than a ¼ frame, and a genuine EOF zone (start ≈
+        // lastPts) must not be dropped from the report (issue #79). `frameInterval` when known,
+        // else a small default.
+        let slack = frameInterval ?? (1.0 / 25)
         let repaired = (zones ?? []).filter { zone in
             zone.affectsVideo
                 && zone.end > (windowStart ?? 0)
-                && (windowEnd.map { zone.start < $0 } ?? true)
+                && (windowEnd.map { zone.start < $0 + slack } ?? true)
         }
-        guard !repaired.isEmpty else { return nil }
-        // A truncated ending — a video zone reaching the kept window's end — is repaired by
-        // trimming to the last complete frame, not the interior drop+fill, so it is named
-        // rather than counted (CONTEXT.md "Truncated ending"). The margin absorbs a container
-        // whose reported end overshoots the last decodable frame (a TS header can, by ~0.2 s).
-        let isTruncatedEnding = { (zone: DamageZone) in
-            windowEnd.map { zone.end >= $0 - 0.5 } ?? false
-        }
-        let hasTruncatedEnding = repaired.contains(where: isTruncatedEnding)
-        let interior = repaired.filter { !isTruncatedEnding($0) }
+        // A truncated ending — a video zone reaching the file's end — is repaired by trimming to
+        // the last complete frame, not the interior drop+fill, so it is named rather than counted
+        // (CONTEXT.md "Truncated ending"). Whether one exists is the single classification decided
+        // upstream (`truncatedEndingTrim`), passed in as `trimEnd`, never re-derived here with a
+        // private margin — so the report names exactly what the engine trimmed. The interior
+        // (counted) zones are those before the trim point; the trailing zone(s) fold into the
+        // "truncated ending" phrase.
+        let hasTruncatedEnding = trimEnd != nil
+        let interior = trimEnd.map { t in repaired.filter { $0.start < t } } ?? repaired
+        guard !interior.isEmpty || hasTruncatedEnding else { return nil }
         let shown = interior.prefix(6).map { formattedClipTime($0.start) }
         let times = shown.joined(separator: ", ") + (interior.count > 6 ? ", …" : "")
         let ending = hasTruncatedEnding ? " and a truncated ending" : ""

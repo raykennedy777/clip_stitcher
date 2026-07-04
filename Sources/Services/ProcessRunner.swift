@@ -202,9 +202,19 @@ enum ProcessRunner {
                         if teeToFile {
                             // Wait for the live tee to reach EOF so every chunk has been
                             // written to the file before it's closed. The timeout is a
-                            // backstop so a termination can never hang here.
+                            // backstop so a termination can never hang here — but on that
+                            // backstop, clearing the handler doesn't wait for an in-flight
+                            // invocation, and closing the file underneath a mid-flight
+                            // `write` could silently truncate the CSV the caller parses. So
+                            // clear the handler first (no new invocations; the process has
+                            // exited, so the serial handler queue quiesces), then drain the
+                            // pipe's remaining data straight to the file — recovering the
+                            // buffered tail instead of dropping it, exactly as the streaming
+                            // path's tail handling does below (issue #81).
                             if outDone?.wait(timeout: .now() + 5) == .timedOut {
                                 outPipe.fileHandleForReading.readabilityHandler = nil
+                                let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
+                                if !rest.isEmpty { try? outHandle?.write(contentsOf: rest) }
                             }
                         } else if let onStdout {
                             // Streaming mode: hand any unread tail to the callback.

@@ -69,6 +69,13 @@ enum ClipDoctorEngine {
         var verdict: Verdict
         /// Damage zones the repair addressed (video re-encoded, audio silence-filled).
         var repairedZoneCount: Int
+        /// The point the whole file was trimmed to for a **truncated ending** (issue #79), or
+        /// `nil` when the source has none — the single truncated-ending classification
+        /// (`ExportPlanner.truncatedEndingTrim`), the same value the engine trimmed to. The
+        /// sheet's completion report names "a truncated ending" from this, so the naming holds
+        /// even when the clip's probed `duration` is unknown (the classification comes off the
+        /// frame index, not the container duration).
+        var truncatedEndingTrim: Double? = nil
     }
 
     enum DoctorError: LocalizedError {
@@ -530,8 +537,16 @@ enum ClipDoctorEngine {
             finalDest, clipName: clip.displayName, expectedDuration: verifyDuration
         ) { f in progress(0.97 + 0.03 * f) }
         progress(1.0)
+        // The truncated-ending classification for the completion report (issue #79): Clip Doctor
+        // repairs the whole file (no in/out trim), so the kept window reaches EOF by construction
+        // — `wholeFile` has nil in/out points, so `reachesFileEnd` is true and the file-end
+        // reference comes off the frame index, not the container duration. This is the same
+        // decision the smart-render engine trimmed to.
+        let trimEnd = ExportPlanner.truncatedEndingTrim(
+            for: wholeFile, index: index, containerStart: containerStart, windowStart: nil)
         return Result(output: finalDest, verdict: verdict,
-                      repairedZoneCount: (clip.damageZones ?? []).count)
+                      repairedZoneCount: (clip.damageZones ?? []).count,
+                      truncatedEndingTrim: trimEnd)
     }
 
     /// Re-runs the auto-verify on an already-written output (issue #52, #82): scan every
@@ -559,8 +574,21 @@ enum ClipDoctorEngine {
     ) async -> Verdict {
         do {
             try Task.checkCancellation()
+            // The scan's progress bar needs a duration to fill against. A caller that can't
+            // supply one — e.g. Verify Now on a nil-`duration` clip (issue #79/#82), which has
+            // no frame index in scope for the repair path's `clip.duration ?? index.durationSpan`
+            // fallback — would otherwise leave the bar frozen. Derive one from the output file
+            // itself: one fast ffprobe, negligible beside the full sequential re-scan. A known
+            // positive expectation is used as-is (no extra probe).
+            let effectiveDuration: Double?
+            if let expectedDuration, expectedDuration > 0 {
+                effectiveDuration = expectedDuration
+            } else {
+                effectiveDuration = try? await MediaProbe.probe(url: output).duration
+            }
+            try Task.checkCancellation()
             let scan = try await FrameIndexer.scanAllStreams(
-                url: output, expectedDuration: expectedDuration, onProgress: onScanProgress)
+                url: output, expectedDuration: effectiveDuration, onProgress: onScanProgress)
             try Task.checkCancellation()   // detectZones swallows its probe cancels; catch one here
             let outStart = await MediaProbe.containerStartTime(url: output)
             let surviving = await DamageDetector.detectZones(

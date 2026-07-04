@@ -319,55 +319,26 @@ struct ConformEngineTests {
             windowStart: 10, windowEnd: 50) == plain)
     }
 
-    /// The conform's ±1 count gate relaxes only when a damage zone reaches the kept
-    /// window's end (EOF truncation): the fps fill stops at the last decoded frame, and
-    /// the container's claimed duration can overshoot the decodable content (the 1844's
-    /// TS headers do, by ~0.2 s) — so a zone ending within a second of the window end
-    /// counts as trailing, allowing a shortfall as deep as the zone.
-    @Test func conformCountGateRelaxesOnlyAtAnEofZone() {
-        // Trailing zone [990, 999.4] near window end 1000: up to ~10 s × 25 short.
+    /// The conform's ±1 count gate relaxes only for a genuine **truncated ending** — a
+    /// `trimEnd` decided upstream (`ExportPlanner.truncatedEndingTrim`), never re-derived from
+    /// raw zones here (issue #79). The piece drops the trailing damaged span `[trimEnd, fileEnd)`
+    /// and the container's claimed end can overshoot the last decodable frame (the 1844's TS
+    /// headers do, by ~0.2 s), so the allowance is that span in frames plus one for the trim
+    /// boundary. No truncated ending (`trimEnd` nil) keeps the ±1 gate exact — a real interior
+    /// zone near an interior out point can no longer spuriously relax it (the old 1.0 s bug).
+    @Test func conformCountGateRelaxesOnlyForATruncatedEnding() {
+        // Trimmed at 999.6 with the file ending at 1000: (1000 − 999.6) × 25 + 1 = 11.
         #expect(ConformEngine.eofShortfallAllowance(
-            damage: [DamageZone(start: 990, end: 999.4, affectsVideo: true)],
-            windowStart: nil, windowEnd: 1000, targetFrameRate: "25/1") == 251)
-        // Interior zone: exact gate.
+            trimEnd: 999.6, fileEnd: 1000, targetFrameRate: "25/1") == 11)
+        // A deeper trailing span allows a deeper shortfall: (1000 − 990) × 25 + 1 = 251.
         #expect(ConformEngine.eofShortfallAllowance(
-            damage: [DamageZone(start: 500, end: 510, affectsVideo: true)],
-            windowStart: nil, windowEnd: 1000, targetFrameRate: "25/1") == 0)
-        // Audio-only trailing gap: exact gate.
+            trimEnd: 990, fileEnd: 1000, targetFrameRate: "25/1") == 251)
+        // No truncated ending: exact ±1 gate, whatever the file end.
         #expect(ConformEngine.eofShortfallAllowance(
-            damage: [DamageZone(start: 990, end: 999.4, affectsVideo: false)],
-            windowStart: nil, windowEnd: 1000, targetFrameRate: "25/1") == 0)
-        // No known window end: exact gate.
+            trimEnd: nil, fileEnd: 1000, targetFrameRate: "25/1") == 0)
+        // No known file end: exact gate.
         #expect(ConformEngine.eofShortfallAllowance(
-            damage: [DamageZone(start: 990, end: 999.4, affectsVideo: true)],
-            windowStart: nil, windowEnd: nil, targetFrameRate: "25/1") == 0)
-    }
-
-    /// A truncated ending shortens a conformed clip's read to the last complete frame so the
-    /// piece is trimmed rather than fps-filled (issue #79): the effective end is the trailing
-    /// video zone's start. No trailing video zone (or no window) leaves the window unchanged,
-    /// keeping a clean or interior-only clip byte-identical.
-    @Test func truncatedEndingEndTrimsToTheTrailingZoneStart() {
-        // Trailing video zone near window end 1000 → conform reads only up to its start.
-        #expect(ConformEngine.truncatedEndingEnd(
-            damage: [DamageZone(start: 999.6, end: 1000.0, affectsVideo: true)],
-            windowStart: nil, windowEnd: 1000) == 999.6)
-        // Interior zone: no trim.
-        #expect(ConformEngine.truncatedEndingEnd(
-            damage: [DamageZone(start: 500, end: 510, affectsVideo: true)],
-            windowStart: nil, windowEnd: 1000) == nil)
-        // Audio-only trailing gap: no video trim (the audio legs silence-fill it).
-        #expect(ConformEngine.truncatedEndingEnd(
-            damage: [DamageZone(start: 999.6, end: 1000.0, affectsVideo: false)],
-            windowStart: nil, windowEnd: 1000) == nil)
-        // A zone spanning the whole window would leave nothing — not a trim.
-        #expect(ConformEngine.truncatedEndingEnd(
-            damage: [DamageZone(start: 400, end: 1000.0, affectsVideo: true)],
-            windowStart: 400, windowEnd: 1000) == nil)
-        // No known window end: no trim.
-        #expect(ConformEngine.truncatedEndingEnd(
-            damage: [DamageZone(start: 999.6, end: 1000.0, affectsVideo: true)],
-            windowStart: nil, windowEnd: nil) == nil)
+            trimEnd: 999.6, fileEnd: nil, targetFrameRate: "25/1") == 0)
     }
 
     /// A zone reaching back to (or past) the window start is clamped so the window's

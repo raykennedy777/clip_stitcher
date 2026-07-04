@@ -16,6 +16,15 @@ enum ConformEngine {
         var sourceVideo: VideoProperties
         var targetVideo: VideoProperties
         var damage: [DamageZone] = []
+        /// The point the kept range is trimmed to for a **truncated ending** (issue #79),
+        /// or `nil` when the window has none — the single truncated-ending classification,
+        /// decided once in `ExportPlanner` where the clip, its window, and the file end all
+        /// coexist (`ExportPlanner.truncatedEndingTrim`). A video zone reaching the *file's*
+        /// end is repaired by trimming to the last complete frame rather than the interior
+        /// drop+fps-fill, so the conform's input read stops here. `nil` for a clean clip or
+        /// an interior out point keeps the command byte-identical to before repair existed —
+        /// the conform executor never re-derives this from raw zones with its own margin.
+        var trimEnd: Double? = nil
     }
 
     /// ffmpeg video filter-chain + encoder args that transform `source` → `target`. The
@@ -175,11 +184,14 @@ enum ConformEngine {
         } else {
             windowEnd = try await MediaProbe.probe(url: source).duration
         }
-        // A truncated ending — a video zone reaching the kept window's end — is repaired by
+        // A truncated ending — a video zone reaching the *file's* end — is repaired by
         // trimming to the last complete frame, not fps-filled (CONTEXT.md "Repair"): shorten
-        // the input read to the zone's start so the piece ends there. `nil` for a clean or
-        // interior-only clip keeps the window (and the command) byte-identical to before.
-        let trimEnd = truncatedEndingEnd(damage: conform.damage, windowStart: start, windowEnd: windowEnd)
+        // the input read to the zone's start so the piece ends there. The classification is
+        // decided once upstream (`ExportPlanner.truncatedEndingTrim`) and carried on the
+        // conform — never re-derived here from raw zones — so the executor and the completion
+        // report can't disagree. `nil` for a clean or interior-only clip (or an interior out
+        // point) keeps the window and the command byte-identical to before.
+        let trimEnd = conform.trimEnd
         let effectiveEnd = trimEnd ?? end
         let windowDuration = (trimEnd ?? windowEnd).map { $0 - (start ?? 0) }
         let args = conformArguments(source: source, start: start, end: effectiveEnd,
@@ -202,8 +214,7 @@ enum ConformEngine {
         }
         try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected,
                                   shortfallAllowance: eofShortfallAllowance(
-                                      damage: conform.damage, windowStart: start,
-                                      windowEnd: trimEnd ?? windowEnd,
+                                      trimEnd: trimEnd, fileEnd: windowEnd,
                                       targetFrameRate: conform.targetVideo.frameRate))
         return piece
     }
@@ -217,37 +228,20 @@ enum ConformEngine {
         return Int((windowDuration * fps).rounded())
     }
 
-    /// The effective window end when the kept range ends in a **truncated ending** (issue #79):
-    /// a video zone reaching the window end is repaired by *trimming* to the last complete
-    /// frame — nothing follows it to keep in sync — rather than the interior drop+fps-fill, so
-    /// the conform's input read stops at the zone's start. Returns that start, or `nil` when no
-    /// video zone reaches the end (a clean or interior-only clip keeps its window, byte-for-byte
-    /// identical to before repair). A zone spanning the whole window (start ≤ the window start)
-    /// isn't a trim — it would leave nothing — so it is ignored here.
-    static func truncatedEndingEnd(damage: [DamageZone], windowStart: Double?,
-                                   windowEnd: Double?) -> Double? {
-        guard let end = windowEnd else { return nil }
-        let start = windowStart ?? 0
-        return damage
-            .filter { $0.affectsVideo && $0.end >= end - 1.0 && $0.start > start }
-            .map(\.start).min()
-    }
-
-    /// How far below `duration × fps` a conformed piece may legitimately fall
-    /// (issue #48): when a damage zone reaches the kept window's end (EOF truncation),
-    /// the fps fill stops at the last decoded frame — nothing after it exists to hold —
-    /// and the container's reported duration can itself overshoot the decodable content
-    /// (the 1844's TS headers claim ~0.2 s of video past the truncated final frame), so
-    /// a zone ending within a second of the window end counts as trailing. 0 with no
-    /// trailing zone, keeping the ±1 gate exact everywhere else.
-    static func eofShortfallAllowance(damage: [DamageZone], windowStart: Double?,
-                                      windowEnd: Double?, targetFrameRate: String) -> Int {
-        guard let end = windowEnd, let fps = frameRateValue(targetFrameRate) else { return 0 }
-        let trailing = damage
-            .filter { $0.affectsVideo && $0.end >= end - 1.0 && $0.start < end }
-            .map(\.start)
-        guard let earliest = trailing.min() else { return 0 }
-        return max(0, Int(((end - max(earliest, windowStart ?? 0)) * fps).rounded()) + 1)
+    /// How far below `duration × fps` a conformed piece may legitimately fall (issue #48).
+    /// Non-zero only for a genuine **truncated ending** (`trimEnd` set — the single
+    /// classification from `ExportPlanner.truncatedEndingTrim`, never re-derived here): the
+    /// input read stops at `trimEnd`, so the piece drops the trailing damaged span
+    /// `[trimEnd, fileEnd)`, and the container's reported end can itself overshoot the last
+    /// decodable frame (the 1844's TS headers claim ~0.2 s past the truncated final frame).
+    /// The allowance is that dropped span in frames, plus one for the trim-boundary frame that
+    /// may not decode. 0 when there is no truncated ending — keeping the ±1 gate exact for
+    /// every clean or interior-only clip, so a spurious near-interior-zone relaxation (the
+    /// old 1.0 s, no-file-end-gate behavior) can never mask a real shortfall.
+    static func eofShortfallAllowance(trimEnd: Double?, fileEnd: Double?,
+                                      targetFrameRate: String) -> Int {
+        guard let trimEnd, let fileEnd, let fps = frameRateValue(targetFrameRate) else { return 0 }
+        return max(0, Int(((fileEnd - trimEnd) * fps).rounded()) + 1)
     }
 
     /// Verifies a conformed piece against the acceptance bar (ADR-0011): its re-probed video

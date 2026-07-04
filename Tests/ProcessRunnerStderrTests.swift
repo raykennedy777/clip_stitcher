@@ -99,6 +99,15 @@ struct ProcessRunnerIOModeTests {
             .appendingPathComponent("pr66-\(UUID().uuidString).\(ext)")
     }
 
+    /// A `@Sendable` byte-accumulating sink for the streamed/tee'd stdout chunks (they arrive on
+    /// a FileHandle queue), snapshotting the total received length.
+    private final class Sink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func append(_ chunk: Data) { lock.lock(); data.append(chunk); lock.unlock() }
+        func snapshot() -> Data { lock.lock(); defer { lock.unlock() }; return data }
+    }
+
     /// `stdoutTo` streams stdout straight to the file; the result's in-memory `stdout` is
     /// then empty (the data lives on disk).
     @Test func stdoutToRedirectsToTheFileLeavingResultStdoutEmpty() async throws {
@@ -138,6 +147,25 @@ struct ProcessRunnerIOModeTests {
         #expect(result.stderr.isEmpty)   // file mode bypasses the in-memory tail
         let size = try FileManager.default.attributesOfItem(atPath: err.path)[.size] as? Int
         #expect(size == 400000)          // the whole stream, not the 256 KB bounded tail
+    }
+
+    /// `stdoutTo` **and** `onStdout` together *tee* stdout (issue #81): the authoritative stream
+    /// is written whole to the file while each chunk is also handed to the callback. The file
+    /// must land byte-complete — no chunk lost to the termination close (the write-vs-close race
+    /// the timeout drain guards against) — and the callback must see the same total. A 300 KB
+    /// output forces many chunks past the ~64 KB pipe buffer, so a dropped tail would show.
+    @Test func teeWritesTheWholeFileAndAlsoReportsEveryChunk() async throws {
+        let out = Self.tempFile("bin")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let sink = Sink()
+        let result = try await ProcessRunner.run(
+            Self.sh, ["-c", "yes AAAAAAAA | head -c 300000"], stdoutTo: out,
+            onStdout: { sink.append($0) })
+        #expect(result.status == 0)
+        #expect(result.stdout.isEmpty)                 // tee mode: in-memory stdout stays empty
+        let size = try FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int
+        #expect(size == 300000)                        // the file landed whole, tail included
+        #expect(sink.snapshot().count == 300000)       // and the callback saw every byte too
     }
 
     /// A cancelled run surfaces as `CancellationError`, not as the tool failing: cancelling

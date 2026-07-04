@@ -201,11 +201,17 @@ struct ClipDoctorView: View {
 
     /// The supporting report under the verdict — the shared "Repaired N damage zones at …"
     /// wording (ExportPlanner), so the sheet, the row, and the export report can't drift.
-    /// Whole-file, so no kept window bounds the count.
+    /// Whole-file, so no kept window bounds the count. The "and a truncated ending" naming reads
+    /// the engine's own truncated-ending decision off the result (`truncatedEndingTrim`), so it
+    /// survives a nil probed `duration` — the classification comes off the frame index, not the
+    /// container duration (issue #79).
     private var supportingReport: String? {
         guard let clip = model.clip else { return nil }
-        return ExportPlanner.repairReport(clipName: clip.displayName, zones: clip.damageZones,
-                                          windowStart: nil, windowEnd: clip.duration)
+        return ExportPlanner.repairReport(
+            clipName: clip.displayName, zones: clip.damageZones,
+            windowStart: nil, windowEnd: clip.duration,
+            trimEnd: model.result?.truncatedEndingTrim,
+            frameInterval: ExportPlanner.frameDuration(clip.video?.frameRate))
     }
 
     private func verdictIcon(_ outcome: ClipDoctorEngine.Verdict.Outcome) -> String {
