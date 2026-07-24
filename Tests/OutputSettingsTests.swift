@@ -33,6 +33,24 @@ struct OutputSettingsTests {
         #expect(decoded.container == .mp4)
     }
 
+    // The conform CRF (issue #105 follow-up) is nil by default and on every save made
+    // before the field — the conform then runs at the encoder's own default, exactly
+    // as before the knob existed.
+    @Test func anOldSaveWithoutConformCrfDecodesToNil() throws {
+        let old = #"{"mode":"connect","type":"videoAndAudio","container":"mkv"}"#
+        let decoded = try JSONDecoder().decode(OutputSettings.self, from: Data(old.utf8))
+        #expect(decoded.conformCrf == nil)
+        #expect(OutputSettings().conformCrf == nil)
+    }
+
+    @Test func conformCrfSurvivesARoundTrip() throws {
+        var settings = OutputSettings()
+        settings.conformCrf = 21
+        let data = try JSONEncoder().encode(settings)
+        let decoded = try JSONDecoder().decode(OutputSettings.self, from: data)
+        #expect(decoded.conformCrf == 21)
+    }
+
     @Test func cutOnlySurvivesARoundTrip() throws {
         var settings = OutputSettings()
         settings.mode = .separate

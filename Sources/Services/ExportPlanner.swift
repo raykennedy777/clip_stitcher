@@ -182,6 +182,10 @@ enum ExportPlanner {
                                   containerStart: input.containerStart) {
         case .conform(var conform):
             conform.trimEnd = trimEnd
+            // The conform's rate control rides the settings like the rendering choice
+            // does (issue #105 follow-up): stamped here, the one place settings and the
+            // conform verdict coexist — nil keeps the encoder default.
+            conform.crf = settings.conformCrf
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: conform.targetVideo.codec,
                               audioStart: window.start, audioEnd: window.end,

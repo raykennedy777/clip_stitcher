@@ -70,6 +70,13 @@ struct OutputSettings: Codable, Equatable {
     /// stream-copy — MPEG-2's missing-PTS packets are refilled on the way in (issue #2).
     var container: Container = .mkv
     var rendering: SeparateRendering = .conformToTarget
+    /// The CRF a **conform** re-encode runs at (issue #105 follow-up) — nil (the
+    /// default, and every save made before the field) keeps the encoder's own default
+    /// (libx264 23, libx265 28), byte-identical to before. Applies to the x264/x265
+    /// conform encoders only; an MPEG-2 target has no CRF and ignores it. Set today by
+    /// the Stitch Job contract (`output.conformCrf`) so a scripted fill conform can
+    /// match its surrounding footage's quality class; the GUI doesn't expose it yet.
+    var conformCrf: Int? = nil
 
     init() {}
 
@@ -81,5 +88,6 @@ struct OutputSettings: Codable, Equatable {
         type = try c.decodeIfPresent(OutputType.self, forKey: .type) ?? .videoAndAudio
         container = try c.decodeIfPresent(Container.self, forKey: .container) ?? .mkv
         rendering = try c.decodeIfPresent(SeparateRendering.self, forKey: .rendering) ?? .conformToTarget
+        conformCrf = try c.decodeIfPresent(Int.self, forKey: .conformCrf)
     }
 }

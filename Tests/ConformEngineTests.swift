@@ -71,6 +71,30 @@ struct ConformEngineTests {
         ])
     }
 
+    /// The conform CRF knob (issue #105 follow-up): an explicit CRF lands as the `-crf`
+    /// wrapper flag on both x264 and x265 (de-risked in the shell on both encoders ×
+    /// all three piece containers, alongside the params flags), an MPEG-2 target
+    /// ignores it (no CRF rate control), and the nil default keeps every command
+    /// byte-identical to before the knob existed.
+    @Test func conformCrfPinsRateControlOnX264AndX265ButNotMpeg2() {
+        #expect(ConformEngine.conformVideoArgs(source: h264, target: hevc, crf: 21) == [
+            "-vf", "scale=1440:1080,pad=1920:1080:240:0,setsar=1/1,format=yuv420p10le,fps=50",
+            "-c:v", "libx265", "-profile:v", "main10", "-crf", "21",
+            "-x265-params", "log-level=error:level-idc=4.1:b-pyramid=0",
+            "-color_range", "tv",
+        ])
+        #expect(ConformEngine.conformVideoArgs(source: mpeg2, target: h264, crf: 18) == [
+            "-vf", "bwdif=mode=0,scale=704:396,pad=704:528:0:66,setsar=1/1,format=yuv420p,fps=25,"
+                + "setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown",
+            "-c:v", "libx264", "-profile:v", "high", "-crf", "18", "-level", "4.0",
+            "-x264-params", "b-pyramid=0",
+        ])
+        #expect(ConformEngine.conformVideoArgs(source: hevc, target: mpeg2, crf: 21)
+            == ConformEngine.conformVideoArgs(source: hevc, target: mpeg2))
+        #expect(ConformEngine.conformVideoArgs(source: h264, target: hevc, crf: nil)
+            == ConformEngine.conformVideoArgs(source: h264, target: hevc))
+    }
+
     /// An unrecognised target profile is omitted rather than guessed — a wrong `-profile:v`
     /// token aborts the encode, and the encoder infers a profile from the pixel format.
     @Test func unmappedProfileIsDropped() {

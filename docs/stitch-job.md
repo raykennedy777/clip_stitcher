@@ -72,12 +72,20 @@ frame), exactly as in the app; such clips must also sit on copy-safe boundaries
 
 ### `output`
 
-| field       | type   | default          | values |
-|-------------|--------|------------------|--------|
-| `container` | string | `"mkv"`          | `"mkv"`, `"ts"`, `"mp4"` |
-| `type`      | string | `"videoAndAudio"`| `"videoAndAudio"`, `"videoOnly"`, `"audioOnly"` |
+| field        | type   | default          | values |
+|--------------|--------|------------------|--------|
+| `container`  | string | `"mkv"`          | `"mkv"`, `"ts"`, `"mp4"` |
+| `type`       | string | `"videoAndAudio"`| `"videoAndAudio"`, `"videoOnly"`, `"audioOnly"` |
+| `conformCrf` | int    | encoder default  | 0–51 (lower = higher quality) |
 
 Strings must match exactly (a typo'd `"MKV"` is refused, never silently defaulted).
+
+`conformCrf` sets the CRF that **conformed** (non-matching) clips encode at — how a
+fill clip's re-encode is pinned to the quality class of the footage around it.
+Omitted, the conform runs at the encoder's own default (libx264 CRF 23, libx265
+CRF 28). It applies to the x264/x265 conform encoders only (an MPEG-2 target has no
+CRF and ignores it) and never touches smart-rendered clips — their boundary
+re-encodes stay matched to the source as before.
 There is no `mode` field: the CLI always connects the clips into the one output file
 it was given; per-clip separate export stays a GUI affordance. For video outputs the
 `<output-file>` extension must match the container (ffmpeg picks the final muxer

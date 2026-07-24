@@ -53,6 +53,11 @@ struct StitchJob: Codable, Equatable {
         /// "videoAndAudio" (default), "videoOnly", or "audioOnly" — `OutputType`'s
         /// raw values.
         var type: String? = nil
+        /// The CRF conformed (non-matching) clips encode at, 0–51. Omitted keeps the
+        /// encoder default (libx264 23, libx265 28). This is how a fill clip's conform
+        /// is pinned to the quality class of the footage around it; applies to
+        /// x264/x265 conform encoders only — an MPEG-2 target ignores it.
+        var conformCrf: Int? = nil
     }
 
     /// Decodes and structurally validates a job in one step — the only entry the CLI
@@ -125,6 +130,13 @@ struct StitchJob: Codable, Equatable {
             }
             settings.type = type
         }
+        if let crf = output?.conformCrf {
+            // Both conform encoders accept 0–51 (x264/x265's shared CRF scale).
+            guard (0...51).contains(crf) else {
+                throw StitchJobError.badConformCrf(crf)
+            }
+            settings.conformCrf = crf
+        }
         return settings
     }
 
@@ -190,6 +202,7 @@ enum StitchJobError: LocalizedError, Equatable {
     case badAudioTrack(clip: Int, index: Int)
     case unknownContainer(String)
     case unknownOutputType(String)
+    case badConformCrf(Int)
     /// A named source doesn't exist on disk. Job-class, not probe-class: the path is
     /// the job's claim, and it's checked before any tool runs.
     case missingSource(String)
@@ -226,6 +239,8 @@ enum StitchJobError: LocalizedError, Equatable {
             return "Unknown output container “\(c)” — use \"ts\", \"mkv\", or \"mp4\"."
         case .unknownOutputType(let t):
             return "Unknown output type “\(t)” — use \"videoAndAudio\", \"videoOnly\", or \"audioOnly\"."
+        case .badConformCrf(let crf):
+            return "conformCrf \(crf) is out of range — CRF is 0–51 (lower = higher quality)."
         case .missingSource(let path):
             return "Source file not found: \(path)"
         case .frameOutOfRange(let clip, let frame, let frameCount):

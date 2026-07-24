@@ -138,6 +138,26 @@ struct StitchJobTests {
         #expect(try StitchPipeline.requiredExtension(job: job) == "ts")
     }
 
+    @Test func conformCrfMapsIntoSettingsAndRefusesOutOfRange() throws {
+        let job = try parse("""
+        {"version": 1, "clips": [{"path": "/a", "target": true}],
+         "output": {"conformCrf": 21}}
+        """)
+        #expect(try job.outputSettings().conformCrf == 21)
+        #expect(throws: StitchJobError.badConformCrf(52)) {
+            try self.parse("""
+            {"version": 1, "clips": [{"path": "/a", "target": true}],
+             "output": {"conformCrf": 52}}
+            """)
+        }
+        #expect(throws: StitchJobError.badConformCrf(-1)) {
+            try self.parse("""
+            {"version": 1, "clips": [{"path": "/a", "target": true}],
+             "output": {"conformCrf": -1}}
+            """)
+        }
+    }
+
     @Test func audioOnlyJobsImposeNoOutputExtension() throws {
         let job = try parse("""
         {"version": 1, "clips": [{"path": "/a", "target": true}],
@@ -202,7 +222,8 @@ struct StitchJobTests {
           "clips": [
             { "path": "/media/target.mkv", "audioTracks": [0], "target": true },
             { "path": "/media/fill.mkv", "audioTracks": [1] }
-          ]
+          ],
+          "output": { "conformCrf": 21 }
         }
         """)
         let settings = try job.outputSettings()
@@ -233,6 +254,9 @@ struct StitchJobTests {
         #expect(fillItem.conform != nil)
         #expect(fillItem.conform?.targetVideo.codec == "h264")
         #expect(fillItem.audioSources == [.stream(1)])
+        // The job's conformCrf rides the settings onto the planned conform (and only
+        // there — the smart-rendered target has no conform to carry it).
+        #expect(fillItem.conform?.crf == 21)
     }
 
     @Test func inOutFramesBecomeTheKeptWindow() throws {

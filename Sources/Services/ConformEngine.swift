@@ -25,6 +25,11 @@ enum ConformEngine {
         /// an interior out point keeps the command byte-identical to before repair existed —
         /// the conform executor never re-derives this from raw zones with its own margin.
         var trimEnd: Double? = nil
+        /// The CRF this conform encodes at (`OutputSettings.conformCrf`, stamped by
+        /// `ExportPlanner.planItem` like `trimEnd`) — nil keeps the encoder default,
+        /// byte-identical to before the knob existed. x264/x265 only; an MPEG-2
+        /// target ignores it (no CRF rate control).
+        var crf: Int? = nil
     }
 
     /// ffmpeg video filter-chain + encoder args that transform `source` → `target`. The
@@ -42,13 +47,13 @@ enum ConformEngine {
     /// × three containers in the shell, exact counts and clean decodes).
     static func conformVideoArgs(source: VideoProperties, target: VideoProperties,
                                  damage: [DamageZone] = [], windowStart: Double? = nil,
-                                 windowEnd: Double? = nil) -> [String] {
+                                 windowEnd: Double? = nil, crf: Int? = nil) -> [String] {
         let chain = filterChain(source: source, target: target,
                                 repair: repairSelect(damage: damage, windowStart: windowStart,
                                                      windowEnd: windowEnd,
                                                      sourceFrameRate: source.frameRate))
             .joined(separator: ",")
-        return ["-vf", chain] + encoderArgs(target: target)
+        return ["-vf", chain] + encoderArgs(target: target, crf: crf)
     }
 
     /// The time-window select dropping each damage zone inside the kept window
@@ -142,14 +147,14 @@ enum ConformEngine {
     static func conformArguments(
         source: URL, start: Double?, end: Double?,
         sourceVideo: VideoProperties, targetVideo: VideoProperties, output: URL,
-        trackTimescale: Int? = nil, damage: [DamageZone] = []
+        trackTimescale: Int? = nil, damage: [DamageZone] = [], crf: Int? = nil
     ) -> [String] {
         var args = ["-v", "error"]
         if let start { args += ["-ss", ExportEngine.timeString(start)] }
         if let end { args += ["-t", ExportEngine.timeString(end - (start ?? 0))] }
         args += ["-i", source.path]
         args += conformVideoArgs(source: sourceVideo, target: targetVideo,
-                                 damage: damage, windowStart: start, windowEnd: end)
+                                 damage: damage, windowStart: start, windowEnd: end, crf: crf)
         // The export-wide MP4 pin (issue #24): without it the encoder-default 1/12800
         // track collapses next to a copy piece at the cross-clip concat.
         if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
@@ -198,7 +203,7 @@ enum ConformEngine {
                                     sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
                                     output: piece,
                                     trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil,
-                                    damage: conform.damage)
+                                    damage: conform.damage, crf: conform.crf)
         let parser = ProgressParser()
         let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
             if let t = parser.feed(chunk) {
@@ -516,11 +521,17 @@ enum ConformEngine {
     // The encoder, profile token, and level tokens come from EncoderSelection — the one
     // table both re-encode paths share (ADR-0011 consequences). Conform additionally pins
     // level + color range; M2 carries them through by copy.
-    private static func encoderArgs(target: VideoProperties) -> [String] {
+    private static func encoderArgs(target: VideoProperties, crf: Int? = nil) -> [String] {
         var args = ["-c:v", EncoderSelection.encoder(for: target.codec),
                     "-profile:v", profile(target)]
+        // The conform's rate control (issue #105 follow-up): an explicit CRF when the
+        // settings carry one, else the encoder default — byte-identical to before the
+        // knob existed. x264/x265 only (the `-crf` wrapper flag, de-risked in the shell
+        // on both encoders × all three piece containers alongside the params flags
+        // below); MPEG-2 has no CRF and takes its established default path.
         switch target.codec {
         case "hevc":
+            if let crf { args += ["-crf", String(crf)] }
             args += ["-x265-params", x265Params(target)]
         case "mpeg2video":
             // MPEG-2 has no B-pyramid (its B-frames never reference other B-frames), so its
@@ -529,6 +540,7 @@ enum ConformEngine {
                 args += ["-flags", "+ildct+ilme", "-top", topFieldFirst(target.fieldOrder) ? "1" : "0"]
             }
         default:   // h264
+            if let crf { args += ["-crf", String(crf)] }
             if let lvl = EncoderSelection.h264Level(target.level) { args += ["-level", lvl] }
             // Disable B-pyramid (verified in the shell): libx264's default B-pyramid lets B-frames
             // reference other B-frames, producing a decode order whose DTS is non-monotonic. After
