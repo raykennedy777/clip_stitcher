@@ -63,6 +63,27 @@ targets:
               public.filename-extension:
                 - clipstitcher
 
+  clipstitch:
+    type: tool
+    platform: macOS
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    sources:
+      # The headless CLI (issue #105, ADR-0025) reuses the app's engine layer as-is:
+      # Models + Services compile into both targets, so the CLI can never stitch
+      # differently than the app. GUI layers (App/Views/CutEditor/Preview) stay out;
+      # FrameExtractor is the one Services file with a GUI-side dependency
+      # (FrameStreamDecoder, AppKit) and nothing on the export path uses it.
+      - path: Sources/Models
+      - path: Sources/Services
+        excludes:
+          - FrameExtractor.swift
+      - path: CLI
+    settings:
+      base:
+        PRODUCT_NAME: clipstitch
+
   ClipStitcherTests:
     type: bundle.unit-test
     platform: macOS
@@ -84,6 +105,13 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
 
 schemes:
+  clipstitch:
+    build:
+      targets:
+        clipstitch: all
+    run:
+      config: Debug
+
   ClipStitcher:
     build:
       targets:

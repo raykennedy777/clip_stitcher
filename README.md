@@ -36,6 +36,19 @@ open ClipStitcher.xcodeproj   # ⌘R to run
 Builds out of the box with ad-hoc signing — no Apple account needed. `ffmpeg`/`ffprobe` are
 located from your `PATH` (Homebrew) during development.
 
+## Headless CLI
+
+`clipstitch` stitches without the GUI — a [Stitch Job](docs/stitch-job.md) JSON in, a
+frame-accurate file out, through the exact engine the app runs:
+
+```sh
+xcodebuild -scheme clipstitch -configuration Release build
+clipstitch job.json output.mkv
+```
+
+Exit codes distinguish invalid jobs, unreadable sources, and export failures — see
+[docs/stitch-job.md](docs/stitch-job.md) for the schema and codes.
+
 ## Test
 
 ```sh

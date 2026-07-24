@@ -17,6 +17,15 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # The headless CLI target compiles Models+Services without the GUI — building it
+      # is what enforces that the engine layer stays AppKit/SwiftUI-free (ADR-0025).
+      - name: Build headless CLI
+        run: |
+          xcodebuild build \
+            -scheme clipstitch \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+
       - name: Build and test (fast suite)
         run: |
           xcodebuild test \

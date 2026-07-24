@@ -118,6 +118,13 @@ The ordered set of clips, the chosen target clip, and the output settings; persi
 `.clipstitcher` document.
 _Avoid_: session, job, timeline
 
+**Stitch Job**:
+The headless CLI's input document (docs/stitch-job.md, issue #105): one versioned JSON
+describing a stitch — the ordered clips by plain file path with in/out frames and audio
+stream selections, exactly one target, and output settings. A Project as a script would
+write one; consumed by the `clipstitch` tool target (ADR-0025), never persisted by the app.
+_Avoid_: job file, batch file, manifest
+
 **Frame index**:
 The per-clip map of frame number → timestamp + keyframe flag, built on import. The basis of
 frame accuracy on variable-frame-rate content.
