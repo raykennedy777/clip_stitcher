@@ -143,6 +143,90 @@ struct ExportEngineTests {
         #expect(!args.contains("-t"))
     }
 
+    // MARK: - Head seek (issue #108)
+
+    /// A 50 fps index with a keyframe every 50 frames — the shape of the real capture, so
+    /// the anchor arithmetic is exercised against real keyframe spacing.
+    private func keyframedIndex(frames: Int = 600, gop: Int = 50, start: Double = 0) -> FrameIndex {
+        let pts = (0..<frames).map { start + Double($0) / 50.0 }
+        return FrameIndex(pts: pts, keyframeFlags: (0..<frames).map { $0 % gop == 0 })
+    }
+
+    /// The seek anchors two keyframes before the in-cut, not one: the landing can undershoot
+    /// by a whole keyframe (it does on the real open-GOP HEVC capture, whose Matroska cues
+    /// don't index every flagged keyframe), and segment `000` still has to receive packets or
+    /// the muxer never writes it and the wanted piece stops being `001`.
+    @Test func theHeadSeekAnchorsTwoKeyframesBeforeTheInCut() {
+        let index = keyframedIndex()
+        let plan = SegmentPlan(inFrame: 300, outFrame: 400, inSegmentTime: 5.99, outSegmentTime: 7.99)
+        let seek = ExportEngine.copyHeadSeekTarget(plan: plan, index: index, containerStart: 0)
+        #expect(seek == 4.0)                                        // frame 200, two GOPs back
+    }
+
+    /// Only one keyframe before the in-cut is still a usable anchor, and the seek is
+    /// start_time-relative like every other input seek in the engine — never negative.
+    @Test func theHeadSeekFallsBackToTheOnlyEarlierKeyframe() {
+        let index = keyframedIndex(start: 1.44)
+        let plan = SegmentPlan(inFrame: 50, outFrame: 90, inSegmentTime: 0.99, outSegmentTime: 1.79)
+        #expect(ExportEngine.copyHeadSeekTarget(plan: plan, index: index, containerStart: 1.44) == 0)
+        // and with two available the container start is still subtracted
+        let later = SegmentPlan(inFrame: 150, outFrame: 190, inSegmentTime: 2.99, outSegmentTime: 3.79)
+        #expect(ExportEngine.copyHeadSeekTarget(plan: later, index: index, containerStart: 1.44) == 1.0)
+    }
+
+    /// Nothing to skip → no seek, and the copy keeps the proven read-from-zero recipe.
+    @Test func aCopyWithNoHeadGetsNoSeek() {
+        let index = keyframedIndex()
+        // no in-cut: the clip starts at the file's own beginning
+        let noInCut = SegmentPlan(inFrame: 0, outFrame: 100, inSegmentTime: nil, outSegmentTime: 2.0)
+        #expect(ExportEngine.copyHeadSeekTarget(plan: noInCut, index: index, containerStart: 0) == nil)
+        // an in-cut at the very first frame has no earlier keyframe to anchor on
+        let atFrameZero = SegmentPlan(inFrame: 0, outFrame: 100, inSegmentTime: 0.0, outSegmentTime: 2.0)
+        #expect(ExportEngine.copyHeadSeekTarget(plan: atFrameZero, index: index, containerStart: 0) == nil)
+    }
+
+    /// The whole point of #108: with a seek the read starts at the anchor instead of frame 0.
+    /// Because the muxer measures `-segment_times` from its *first packet*, both cut times
+    /// move onto the seek's timeline by the measured landing — and `-t`, being a duration
+    /// rather than an instant, shortens by the same amount. `-copyts` is deliberately absent:
+    /// it zeroes ffmpeg's `out_time`, which the progress bar reads.
+    @Test func theHeadSeekRebasesEveryTimeOntoTheLanding() {
+        let plan = SegmentPlan(inFrame: 400_000, outFrame: 400_250,
+                               inSegmentTime: 8000.07, outSegmentTime: 8005.03)
+        let seek = ExportEngine.CopyHeadSeek(seek: 7990.14, origin: 7985.14)
+        let args = ExportEngine.cutArguments(source: src, plan: plan,
+                                             segmentPattern: "/tmp/p_%03d.mkv", headSeek: seek)
+        // an *input* seek: before -i, or it decodes the head it is meant to skip
+        let ss = args.firstIndex(of: "-ss")
+        #expect(ss != nil && ss! < args.firstIndex(of: "-i")!)
+        #expect(args[args.index(after: ss!)] == "7990.14")
+        #expect(!args.contains("-copyts"))
+        let times = args[args.index(after: args.firstIndex(of: "-segment_times")!)]
+        #expect(times == "14.93,19.89")
+        let bound = Double(args[args.index(after: args.firstIndex(of: "-t")!)])
+        #expect(bound != nil && abs(bound! - 21.89) < 0.001)        // out + margin − origin
+    }
+
+    /// Without a seek the command is byte-for-byte what #107 validated — the seek is an
+    /// addition to the recipe, never a change to it.
+    @Test func withoutAHeadSeekTheCutIsUnchanged() {
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
+        let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.mkv")
+        #expect(!args.contains("-ss"))
+        #expect(args[args.index(after: args.firstIndex(of: "-segment_times")!)] == "4,80")
+        #expect(Double(args[args.index(after: args.firstIndex(of: "-t")!)]) == 82.0)
+    }
+
+    /// A seeked copy with no out-cut still has to read to EOF — there is no bound to shorten.
+    @Test func aSeekedCutWithNoOutCutStillReadsToEof() {
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: nil)
+        let seek = ExportEngine.CopyHeadSeek(seek: 1.0, origin: 1.0)
+        let args = ExportEngine.cutArguments(source: src, plan: plan,
+                                             segmentPattern: "/tmp/p_%03d.ts", headSeek: seek)
+        #expect(!args.contains("-t"))
+        #expect(args[args.index(after: args.firstIndex(of: "-segment_times")!)] == "3")
+    }
+
     // MARK: export-wide MP4 timescale (issue #24)
 
     @Test func exportWideTimescaleIsTheLcmOfTheProbes() {

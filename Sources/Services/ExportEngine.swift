@@ -298,6 +298,50 @@ enum ExportEngine {
     /// at any rate and still ~65% less temp than reading to EOF.
     static let copyReadMargin = 2.0
 
+    // MARK: - Head seek (issue #108)
+
+    /// Where a copy's read is allowed to *start*, once measured (issue #108). Bounding the
+    /// read's end (#107) left the pre-in-cut **head**: the segment muxer still opened at
+    /// frame 0 and wrote everything before the wanted piece as a discarded segment, so the
+    /// throwaway grew with the clip's in-point — 8.6 GB for one 54 s copy 150 min into a
+    /// 4h36 capture, ~100 GB across a nine-clip MotoGP render.
+    ///
+    /// The muxer places `-segment_times` relative to **the first packet it sees**, not to
+    /// the file start (measured: the split moves keyframe-for-keyframe with the seek
+    /// landing). So an input seek is only safe if the landing is *known*, and it cannot be
+    /// predicted from the index: on the real open-GOP HEVC capture `-ss` at a keyframe's own
+    /// pts landed a whole keyframe earlier than asked, because the Matroska cues don't index
+    /// every keyframe the packet flags call one. It is measured instead —
+    /// `BoundaryReencodeEngine.copyHeadSeek` runs a one-packet probe down the same seek code
+    /// path — and the split times are then re-expressed against it.
+    struct CopyHeadSeek: Equatable {
+        /// The `-ss` value: start_time-relative, like every other input seek in the engine.
+        var seek: Double
+        /// Where ffmpeg actually landed, on the index's own axis (`pts − index.pts.first`) —
+        /// the axis `FrameIndex.segmentTime(forCutAt:)` speaks. Subtracting it from a segment
+        /// time converts "seconds from the file start" into "seconds from this run's first
+        /// packet", which is what the muxer compares against. Whatever constant offset ffmpeg
+        /// then applies to the output timeline cancels: both the split and the origin move
+        /// with it.
+        var origin: Double
+    }
+
+    /// The keyframe a copy segment's read may start from — far enough before the in-cut that
+    /// the muxer still has a non-empty segment `000` to put the head in (`wantedSegmentIndex`
+    /// stays 1), and no further. Two keyframes back rather than one, so a landing that
+    /// undershoots by a keyframe (which the real HEVC capture does) still leaves a head
+    /// segment; a single keyframe back is taken when that's all there is.
+    ///
+    /// `nil` when there is nothing to skip — no in-cut, or no keyframe before it — and the
+    /// copy keeps today's read-from-zero recipe.
+    static func copyHeadSeekTarget(plan: SegmentPlan, index: FrameIndex,
+                                   containerStart: Double) -> Double? {
+        guard plan.inSegmentTime != nil,
+              let previous = index.keyframeIndex(atOrBefore: plan.inFrame - 1) else { return nil }
+        let anchor = index.keyframeIndex(atOrBefore: previous - 1) ?? previous
+        return max(0, index.pts[anchor] - containerStart)
+    }
+
     /// ffmpeg args to cut one clip's **video** into segments at its clean cut points.
     /// Cuts are placed by **decode** time (ADR-0008): the muxer splits at the first
     /// keyframe whose DTS reaches the segment time. With explicit `-segment_times` the
@@ -310,12 +354,23 @@ enum ExportEngine {
     /// bound is evaluated on the *unreset* output timeline, so `-reset_timestamps 1`
     /// doesn't interfere, and it is start-relative exactly like the segment times
     /// (ADR-0008) — hence `-t` and not `-to`. Without an out-cut the wanted piece runs to
-    /// the file end, so the read must still reach EOF. The pre-in-cut *head* is still
-    /// written in full: skipping it needs an input seek, which lands on a different
-    /// keyframe than the cut does on open-GOP sources (issue #108).
+    /// the file end, so the read must still reach EOF.
+    ///
+    /// A `headSeek` also bounds where the read *starts* (`-ss`, issue #108), which is what
+    /// keeps the discarded pre-in-cut head to a couple of GOPs instead of the whole source
+    /// before the clip. Every time then moves onto the seek's own timeline: the muxer
+    /// measures `-segment_times` from its first packet, so the split times are offset by the
+    /// measured landing (`CopyHeadSeek.origin`), and `-t` — a *duration*, not an instant —
+    /// shortens by the same amount. The seek is deliberately not used to place the in-cut:
+    /// the cut stays the DTS-midpoint split it has always been (ADR-0008), which is why the
+    /// wanted piece comes out packet-identical to the unseeked read on MPEG-2, H.264 and
+    /// open-GOP HEVC into `.mkv`, `.mp4` and `.ts`.
     static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String,
-                             bitstreamFilter: [String] = [], trackTimescale: Int? = nil) -> [String] {
-        var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
+                             bitstreamFilter: [String] = [], trackTimescale: Int? = nil,
+                             headSeek: CopyHeadSeek? = nil) -> [String] {
+        var args = ["-v", "error"]
+        if let headSeek { args += ["-ss", Self.timeString(headSeek.seek)] }
+        args += ["-i", source.path, "-map", "0:v:0", "-c", "copy"]
         args += bitstreamFilter
         args += ["-f", "segment"]
         // The segment muxer doesn't forward bare muxer flags to the inner mp4 muxer —
@@ -323,11 +378,12 @@ enum ExportEngine {
         if let trackTimescale {
             args += ["-segment_format_options", "video_track_timescale=\(trackTimescale)"]
         }
+        let origin = headSeek?.origin ?? 0
         let times = [plan.inSegmentTime, plan.outSegmentTime].compactMap { $0 }
-        args += ["-segment_times", times.map(Self.timeString).joined(separator: ",")]
+        args += ["-segment_times", times.map { Self.timeString($0 - origin) }.joined(separator: ",")]
         args += ["-reset_timestamps", "1"]
         if let out = plan.outSegmentTime {
-            args += ["-t", Self.timeString(out + Self.copyReadMargin)]
+            args += ["-t", Self.timeString(out + Self.copyReadMargin - origin)]
         }
         args.append(segmentPattern)
         return args

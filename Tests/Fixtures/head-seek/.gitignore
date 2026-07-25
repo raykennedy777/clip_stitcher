@@ -1,0 +1,5 @@
+# Long-GOP sources for the copy head-seek integration suite (issue #108). Nothing here is
+# copyrighted — they are synthesised from ffmpeg's own `testsrc2` on first run (ADR-0023) —
+# but they are generated build artefacts of tens of MB, so they are cached, never committed.
+*
+!.gitignore

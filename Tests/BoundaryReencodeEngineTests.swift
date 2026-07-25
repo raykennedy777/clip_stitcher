@@ -540,6 +540,65 @@ struct BoundaryReencodeEngineTests {
         #expect(BoundaryReencodeEngine.segmentMuxExpectedSeconds(plan: plan, sourceSpan: 12.0) == 12.0)
     }
 
+    // MARK: - Head seek (issue #108)
+
+    /// A head seek moves *both* ends of the read: it starts at the landing instead of frame
+    /// 0, and `out_time` restarts there too. The expectation is the read's true length —
+    /// which is the whole point, since on a clip 150 min into a 4h36 capture the bar
+    /// previously tracked ~9000 s of read for ~60 s of wanted output.
+    @Test func aSeekedCutExpectsOnlyTheSpanBetweenTheLandingAndTheBound() {
+        let plan = SegmentPlan(inFrame: 400_000, outFrame: 400_250,
+                               inSegmentTime: 8000.07, outSegmentTime: 8005.03)
+        let seek = ExportEngine.CopyHeadSeek(seek: 7990.14, origin: 7985.14)
+        let expected = BoundaryReencodeEngine.segmentMuxExpectedSeconds(
+            plan: plan, sourceSpan: 16_560.0, headSeek: seek)
+        #expect(expected != nil && abs(expected! - 21.89) < 0.001)
+        // and a seeked read to EOF is the source span less the head it skipped
+        let toEof = SegmentPlan(inFrame: 400_000, outFrame: 830_000,
+                                inSegmentTime: 8000.07, outSegmentTime: nil)
+        let eofExpected = BoundaryReencodeEngine.segmentMuxExpectedSeconds(
+            plan: toEof, sourceSpan: 16_560.0, headSeek: seek)
+        #expect(eofExpected != nil && abs(eofExpected! - 8574.86) < 0.001)
+    }
+
+    /// The probe is the only thing that makes the seek safe, so it must ask ffmpeg the same
+    /// question the real run will: same input seek, one packet, no decode. `-copyts` keeps
+    /// the packet's *source* timestamp — without it the answer comes back on a rebased
+    /// timeline and says nothing about where the seek landed — and NUT stores it at full
+    /// precision where Matroska would round it to a millisecond.
+    @Test func theLandingProbeSeeksAndCopiesExactlyOnePacket() {
+        let args = BoundaryReencodeEngine.landingProbeArguments(
+            source: src, seek: 7990.14, output: URL(fileURLWithPath: "/tmp/probe.nut"))
+        let ss = args.firstIndex(of: "-ss")
+        #expect(ss != nil && ss! < args.firstIndex(of: "-i")!)
+        #expect(args[args.index(after: ss!)] == "7990.14")
+        #expect(args.contains("-copyts"))
+        #expect(args[args.index(after: args.firstIndex(of: "-frames:v")!)] == "1")
+        #expect(args.contains("-c") && args.contains("copy"))
+        #expect(args[args.index(after: args.firstIndex(of: "-f")!)] == "nut")
+        #expect(args.last == "/tmp/probe.nut")
+    }
+
+    /// The dead segments of a copy run go the moment it ends, keeping only the wanted piece.
+    /// Scoped to that one run's prefix: a neighbouring segment's pieces, the whole-clip
+    /// remux (`…_cp.ext`, no index), and re-encodes must all survive.
+    @Test func discardingDeadSegmentsKeepsOnlyTheWantedPiece() throws {
+        let work = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cs-dead-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+        let names = ["c0_s1_cp_000.mkv", "c0_s1_cp_001.mkv", "c0_s1_cp_002.mkv",
+                     "c0_s3_cp_000.mkv", "c0_s2_re.mkv", "c0_s4_cp.mkv", "c1_s1_cp_000.mkv"]
+        for n in names {
+            try Data().write(to: work.appendingPathComponent(n))
+        }
+        BoundaryReencodeEngine.discardDeadSegments(
+            prefix: "c0_s1_cp_", keeping: work.appendingPathComponent("c0_s1_cp_001.mkv"), in: work)
+        let left = Set(try FileManager.default.contentsOfDirectory(atPath: work.path))
+        #expect(left == ["c0_s1_cp_001.mkv", "c0_s3_cp_000.mkv", "c0_s2_re.mkv",
+                         "c0_s4_cp.mkv", "c1_s1_cp_000.mkv"])
+    }
+
     // MARK: - MBAFF field-coded tail encoder (issue #54)
 
     /// `-top` follows the source scan order: top-field-first stays 1, bottom-field-first 0.

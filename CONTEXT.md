@@ -45,6 +45,27 @@ keyframe sends its leading pictures into the discarded segment, so the copy ends
 at presentation index `keyframe − count` (#16, ADR-0009).
 _Avoid_: open-GOP frames, RASL (except when HEVC-specific)
 
+**Discarded segment**:
+A piece the segment muxer writes because a copy run's split points imply it, and which no
+concat list ever names — the source before the in-cut, and whatever the read margin catches
+past the out-cut. Real files, on disk, for the length of the run; they are what made a
+render's temp footprint a multiple of its output (#107, #108).
+_Avoid_: temp file, leftover (they are neither stray nor leaked — the muxer is asked for them)
+
+**Head seek**:
+The input `-ss` that starts a copy run at a keyframe shortly before its in-cut instead of at
+frame 0, so the discarded head is a couple of GOPs rather than the whole source before the
+clip. It never places a cut — the in-cut stays a DTS-midpoint split — so the piece is
+identical to the unseeked read (#108, ADR-0027).
+_Avoid_: trim, in-point seek (it is a *read* bound, not an edit)
+
+**Landing probe**:
+One video packet stream-copied after a seek to *measure* where ffmpeg actually landed, which
+the frame index cannot predict — Matroska's cues don't index every keyframe the packet flags
+call one. The segment muxer measures `-segment_times` from its first packet, so the landing
+is the origin every cut time in a seeked copy run is expressed against (#108, ADR-0027).
+_Avoid_: seek point, anchor (the anchor is what was *asked for*; the landing is what happened)
+
 **Timescale probe**:
 One source video packet stream-copied into a throwaway MP4 to *measure* the track
 timescale the clip's real copy pieces will inherit from the mp4 muxer. Re-encoded pieces

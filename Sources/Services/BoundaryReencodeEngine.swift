@@ -387,10 +387,66 @@ enum BoundaryReencodeEngine {
     /// out-cut bounds it at the cut plus the read margin (`ExportEngine.cutArguments`,
     /// issue #107), and without one it runs to EOF. Never past the source span — an
     /// out-cut close to EOF stops there — and `nil` when the span couldn't be measured.
-    static func segmentMuxExpectedSeconds(plan: SegmentPlan, sourceSpan: Double?) -> Double? {
-        guard let out = plan.outSegmentTime else { return sourceSpan }
+    ///
+    /// A head seek (issue #108) also moves where the read *begins*, and `out_time` restarts
+    /// at the landing, so both ends shift by `origin` and the expectation is the read's true
+    /// length — which is the whole point of the seek: on a clip 150 min into a 4h36 capture
+    /// the bar now tracks ~60 s of read instead of ~9000 s.
+    static func segmentMuxExpectedSeconds(plan: SegmentPlan, sourceSpan: Double?,
+                                          headSeek: ExportEngine.CopyHeadSeek? = nil) -> Double? {
+        let origin = headSeek?.origin ?? 0
+        guard let out = plan.outSegmentTime else { return sourceSpan.map { $0 - origin } }
         let bounded = out + ExportEngine.copyReadMargin
-        return sourceSpan.map { min(bounded, $0) } ?? bounded
+        return (sourceSpan.map { min(bounded, $0) } ?? bounded) - origin
+    }
+
+    /// ffmpeg args for the one-packet **landing probe** behind a copy's head seek (issue
+    /// #108): seek, stream-copy a single video packet, stop. `-copyts` is what makes the
+    /// answer usable — the packet keeps its source timestamp, so the landing can be read off
+    /// in the source's own terms rather than on whatever rebased timeline the real run picks.
+    /// (The real run deliberately *omits* `-copyts`: it zeroes ffmpeg's `out_time` reporting,
+    /// which the progress bar reads, and it isn't needed there because the offset cancels.)
+    ///
+    /// NUT is the piece container because it stores timestamps at full precision; Matroska
+    /// would round the landing to a millisecond. A failed probe is not an error — the caller
+    /// falls back to the unseeked read.
+    static func landingProbeArguments(source: URL, seek: Double, output: URL) -> [String] {
+        ["-v", "error",
+         "-ss", ExportEngine.timeString(seek), "-copyts",
+         "-i", source.path, "-map", "0:v:0", "-c", "copy", "-frames:v", "1",
+         "-f", "nut", output.path]
+    }
+
+    /// Measures where an input seek would land so a copy segment can skip its pre-in-cut
+    /// head (issue #108). Picks the anchor keyframe (`ExportEngine.copyHeadSeekTarget`),
+    /// runs the probe down the same seek code path the real cut will take, and reports the
+    /// landing on the index's axis.
+    ///
+    /// `nil` — read from frame 0, exactly as before — whenever the seek can't be shown to be
+    /// safe: no head to skip, the probe failed (an ffmpeg without the NUT muxer included),
+    /// or the landing is not strictly before the in-cut. That last guard is what protects
+    /// `ExportEngine.wantedSegmentIndex`: a landing at or past the cut leaves the muxer no
+    /// packets for segment `000`, which it then never writes, and the wanted piece would
+    /// silently become `000` instead of `001`.
+    static func copyHeadSeek(
+        _ ffmpeg: URL, source: URL, plan: SegmentPlan, index: FrameIndex,
+        containerStart: Double, probeOutput: URL
+    ) async -> ExportEngine.CopyHeadSeek? {
+        guard let inCut = plan.inSegmentTime,
+              let seek = ExportEngine.copyHeadSeekTarget(
+                  plan: plan, index: index, containerStart: containerStart),
+              let startOffset = index.pts.first
+        else { return nil }
+        defer { try? FileManager.default.removeItem(at: probeOutput) }
+        guard let result = try? await ProcessRunner.run(
+                  ffmpeg, landingProbeArguments(source: source, seek: seek, output: probeOutput)),
+              result.status == 0,
+              let probed = try? await FrameIndexer.buildIndex(url: probeOutput),
+              let landing = probed.pts.first
+        else { return nil }
+        let origin = landing - startOffset
+        guard origin < inCut else { return nil }
+        return ExportEngine.CopyHeadSeek(seek: seek, origin: origin)
     }
 
     /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
@@ -493,19 +549,34 @@ enum BoundaryReencodeEngine {
 
         var pieces: [URL] = []
         for (s, segment) in plan.enumerated() {
+            // A segment-muxer copy's plan and head seek are settled before the run, because
+            // the progress bar's expectation depends on them: the seek is what decides how
+            // much of the source this run reads at all (issue #108).
+            let copyPlan: SegmentPlan? = segment.kind == .copy && copyStrategy == .segmentMux
+                ? copySegmentPlan(copyRange: segment.range,
+                                  outCutKeyframe: segment.outCutKeyframe, index: index)
+                : nil
+            var headSeek: ExportEngine.CopyHeadSeek?
+            if let copyPlan, ExportEngine.needsCut(copyPlan) {
+                headSeek = await Self.copyHeadSeek(
+                    ffmpeg, source: source, plan: copyPlan, index: index,
+                    containerStart: containerStart,
+                    probeOutput: work.appendingPathComponent("c\(clipIndex)_s\(s)_seek.nut"))
+            }
             let expected: Double?
             switch segment.kind {
             case .reEncode: expected = interval.map { Double(segment.range.count) * $0 }
             case .copy:
                 switch copyStrategy {
-                // The segment-muxer cut reads from frame 0 to its out-cut plus the read
-                // margin (#107), or to EOF when it has no out-cut; the bounded copy reads
-                // only its own span (#52). The bar tracks whichever read this run does.
+                // The segment-muxer cut reads from its head seek (or frame 0 without one,
+                // #108) to its out-cut plus the read margin (#107), or to EOF when it has no
+                // out-cut; the bounded copy reads only its own span (#52). The bar tracks
+                // whichever read this run does.
                 case .segmentMux:
-                    expected = segmentMuxExpectedSeconds(
-                        plan: copySegmentPlan(copyRange: segment.range,
-                                              outCutKeyframe: segment.outCutKeyframe, index: index),
-                        sourceSpan: sourceSpan)
+                    expected = copyPlan.flatMap {
+                        segmentMuxExpectedSeconds(plan: $0, sourceSpan: sourceSpan,
+                                                  headSeek: headSeek)
+                    }
                 case .boundedKeyframe:
                     let lo = segment.range.lowerBound, hi = segment.range.upperBound
                     expected = (lo < index.pts.count && hi < index.pts.count)
@@ -544,16 +615,25 @@ enum BoundaryReencodeEngine {
                 piece = work.appendingPathComponent(String(
                     format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)", 0))
             case .copy:
-                let copyPlan = copySegmentPlan(
+                // `copyPlan` is non-nil for every `.segmentMux` copy — settled above so the
+                // head seek could be measured before the progress expectation was formed.
+                let copyPlan = copyPlan ?? copySegmentPlan(
                     copyRange: segment.range, outCutKeyframe: segment.outCutKeyframe, index: index)
                 if ExportEngine.needsCut(copyPlan) {
                     let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
                     try await run(ffmpeg, ExportEngine.cutArguments(
                         source: source, plan: copyPlan, segmentPattern: pattern,
-                        bitstreamFilter: bsf, trackTimescale: copyTimescale), onOutTime: onOutTime)
+                        bitstreamFilter: bsf, trackTimescale: copyTimescale,
+                        headSeek: headSeek), onOutTime: onOutTime)
                     piece = work.appendingPathComponent(String(
                         format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)",
                         ExportEngine.wantedSegmentIndex(plan: copyPlan)))
+                    // The muxer's other segments are dead the moment the run ends — no
+                    // concat list ever names them. With a head seek that is a couple of
+                    // GOPs, but a run that fell back to reading from zero leaves the whole
+                    // pre-clip head, and holding those to the end of the export is what set
+                    // the 43 GB peak (issue #108). Drop them now, not on the export's exit.
+                    discardDeadSegments(prefix: "c\(clipIndex)_s\(s)_cp_", keeping: piece, in: work)
                 } else {
                     piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp.\(ext)")
                     try await run(ffmpeg, ExportEngine.remuxArguments(
@@ -732,6 +812,17 @@ enum BoundaryReencodeEngine {
         let pts = index.pts
         guard pts.count >= 2 else { return nil }
         return (pts[pts.count - 1] - pts[0]) / Double(pts.count - 1)
+    }
+
+    /// Removes the segments one copy run produced and no one keeps — everything sharing the
+    /// run's `c<clip>_s<segment>_cp_` prefix except the wanted piece (issue #108). Best
+    /// effort: a file that won't delete is left for the work directory's own teardown.
+    static func discardDeadSegments(prefix: String, keeping piece: URL, in work: URL) {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: work.path) else { return }
+        for name in names where name.hasPrefix(prefix) && name != piece.lastPathComponent {
+            try? fm.removeItem(at: work.appendingPathComponent(name))
+        }
     }
 
     /// Runs ffmpeg and turns a non-zero exit into a `cutFailed` with its stderr. With
