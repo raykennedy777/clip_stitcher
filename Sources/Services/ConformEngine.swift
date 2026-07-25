@@ -45,15 +45,20 @@ enum ConformEngine {
     /// container-start-relative, the same base the conform's input seek uses, so the
     /// select windows are expressed relative to the seek (validated on all three formats
     /// × three containers in the shell, exact counts and clean decodes).
+    ///
+    /// `reorderDepth` is the depth this piece's decode order is encoded at — the one every
+    /// piece of its join must agree on (ADR-0026); the shallow default keeps the
+    /// pyramid-free command this engine has always produced.
     static func conformVideoArgs(source: VideoProperties, target: VideoProperties,
                                  damage: [DamageZone] = [], windowStart: Double? = nil,
-                                 windowEnd: Double? = nil, crf: Int? = nil) -> [String] {
+                                 windowEnd: Double? = nil, crf: Int? = nil,
+                                 reorderDepth: Int = 1) -> [String] {
         let chain = filterChain(source: source, target: target,
                                 repair: repairSelect(damage: damage, windowStart: windowStart,
                                                      windowEnd: windowEnd,
                                                      sourceFrameRate: source.frameRate))
             .joined(separator: ",")
-        return ["-vf", chain] + encoderArgs(target: target, crf: crf)
+        return ["-vf", chain] + encoderArgs(target: target, crf: crf, reorderDepth: reorderDepth)
     }
 
     /// The time-window select dropping each damage zone inside the kept window
@@ -147,14 +152,16 @@ enum ConformEngine {
     static func conformArguments(
         source: URL, start: Double?, end: Double?,
         sourceVideo: VideoProperties, targetVideo: VideoProperties, output: URL,
-        trackTimescale: Int? = nil, damage: [DamageZone] = [], crf: Int? = nil
+        trackTimescale: Int? = nil, damage: [DamageZone] = [], crf: Int? = nil,
+        reorderDepth: Int = 1
     ) -> [String] {
         var args = ["-v", "error"]
         if let start { args += ["-ss", ExportEngine.timeString(start)] }
         if let end { args += ["-t", ExportEngine.timeString(end - (start ?? 0))] }
         args += ["-i", source.path]
         args += conformVideoArgs(source: sourceVideo, target: targetVideo,
-                                 damage: damage, windowStart: start, windowEnd: end, crf: crf)
+                                 damage: damage, windowStart: start, windowEnd: end, crf: crf,
+                                 reorderDepth: reorderDepth)
         // The export-wide MP4 pin (issue #24): without it the encoder-default 1/12800
         // track collapses next to a copy piece at the cross-clip concat.
         if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
@@ -176,7 +183,7 @@ enum ConformEngine {
     static func produceConformedPiece(
         _ ffmpeg: URL, source: URL, conform: VideoConform,
         start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int,
-        trackTimescale: Int? = nil,
+        trackTimescale: Int? = nil, reorderDepth: Int = 1,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         let piece = work.appendingPathComponent("c\(clipIndex)_conform.\(ext)")
@@ -203,7 +210,8 @@ enum ConformEngine {
                                     sourceVideo: conform.sourceVideo, targetVideo: conform.targetVideo,
                                     output: piece,
                                     trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil,
-                                    damage: conform.damage, crf: conform.crf)
+                                    damage: conform.damage, crf: conform.crf,
+                                    reorderDepth: reorderDepth)
         let parser = ProgressParser()
         let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
             if let t = parser.feed(chunk) {
@@ -521,7 +529,8 @@ enum ConformEngine {
     // The encoder, profile token, and level tokens come from EncoderSelection — the one
     // table both re-encode paths share (ADR-0011 consequences). Conform additionally pins
     // level + color range; M2 carries them through by copy.
-    private static func encoderArgs(target: VideoProperties, crf: Int? = nil) -> [String] {
+    private static func encoderArgs(target: VideoProperties, crf: Int? = nil,
+                                    reorderDepth: Int = 1) -> [String] {
         var args = ["-c:v", EncoderSelection.encoder(for: target.codec),
                     "-profile:v", profile(target)]
         // The conform's rate control (issue #105 follow-up): an explicit CRF when the
@@ -532,7 +541,7 @@ enum ConformEngine {
         switch target.codec {
         case "hevc":
             if let crf { args += ["-crf", String(crf)] }
-            args += ["-x265-params", x265Params(target)]
+            args += ["-x265-params", x265Params(target, reorderDepth: reorderDepth)]
         case "mpeg2video":
             // MPEG-2 has no B-pyramid (its B-frames never reference other B-frames), so its
             // decode-order timestamps are already monotonic — no monotonic-DTS workaround needed.
@@ -542,14 +551,15 @@ enum ConformEngine {
         default:   // h264
             if let crf { args += ["-crf", String(crf)] }
             if let lvl = EncoderSelection.h264Level(target.level) { args += ["-level", lvl] }
-            // Disable B-pyramid (verified in the shell): libx264's default B-pyramid lets B-frames
-            // reference other B-frames, producing a decode order whose DTS is non-monotonic. After
-            // the concat that reordered DTS reaches the final stream-copy mux, and Matroska enforces
-            // monotonic DTS by nudging the backwards values forward — which collapses pairs of frames
-            // onto a single PTS (the duplicate/gapped timestamps bug). Without B-pyramid the DTS is
-            // monotonic from birth, so the conformed clip survives the MKV `-c:v copy` unchanged.
-            // One level of B-frames is kept (compression), just not the pyramid.
-            args += ["-x264-params", "b-pyramid=0"]
+            // Match the join's reorder depth (ADR-0026): a shallow join drops libx264's
+            // default B-pyramid — with it, B-frames reference other B-frames and the piece
+            // needs a depth of 2, which Matroska can only carry when the join's first piece
+            // declares it; misread, the final stream-copy mux collapses pairs of frames onto
+            // a single PTS (the duplicate/gapped timestamps bug). One level of B-frames is
+            // kept either way (compression), just not always the pyramid.
+            args += EncoderSelection.encoderParams(
+                EncoderSelection.reorderDepthParams(depth: reorderDepth, forCodec: target.codec),
+                forCodec: target.codec)
         }
         // Drop an unmapped profile rather than guess (a wrong token aborts the encode).
         if args.count >= 4, args[2] == "-profile:v", args[3].isEmpty {
@@ -574,15 +584,16 @@ enum ConformEngine {
 
     /// libx265 params: quiet logging plus the target's level as `level-idc` (HEVC's probed
     /// `level` is `general_level_idc` = level × 30, e.g. 123 → 4.1).
-    private static func x265Params(_ target: VideoProperties) -> String {
+    private static func x265Params(_ target: VideoProperties, reorderDepth: Int = 1) -> String {
         var p = "log-level=error"
         if let lvl = EncoderSelection.hevcLevel(target.level) {
             p += ":level-idc=\(lvl)"
         }
-        // Disable B-pyramid for the same monotonic-DTS reason as the libx264 path (see encoderArgs):
-        // keep the conformed HEVC clip's decode-order timestamps monotonic so the final MKV
-        // stream-copy mux can't collapse frames onto duplicate PTS.
-        p += ":b-pyramid=0"
+        // Match the join's reorder depth for the same reason as the libx264 path (see
+        // encoderArgs), through the same shared entry so the two can't drift.
+        for entry in EncoderSelection.reorderDepthParams(depth: reorderDepth, forCodec: target.codec) {
+            p += ":\(entry)"
+        }
         return p
     }
 

@@ -505,6 +505,11 @@ enum ClipDoctorEngine {
             work: work, ext: ext, clipIndex: 0, codec: video.codec,
             containerStart: containerStart, frameRate: video.frameRate,
             sourceDamaged: true, copyStrategy: .boundedKeyframe, fieldCoded: fieldCoded,
+            // A repair joins re-encoded spans with copies of this one source, so the depth
+            // to match is the source's own (ADR-0026). The MBAFF tail is exempt: its recipe
+            // pins its own encoder params (b-pyramid included), and its single copy head is
+            // always the join's first piece, so it already declares the deepest depth.
+            reorderDepth: fieldCoded ? nil : (video.reorderDepth ?? 1),
             onProgress: { w in progress(0.85 * w) })
 
         // 2. Mux the repaired video with the in-codec, gap-filled audio into the staged file.

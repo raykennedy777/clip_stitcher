@@ -41,6 +41,12 @@ struct ExportItem {
     /// duration/frame arithmetic derived from it is 2× off for the whole-frame encoder
     /// (ADR-0022). `false` for every other clip; nothing reads it on the conform path.
     var fieldCoded: Bool = false
+    /// The source stream's reorder depth (`VideoProperties.reorderDepth`) — how deeply its
+    /// decode order is shuffled. Read only through `ExportEngine.joinReorderDepth`: this
+    /// clip's *copy* pieces carry this depth unchanged, so it sets the bar the pieces the
+    /// app encodes are matched to (ADR-0026). `nil` (unprobed, or a conformed clip, whose
+    /// pieces are all fresh encodes) counts as the shallow 1.
+    var sourceReorderDepth: Int? = nil
     var audioStart: Double? = nil
     var audioEnd: Double? = nil
     /// What feeds each of this clip's audio legs, by output track (ADR-0014): the clip's
@@ -229,6 +235,53 @@ enum ExportEngine {
         return items.map {
             pieceExtension(container: container, fieldCoded: $0.fieldCoded, plan: $0.segments)
         }
+    }
+
+    // MARK: - Reorder depth (ADR-0026, issue #106)
+
+    /// The **reorder depth** every piece of one output must agree on: the deepest depth any
+    /// *copy* piece in it will carry. Matroska stores no DTS, so the demuxer latches a
+    /// joined file's reorder depth from its first piece; a later piece needing a deeper one
+    /// is read with non-monotonic DTS, which the next stream-copy mux turns into duplicate
+    /// PTS and early frames (`EncoderSelection.reorderDepthParams`). Copy pieces carry the
+    /// source's depth and can't be changed — so they set the bar, and the pieces this app
+    /// *encodes* are matched to it.
+    ///
+    /// A conformed item contributes nothing: its every piece is a fresh encode. A
+    /// smart-rendered item contributes its source's depth only when the plan actually
+    /// copies something. An unprobed depth counts as the shallow 1, the floor the shallowest
+    /// join needs anyway.
+    static func joinReorderDepth(items: [ExportItem]) -> Int {
+        items.reduce(1) { deepest, item in
+            guard item.conform == nil, item.segments.contains(where: { $0.kind == .copy }) else {
+                return deepest
+            }
+            return max(deepest, item.sourceReorderDepth ?? 1)
+        }
+    }
+
+    /// The reorder depth **one item's** re-encoded pieces are produced at. The join's depth
+    /// (`joinReorderDepth`) when this item's own first piece is one this app encodes — then
+    /// that piece is what the join latches, so it must declare the deepest depth in the
+    /// join. Otherwise the item's first piece is a stream copy carrying its *source's*
+    /// depth, and its own later re-encodes must not out-deepen it: matching the source is
+    /// the most this item can do (and keeps its own internal join readable). Whether the
+    /// join as a whole then stays readable is what `ExportPlanner.reorderDepthWarning`
+    /// judges — this is a per-item recipe, not a promise about the file.
+    ///
+    /// Never deeper than the encoders can reach (`deepestEncodableReorderDepth`), so the
+    /// value handed to the encoders is always one they can actually produce.
+    static func pieceReorderDepth(item: ExportItem, joinDepth: Int) -> Int {
+        let depth = firstPieceIsEncoded(item) ? joinDepth : (item.sourceReorderDepth ?? 1)
+        return min(depth, EncoderSelection.deepestEncodableReorderDepth)
+    }
+
+    /// Whether the item's first video piece is one this app encodes (a conform, or a plan
+    /// whose first segment is a re-encode) rather than a stream copy — i.e. whether the
+    /// depth its container declares is ours to choose.
+    static func firstPieceIsEncoded(_ item: ExportItem) -> Bool {
+        if item.conform != nil { return true }
+        return item.segments.first?.kind == .reEncode
     }
 
     /// The segment the wanted piece lands in: index 0 when the clip starts at its own
@@ -908,16 +961,25 @@ enum ExportEngine {
             // internal MP4 timescale pins (#18/#24) key off the *piece* extension, so
             // they never reach a `.ts` piece.
             let pieceExts = pieceExtensions(container: ext, mode: settings.mode, items: items)
+            // The reorder depth this output's pieces must agree on (ADR-0026): in
+            // `.connect` the whole join sets it; in `.separate` each clip is its own file,
+            // so each item sets its own.
+            let joinDepth = settings.mode == .connect
+                ? joinReorderDepth(items: items)
+                : nil
             for (i, item) in items.enumerated() {
                 let withinClip: @Sendable (Double) -> Void = { w in
                     progress(ExportProgress.clipFraction(clipIndex: i, clipCount: items.count, withinClip: w))
                 }
+                let depth = pieceReorderDepth(
+                    item: item, joinDepth: joinDepth ?? joinReorderDepth(items: [item]))
                 if let conform = item.conform {
                     videoPieces.append(try await ConformEngine.produceConformedPiece(
                         ffmpeg, source: item.source, conform: conform,
                         start: item.audioStart, end: item.audioEnd, work: work,
                         ext: pieceExts[i], clipIndex: i,
-                        trackTimescale: exportTimescale, onProgress: withinClip))
+                        trackTimescale: exportTimescale, reorderDepth: depth,
+                        onProgress: withinClip))
                 } else {
                     // The planner already guarantees a field-coded item's plan is
                     // copy-only (`fieldCodedPlanNotCopyOnly`), so `item.fieldCoded` is
@@ -929,7 +991,7 @@ enum ExportEngine {
                         codec: item.codec, trackTimescale: exportTimescale,
                         containerStart: item.containerStart, frameRate: item.frameRate,
                         sourceDamaged: item.sourceDamaged,
-                        fieldCoded: item.fieldCoded,
+                        fieldCoded: item.fieldCoded, reorderDepth: depth,
                         onProgress: withinClip))
                 }
                 progress(0.7 * Double(i + 1) / Double(items.count))

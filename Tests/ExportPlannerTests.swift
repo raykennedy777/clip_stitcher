@@ -719,4 +719,51 @@ struct ExportPlannerTests {
         #expect(try !item(for: clip(video: video())).fieldCoded)
         #expect(try !item(for: fieldCodedClip(codec: "mpeg2video")).fieldCoded)
     }
+    // MARK: reorder depth the app can't fix (ADR-0026, issue #106)
+
+    /// The one shape no encoder setting reaches: the first clip's own **stream-copied**
+    /// frames are shallower than a later clip's, and an MKV records only one reorder depth
+    /// (latched from the first piece). The export says so, naming the clip to put first, and
+    /// offers the containers that record depth per frame.
+    @Test func mkvJoinWarnsWhenTheFirstClipsCopiesAreShallowerThanALaterClips() {
+        var settings = OutputSettings(); settings.container = .mkv; settings.mode = .connect
+        let shallowFirst = copyingItem(name: "Broadcast", depth: 1)
+        let deepLater = copyingItem(name: "Web feed", depth: 2)
+        let note = ExportPlanner.reorderDepthWarning(items: [shallowFirst, deepLater], settings: settings)
+        #expect(note?.contains("Web feed") == true)
+        #expect(note?.contains("Broadcast") == true)
+
+        // The deep clip first: its own piece declares the depth, so the join is readable.
+        #expect(ExportPlanner.reorderDepthWarning(items: [deepLater, shallowFirst],
+                                                  settings: settings) == nil)
+        // Equal depths, and a single clip, never warn.
+        #expect(ExportPlanner.reorderDepthWarning(items: [deepLater, deepLater],
+                                                  settings: settings) == nil)
+        #expect(ExportPlanner.reorderDepthWarning(items: [shallowFirst], settings: settings) == nil)
+    }
+
+    /// TS and MP4 store a real DTS per frame, and `.separate` writes each clip to its own
+    /// file — neither can hit the constraint, so neither warns.
+    @Test func onlyMkvConnectJoinsCanHitTheReorderDepthConstraint() {
+        let items = [copyingItem(name: "Broadcast", depth: 1), copyingItem(name: "Web feed", depth: 2)]
+        for container in [Container.ts, .mp4] {
+            var settings = OutputSettings(); settings.container = container; settings.mode = .connect
+            #expect(ExportPlanner.reorderDepthWarning(items: items, settings: settings) == nil)
+        }
+        var separate = OutputSettings(); separate.container = .mkv; separate.mode = .separate
+        #expect(ExportPlanner.reorderDepthWarning(items: items, settings: separate) == nil)
+        // Audio-only outputs have no video pieces to disagree.
+        var audioOnly = OutputSettings(); audioOnly.container = .mkv
+        audioOnly.mode = .connect; audioOnly.type = .audioOnly
+        #expect(ExportPlanner.reorderDepthWarning(items: items, settings: audioOnly) == nil)
+    }
+
+    /// A copy-first plan of a source at `depth` — the shape whose first piece declares a
+    /// depth the app didn't choose.
+    private func copyingItem(name: String, depth: Int) -> ExportItem {
+        ExportItem(source: URL(fileURLWithPath: "/tmp/\(name).mkv"), displayName: name,
+                   segments: [PlannedSegment(kind: .copy, range: 0..<4)],
+                   sourceReorderDepth: depth)
+    }
+
 }

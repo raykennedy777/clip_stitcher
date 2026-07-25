@@ -133,6 +133,9 @@ enum StitchPipeline {
             }
             items.append(item)
         }
+        if let note = ExportPlanner.reorderDepthWarning(items: items, settings: settings) {
+            outcome.warnings.append(note)
+        }
         if settings.container == .mp4 && items.contains(where: { $0.codec == "mpeg2video" }) {
             outcome.warnings.append("MPEG-2 video sits awkwardly in MP4 (possible glitch at joins) — choose the TS container for this footage.")
         }

@@ -202,12 +202,46 @@ enum ExportPlanner {
                               sourceDamaged: !(clip.damageZones ?? []).isEmpty,
                               fieldCoded: FieldCodedSupport.requiresCopyOnlyCuts(
                                 fieldCoded: clip.fieldCoded, codec: clip.video?.codec),
+                              sourceReorderDepth: clip.video?.reorderDepth,
                               audioStart: window.start, audioEnd: window.end,
                               audioSources: input.audioSources,
                               audioMixFilters: input.audioMixFilters,
                               audioDuration: window.duration,
                               truncatedEndingTrim: trimEnd)
         }
+    }
+
+    // MARK: - Reorder depth (ADR-0026, issue #106)
+
+    /// The export warning for a join Matroska can't keep readable, or nil when it can. A
+    /// joined MKV carries **one** reorder depth — the demuxer latches it from the first
+    /// piece, because Matroska stores no DTS — so a clip whose decode order is shuffled more
+    /// deeply than the *first* clip's is read wrong: duplicate timestamps and frames landing
+    /// early (ADR-0026). Every piece the app encodes is matched to the join's depth
+    /// (`ExportEngine.pieceReorderDepth`), which covers it whenever the first piece is one of
+    /// ours; what can't be fixed is a first clip whose own **stream-copied** frames are
+    /// shallower than a later clip's — nothing may re-encode them.
+    ///
+    /// Only MKV joins of more than one clip are at risk: TS and MP4 store a real DTS per
+    /// frame, and `.separate` writes each clip to its own file (where the app's own pieces
+    /// are matched to that clip's source). Named in plain terms with the fix that works —
+    /// putting the deeper clip first, or choosing a container that can carry both.
+    static func reorderDepthWarning(items: [ExportItem], settings: OutputSettings) -> String? {
+        guard settings.container == .mkv, settings.mode == .connect, items.count > 1,
+              settings.type != .audioOnly, let first = items.first else { return nil }
+        let joinDepth = ExportEngine.joinReorderDepth(items: items)
+        let declared = ExportEngine.firstPieceIsEncoded(first)
+            ? min(joinDepth, EncoderSelection.deepestEncodableReorderDepth)
+            : (first.sourceReorderDepth ?? 1)
+        guard declared < joinDepth,
+              let deeper = items.first(where: {
+                  $0.conform == nil && ($0.sourceReorderDepth ?? 1) > declared
+                      && $0.segments.contains(where: { $0.kind == .copy })
+              }) else { return nil }
+        return "“\(deeper.displayName)” shuffles its frame order more deeply than "
+            + "“\(first.displayName)”, and an MKV can only record one such order per file —"
+            + " other tools may read this join's timestamps wrong. Put “\(deeper.displayName)”"
+            + " first, or export as MP4 or TS, which record it per frame."
     }
 
     // MARK: - Truncated-ending classification (#79)

@@ -376,10 +376,21 @@ enum BoundaryReencodeEngine {
         encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
         trackTimescale: Int? = nil, containerStart: Double = 0, frameRate: String? = nil,
         sourceDamaged: Bool = false, copyStrategy: CopyStrategy = .segmentMux,
-        fieldCoded: Bool = false,
+        fieldCoded: Bool = false, reorderDepth: Int? = nil,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
+        // Match the re-encoded pieces' reorder depth to the join they land in (ADR-0026):
+        // every piece of a Matroska join has to agree on it, and this plan's *copy* pieces
+        // carry the source's depth unchanged. The caller decides the depth — it sees the
+        // whole join (`ExportEngine.pieceReorderDepth`); `nil` leaves the encoder args
+        // exactly as passed (Clip Doctor's single-source repair, whose copy head already
+        // declares the deepest depth in its own join).
+        let encoder = reorderDepth.map {
+            EncoderSelection.withEncoderParams(
+                EncoderSelection.reorderDepthParams(depth: $0, forCodec: codec),
+                in: encoder, forCodec: codec)
+        } ?? encoder
         // A repaired segment needs the source rate for its fps fill and slot budget;
         // the planner only attaches damage when the rate parses, so this is a
         // can't-happen guard, not a policy. `repairRate` is read only by repaired

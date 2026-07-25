@@ -22,6 +22,14 @@ struct VideoProperties: Codable, Equatable, Sendable {
     /// stream probes as.
     var colorSpace: String? = nil
     var colorRange: String?
+    /// The stream's **reorder depth** (ffprobe `has_b_frames`): how many frames a decoder
+    /// must hold back to emit them in presentation order. 0/1 for simple B-frame cadences,
+    /// 2 once B-frames reference other B-frames (a B-pyramid — both x264's and x265's
+    /// default). Not a match dimension: it says nothing about how a clip *looks*, only how
+    /// deeply its decode order is shuffled — which is what a Matroska join has to agree on
+    /// (`ExportEngine.joinReorderDepth`, ADR-0026). Defaulted so older saves decode as nil,
+    /// which the join treats as the shallow 1.
+    var reorderDepth: Int? = nil
 }
 
 /// One probed audio stream of a source file (ADR-0014). `language`/`title` come from

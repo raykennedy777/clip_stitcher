@@ -47,6 +47,46 @@ struct EncoderSelectionTests {
         #expect(EncoderSelection.h264Level("High") == nil)
     }
 
+    // MARK: reorder depth (ADR-0026, issue #106)
+
+    /// A shallow join drops the encoders' default B-pyramid; a deep one keeps it (the
+    /// default already produces depth 2). MPEG-2 has no pyramid to switch off.
+    @Test func reorderDepthParamsSwitchThePyramidOnlyForAShallowJoin() {
+        #expect(EncoderSelection.reorderDepthParams(depth: 1, forCodec: "h264") == ["b-pyramid=0"])
+        #expect(EncoderSelection.reorderDepthParams(depth: 1, forCodec: "hevc") == ["b-pyramid=0"])
+        #expect(EncoderSelection.reorderDepthParams(depth: 0, forCodec: "h264") == ["b-pyramid=0"])
+        #expect(EncoderSelection.reorderDepthParams(depth: 2, forCodec: "h264") == [])
+        #expect(EncoderSelection.reorderDepthParams(depth: 2, forCodec: "hevc") == [])
+        // MPEG-2's B-frames never reference other B-frames: nothing to say, either way.
+        #expect(EncoderSelection.reorderDepthParams(depth: 1, forCodec: "mpeg2video") == [])
+        #expect(EncoderSelection.reorderDepthParams(depth: 2, forCodec: "mpeg2video") == [])
+    }
+
+    @Test func encoderParamsRideTheCodecsOwnFlag() {
+        #expect(EncoderSelection.encoderParams(["b-pyramid=0"], forCodec: "h264")
+            == ["-x264-params", "b-pyramid=0"])
+        #expect(EncoderSelection.encoderParams(["b-pyramid=0"], forCodec: "hevc")
+            == ["-x265-params", "b-pyramid=0"])
+        #expect(EncoderSelection.encoderParams(["a=1", "b=2"], forCodec: "h264")
+            == ["-x264-params", "a=1:b=2"])
+        // Nothing to carry, and a codec with no such flag, both emit no args.
+        #expect(EncoderSelection.encoderParams([], forCodec: "h264") == [])
+        #expect(EncoderSelection.encoderParams(["b-pyramid=0"], forCodec: "mpeg2video") == [])
+    }
+
+    /// ffmpeg honours only the last `-x264-params`, so entries merge into an existing flag
+    /// (Clip Doctor's MBAFF repair args carry their own) rather than being appended twice.
+    @Test func encoderParamsMergeIntoAnExistingFlagNeverDuplicateIt() {
+        let mbaff = ["-c:v", "libx264", "-x264-params", "ref=5:b-pyramid=0", "-bsf:v", "dump_extra"]
+        #expect(EncoderSelection.withEncoderParams(["keyint=25"], in: mbaff, forCodec: "h264")
+            == ["-c:v", "libx264", "-x264-params", "ref=5:b-pyramid=0:keyint=25",
+                "-bsf:v", "dump_extra"])
+        let plain = ["-c:v", "libx265", "-pix_fmt", "yuv420p10le"]
+        #expect(EncoderSelection.withEncoderParams(["b-pyramid=0"], in: plain, forCodec: "hevc")
+            == plain + ["-x265-params", "b-pyramid=0"])
+        #expect(EncoderSelection.withEncoderParams([], in: plain, forCodec: "hevc") == plain)
+    }
+
     @Test func hevcLevelIdcFromGeneralLevelIdc() {
         // HEVC's probed level is general_level_idc = level × 30: 123 → 4.1, 120 → 4.0
         #expect(EncoderSelection.hevcLevel("123") == "4.1")

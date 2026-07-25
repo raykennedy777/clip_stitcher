@@ -71,6 +71,30 @@ struct ConformEngineTests {
         ])
     }
 
+    /// A conform piece joining **deep** copy pieces keeps the encoder's default B-pyramid
+    /// (ADR-0026): its container declares the join's reorder depth, and an MKV latches that
+    /// from the first piece, so a shallower conform in front of a depth-2 copy is read with
+    /// duplicate timestamps (issue #106). The shallow default — every join whose copies are
+    /// shallow, and every non-MKV output, where depth is per frame anyway — keeps the
+    /// pyramid-free command this engine has always produced.
+    @Test func aDeepJoinKeepsTheConformsBPyramid() {
+        let deep = ConformEngine.conformVideoArgs(source: h264, target: hevc, reorderDepth: 2)
+        #expect(deep == [
+            "-vf", "scale=1440:1080,pad=1920:1080:240:0,setsar=1/1,format=yuv420p10le,fps=50",
+            "-c:v", "libx265", "-profile:v", "main10",
+            "-x265-params", "log-level=error:level-idc=4.1",
+            "-color_range", "tv",
+        ])
+        #expect(!ConformEngine.conformVideoArgs(source: mpeg2, target: h264, reorderDepth: 2)
+            .contains("-x264-params"))
+        // Depth 1 is the default, so today's shallow commands are byte-identical.
+        #expect(ConformEngine.conformVideoArgs(source: h264, target: hevc, reorderDepth: 1)
+            == ConformEngine.conformVideoArgs(source: h264, target: hevc))
+        // An MPEG-2 target has no pyramid either way.
+        #expect(ConformEngine.conformVideoArgs(source: hevc, target: mpeg2, reorderDepth: 2)
+            == ConformEngine.conformVideoArgs(source: hevc, target: mpeg2))
+    }
+
     /// The conform CRF knob (issue #105 follow-up): an explicit CRF lands as the `-crf`
     /// wrapper flag on both x264 and x265 (de-risked in the shell on both encoders ×
     /// all three piece containers, alongside the params flags), an MPEG-2 target

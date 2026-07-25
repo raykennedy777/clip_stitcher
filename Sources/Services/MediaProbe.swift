@@ -68,7 +68,8 @@ enum MediaProbe {
                 colorPrimaries: s.color_primaries,
                 colorTransfer: s.color_transfer,
                 colorSpace: s.color_space,
-                colorRange: s.color_range
+                colorRange: s.color_range,
+                reorderDepth: s.has_b_frames
             )
         }
 
@@ -252,6 +253,9 @@ private struct FFStream: Decodable {
     var color_transfer: String?
     var color_space: String?
     var color_range: String?
+    /// The stream's reorder depth (`VideoProperties.reorderDepth`, ADR-0026). Absent on
+    /// audio streams and on demuxers that don't report it.
+    var has_b_frames: Int?
     var sample_rate: String?
     var channels: Int?
     var channel_layout: String?

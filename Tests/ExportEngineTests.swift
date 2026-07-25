@@ -1108,6 +1108,74 @@ struct FieldCodedCopyCutExportTests {
         #expect(durations[1] == nil)
     }
 
+    // MARK: reorder depth across a join (ADR-0026, issue #106)
+
+    /// A minimal probed video spec — the reorder-depth tests only care that a conform
+    /// *exists* on the item, not what it transforms.
+    private func video() -> VideoProperties {
+        VideoProperties(codec: "h264", profile: nil, level: nil, width: 704, height: 528,
+                        frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: nil,
+                        sampleAspectRatio: nil, colorPrimaries: nil, colorTransfer: nil,
+                        colorRange: nil)
+    }
+
+    /// A copy piece carries its source's reorder depth verbatim, so the join's depth is the
+    /// deepest of them — that is the bar the app's own encodes are matched to. A conformed
+    /// item contributes nothing (every piece of it is a fresh encode), and neither does a
+    /// plan that copies nothing.
+    @Test func theJoinsDepthIsTheDeepestCopiedPiece() {
+        let src = URL(fileURLWithPath: "/tmp/a.mkv")
+        func copying(_ depth: Int?) -> ExportItem {
+            ExportItem(source: src, segments: [PlannedSegment(kind: .copy, range: 0..<4)],
+                       sourceReorderDepth: depth)
+        }
+        func reencodingOnly(_ depth: Int?) -> ExportItem {
+            ExportItem(source: src, segments: [PlannedSegment(kind: .reEncode, range: 0..<4)],
+                       sourceReorderDepth: depth)
+        }
+        #expect(ExportEngine.joinReorderDepth(items: [copying(2)]) == 2)
+        #expect(ExportEngine.joinReorderDepth(items: [copying(1), copying(2)]) == 2)
+        #expect(ExportEngine.joinReorderDepth(items: [copying(1)]) == 1)
+        // An unprobed depth counts as the shallow 1 — the floor every join needs anyway.
+        #expect(ExportEngine.joinReorderDepth(items: [copying(nil)]) == 1)
+        // Nothing copied: a fully re-encoded clip imposes no depth, whatever its source is.
+        #expect(ExportEngine.joinReorderDepth(items: [reencodingOnly(2)]) == 1)
+        // Neither does a conformed clip (the repro: its deep source is irrelevant, #106).
+        let conformed = ExportItem(source: src, sourceReorderDepth: 2,
+                                   conform: ConformEngine.VideoConform(
+                                       sourceVideo: video(), targetVideo: video()))
+        #expect(ExportEngine.joinReorderDepth(items: [conformed, reencodingOnly(2)]) == 1)
+        #expect(ExportEngine.joinReorderDepth(items: [conformed, copying(2)]) == 2)
+    }
+
+    /// An item whose own first piece is one the app encodes declares the *join's* depth —
+    /// that piece is what an MKV latches. An item whose first piece is a stream copy can
+    /// only match its own source: out-deepening the copy standing in front of it would
+    /// break that item's internal join.
+    @Test func anItemsPiecesFollowTheJoinOnlyWhenItsFirstPieceIsOurs() {
+        let src = URL(fileURLWithPath: "/tmp/a.mkv")
+        let copyFirst = ExportItem(source: src,
+                                   segments: [PlannedSegment(kind: .copy, range: 0..<4),
+                                              PlannedSegment(kind: .reEncode, range: 4..<8)],
+                                   sourceReorderDepth: 1)
+        #expect(ExportEngine.pieceReorderDepth(item: copyFirst, joinDepth: 2) == 1)
+        let reencodeFirst = ExportItem(source: src,
+                                       segments: [PlannedSegment(kind: .reEncode, range: 0..<4),
+                                                  PlannedSegment(kind: .copy, range: 4..<8)],
+                                       sourceReorderDepth: 2)
+        #expect(ExportEngine.pieceReorderDepth(item: reencodeFirst, joinDepth: 2) == 2)
+        let conformed = ExportItem(source: src, conform: ConformEngine.VideoConform(
+            sourceVideo: video(), targetVideo: video()))
+        #expect(ExportEngine.pieceReorderDepth(item: conformed, joinDepth: 2) == 2)
+        #expect(ExportEngine.pieceReorderDepth(item: conformed, joinDepth: 1) == 1)
+        // Never deeper than the encoders can actually produce.
+        let veryDeep = ExportItem(source: src,
+                                  segments: [PlannedSegment(kind: .reEncode, range: 0..<4)],
+                                  sourceReorderDepth: 4)
+        #expect(ExportEngine.pieceReorderDepth(item: veryDeep, joinDepth: 4)
+            == EncoderSelection.deepestEncodableReorderDepth)
+    }
+
     // MARK: final outputs keep the container extension
 
     @Test func plannedOutputsNameTheContainerExtensionForAFieldCodedClip() {

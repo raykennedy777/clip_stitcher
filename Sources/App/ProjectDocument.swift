@@ -889,6 +889,11 @@ final class ProjectDocument: ReferenceFileDocument {
                 }
                 items.append(item)
             }
+            // A join whose first clip's copied frames are shallower than a later clip's
+            // can't be kept readable in MKV, whatever the app encodes (ADR-0026).
+            if let note = ExportPlanner.reorderDepthWarning(items: items, settings: project.output) {
+                warnings.append(note)
+            }
             // MPEG-2 in an MP4 container muxes with a non-monotonic-DTS warning at joins
             // and mislabels the audio; TS is the right container for this footage (ADR-0008).
             if project.output.container == .mp4 && items.contains(where: { $0.codec == "mpeg2video" }) {

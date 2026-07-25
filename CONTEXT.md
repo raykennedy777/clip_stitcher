@@ -172,6 +172,20 @@ survived. Unlike the implicit repair every export performs, Clip Doctor proves t
 rather than only reporting the repair attempt.
 _Avoid_: fix tool, restoration, error concealment
 
+**Reorder depth**:
+How many frames a decoder must hold back to emit a stream's frames in presentation order
+(ffprobe `has_b_frames`): 1 for a simple B-frame cadence, 2 once B-frames reference other
+B-frames (a B-pyramid — most modern H.264/HEVC sources, and both encoders' default). An MKV
+records **one** reorder depth per file, latched from its first piece, so every piece of a
+joined MKV has to agree on it: a deeper piece after a shallower one is read with duplicate
+timestamps and frames landing early. Every piece the app *encodes* is therefore produced at
+the depth the join's stream-**copied** pieces carry (they can't be changed — that's what
+lossless means); where the first clip's own copies are the shallow ones, the export says so
+rather than shipping it (issue #106, ADR-0026). TS and MP4 record depth per frame and are
+unaffected.
+_Avoid_: B-pyramid depth (that's one cause, not the property), DTS delay, has_b_frames in
+user-facing text
+
 **Field-coded (PAFF)**:
 A source that stores each displayed frame as two field pictures (top + bottom), ~2 packets per
 frame, so the app's packet-based frame index runs at 2× the display rate. An H.264 field-coded
