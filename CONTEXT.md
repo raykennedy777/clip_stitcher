@@ -22,6 +22,15 @@ Re-encoding only the partial GOP(s) at a clip's in/out points when a cut falls b
 keyframes, so the cut is frame-exact while the rest of the clip is stream-copied.
 _Avoid_: partial encode, edge encode
 
+**Re-encode rate control**:
+The fixed near-lossless quality every re-encoded *piece* of a stream-copied export is held
+to — CRF 18 for H.264/HEVC, and for MPEG-2 (which has no CRF mode) a bitrate target derived
+from the source's own measured average. An engine constant, not a user control: a boundary
+re-encode or repaired segment is seconds-to-minutes inside an otherwise copied file and owes
+the copied content beside it the same quality. Distinct from the project's **conform CRF**,
+which is a target-spec choice the user makes for a fully re-encoded clip.
+_Avoid_: quality setting, bitrate setting
+
 **Keyframe-aligned cut**:
 An in/out point that lands exactly on a keyframe, allowing a pure stream-copy with no
 boundary re-encode.

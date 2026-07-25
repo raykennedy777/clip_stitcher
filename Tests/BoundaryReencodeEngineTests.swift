@@ -14,27 +14,73 @@ struct BoundaryReencodeEngineTests {
     @Test func h264ReencodesWithLibx264AtTheSourcePixelFormat() {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "h264", pixelFormat: "yuv420p", fieldOrder: "progressive")
-            == ["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            == ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"])
     }
 
     @Test func hevcReencodesWithLibx265Keeping10Bit() {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "hevc", pixelFormat: "yuv420p10le", fieldOrder: "unknown")
-            == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le"])
+            == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "18"])
     }
 
     @Test func mpeg2ReencodesInterlacedTopFieldFirst() {
         // ffmpeg carries SAR through automatically, so no -aspect is needed; the
         // interlace flags preserve field_order=tt (verified in the shell).
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
-            codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "tt")
-            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-flags", "+ildct+ilme", "-top", "1"])
+            codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "tt", bitrate: 2_530_995)
+            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-flags", "+ildct+ilme", "-top", "1",
+                "-b:v", "3163744", "-maxrate", "4745616", "-bufsize", "6327488"])
     }
 
     @Test func progressiveMpeg2HasNoInterlaceFlags() {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
-            codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "progressive")
-            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p"])
+            codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "progressive",
+            bitrate: 2_530_995)
+            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p",
+                "-b:v", "3163744", "-maxrate", "4745616", "-bufsize", "6327488"])
+    }
+
+    // MARK: rate control (issue #110)
+
+    /// Every piece built from these args carries explicit rate control at a fixed
+    /// near-lossless constant — without it each encoder used its *own* default (CRF 28 on
+    /// libx265, 23 on libx264), so a boundary re-encode shipped at half the bitrate of the
+    /// copy pieces beside it. A codec with no encoder entry re-encodes as H.264
+    /// (`EncoderSelection.encoder`), so it takes the same CRF.
+    @Test func crfCapableFamiliesTakeTheFixedNearLosslessCrf() {
+        #expect(BoundaryReencodeEngine.rateControlArgs(codec: "h264", bitrate: nil)
+            == ["-crf", "18"])
+        #expect(BoundaryReencodeEngine.rateControlArgs(codec: "hevc", bitrate: 40_000_000)
+            == ["-crf", "18"])   // a known bitrate changes nothing on a CRF-capable encoder
+        #expect(BoundaryReencodeEngine.rateControlArgs(codec: "vp9", bitrate: nil)
+            == ["-crf", "18"])
+    }
+
+    /// mpeg2video has no CRF mode, so it targets the source's own measured bitrate plus
+    /// deliberate headroom (re-encoding decoded frames is less efficient than the original
+    /// encode), with `-maxrate`/`-bufsize` bounding the peaks at 1.5× and 2× the target.
+    @Test func mpeg2TargetsTheSourceBitrateWithHeadroom() {
+        #expect(BoundaryReencodeEngine.rateControlArgs(codec: "mpeg2video", bitrate: 4_000_000)
+            == ["-b:v", "5000000", "-maxrate", "7500000", "-bufsize", "10000000"])
+    }
+
+    /// An unmeasurable source bitrate (unreadable probe, damaged file) falls back to a fixed
+    /// low quantiser — bigger than the source but never a quality regression, and the export
+    /// still completes. Never back to the encoder's 200 kbps default.
+    @Test func mpeg2FallsBackToAFixedQuantiserWhenNoBitrateIsKnown() {
+        #expect(BoundaryReencodeEngine.rateControlArgs(codec: "mpeg2video", bitrate: nil)
+            == ["-q:v", "2"])
+        #expect(BoundaryReencodeEngine.rateControlArgs(codec: "mpeg2video", bitrate: 0)
+            == ["-q:v", "2"])
+    }
+
+    /// The PAFF damage-to-EOF repair keeps its own pinned `-crf 18` recipe (issue #54),
+    /// untouched by the rate control the source-matched builder now adds.
+    @Test func theFieldCodedRepairRecipeIsUnchanged() {
+        let args = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt")
+        #expect(args.filter { $0 == "-crf" }.count == 1)
+        #expect(!args.contains("-q:v"))
+        #expect(!args.contains("-b:v"))
     }
 
     // MARK: source-profile matching (ADR-0009)
@@ -44,15 +90,16 @@ struct BoundaryReencodeEngineTests {
     @Test func aKnownSourceProfileIsMatchedExplicitly() {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "h264", profile: "Baseline", pixelFormat: "yuv420p", fieldOrder: "progressive")
-            == ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "baseline"])
+            == ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "baseline", "-crf", "18"])
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "hevc", profile: "Main 10", pixelFormat: "yuv420p10le", fieldOrder: "unknown")
-            == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-profile:v", "main10"])
-        // The profile arg precedes the interlace flags for MPEG-2.
+            == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-profile:v", "main10", "-crf", "18"])
+        // The profile arg precedes the interlace flags for MPEG-2, and the rate control
+        // closes the array — the exact order de-risked in the shell.
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "mpeg2video", profile: "Main", pixelFormat: "yuv420p", fieldOrder: "tt")
             == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-profile:v", "main",
-                "-flags", "+ildct+ilme", "-top", "1"])
+                "-flags", "+ildct+ilme", "-top", "1", "-q:v", "2"])
     }
 
     /// An unrecognised profile is omitted rather than guessed (a wrong token aborts the
@@ -61,7 +108,7 @@ struct BoundaryReencodeEngineTests {
     @Test func anUnknownProfileIsOmittedNotGuessed() {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "h264", profile: "Some Exotic Profile", pixelFormat: "yuv420p", fieldOrder: "progressive")
-            == ["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            == ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"])
         #expect(EncoderSelection.encoderProfile(nil, codec: "h264") == nil)
         #expect(EncoderSelection.encoderProfile("Main 10", codec: "mpeg2video") == nil)
     }

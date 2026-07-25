@@ -96,6 +96,74 @@ struct MediaProbeTests {
         #expect(result.audioTracks.count == 1)
     }
 
+    // MARK: video bitrate (re-encode rate control, #110)
+
+    /// The **video stream's** own reported `bit_rate` rides on `VideoProperties` — the number
+    /// an MPEG-2 re-encode targets. Never the format-level bit rate, which includes the audio
+    /// tracks' share (2.67 vs 2.53 Mbps on the real MPEG-PS fixture).
+    @Test func parseProbeCarriesTheVideoStreamBitrateNotTheFormats() throws {
+        let json = Data("""
+        {"streams":[
+          {"codec_type":"video","codec_name":"h264","bit_rate":"2453976"},
+          {"codec_type":"audio","codec_name":"aac","bit_rate":"128157"}
+        ],"format":{"bit_rate":"2588393"}}
+        """.utf8)
+        #expect(try MediaProbe.parseProbe(json: json).video?.bitrate == 2_453_976)
+    }
+
+    /// MPEG-PS carries no video-stream `bit_rate` at all — the field is absent, and stays nil
+    /// rather than 0, so the sample (or the fixed-quantiser fallback) takes over.
+    @Test func parseProbeLeavesAnUnreportedVideoBitrateNil() throws {
+        let json = Data("""
+        {"streams":[ {"codec_type":"video","codec_name":"mpeg2video"} ]}
+        """.utf8)
+        #expect(try MediaProbe.parseProbe(json: json).video?.bitrate == nil)
+    }
+
+    /// The bounded packet sample: all packet sizes count, and the window is `max − min` of
+    /// the timed packets scaled by `n/(n−1)` — packets arrive in *decode* order, so last −
+    /// first is not the span, and the timed instants run one frame short of the content they
+    /// represent. 30000 bytes over four 25 fps packets ⇒ 0.16 s ⇒ 1.5 Mbps.
+    @Test func parseSampledBitrateSumsPacketSizesOverTheTimedSpan() {
+        let json = Data("""
+        {"packets":[
+          {"pts_time":"0.540000","size":"10000"},
+          {"pts_time":"0.620000","size":"5000"},
+          {"pts_time":"0.580000","size":"5000"},
+          {"pts_time":"0.660000","size":"10000"}
+        ]}
+        """.utf8)
+        #expect(MediaProbe.parseSampledBitrate(json: json) == 1_500_000)
+    }
+
+    /// A packet the demuxer carries no timestamp for (8 of 1500 on the real MPEG-PS fixture)
+    /// still contributes its bytes — they are bits the stream really spends — it just can't
+    /// widen the span.
+    @Test func parseSampledBitrateCountsBytesOfUntimestampedPackets() {
+        let json = Data("""
+        {"packets":[
+          {"pts_time":"0.000000","size":"10000"},
+          {"size":"5000"},
+          {"pts_time":"0.080000","size":"10000"}
+        ]}
+        """.utf8)
+        #expect(MediaProbe.parseSampledBitrate(json: json) == 1_250_000)   // 25000 B / 0.16 s
+    }
+
+    /// Too little to measure a span, or nothing to measure at all, is nil — never a bogus
+    /// bitrate. The caller then falls back to the fixed quantiser.
+    @Test func parseSampledBitrateIsNilWhenThereIsNoMeasurableSpan() {
+        #expect(MediaProbe.parseSampledBitrate(json: Data("{\"packets\":[]}".utf8)) == nil)
+        #expect(MediaProbe.parseSampledBitrate(json: Data("""
+        {"packets":[ {"pts_time":"1.000000","size":"10000"} ]}
+        """.utf8)) == nil)
+        // every packet at the same instant: a zero span can't divide
+        #expect(MediaProbe.parseSampledBitrate(json: Data("""
+        {"packets":[ {"pts_time":"1.0","size":"10"}, {"pts_time":"1.0","size":"10"} ]}
+        """.utf8)) == nil)
+        #expect(MediaProbe.parseSampledBitrate(json: Data("not json".utf8)) == nil)
+    }
+
     // MARK: audio stream details (Clip Doctor repair audio rebuild, #52)
 
     /// `parseAudioStreamDetails` keeps only the audio streams, in container order, and

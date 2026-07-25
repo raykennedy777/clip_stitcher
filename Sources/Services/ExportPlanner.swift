@@ -119,12 +119,16 @@ enum ExportPlanner {
             throw ExportError.fieldCodedPlanNotCopyOnly(clip: clip.displayName)
         }
         // Re-encode args matched to the source so the edges concat cleanly with the
-        // copied middle (ADR-0009).
+        // copied middle (ADR-0009), at the fixed near-lossless rate control every
+        // re-encoded piece owes the copied content beside it (issue #110). The bitrate
+        // rides on the *probe*, not the plan: an MPEG-2 target needs a measured number and
+        // this function is synchronous (`MediaProbe` samples it at import time).
         let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
             codec: clip.video?.codec,
             profile: clip.video?.profile,
             pixelFormat: clip.video?.pixelFormat,
-            fieldOrder: clip.video?.fieldOrder)
+            fieldOrder: clip.video?.fieldOrder,
+            bitrate: clip.video?.bitrate)
         return .smartRender(segments: segments, encoder: encoder)
     }
 

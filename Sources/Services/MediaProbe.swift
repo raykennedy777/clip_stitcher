@@ -42,7 +42,72 @@ enum MediaProbe {
         guard output.status == 0 else {
             throw FFError.probeFailed(String(data: output.stderr, encoding: .utf8) ?? "exit \(output.status)")
         }
-        return try parseProbe(json: output.stdout)
+        var result = try parseProbe(json: output.stdout)
+        // MPEG-PS generally carries no video-stream `bit_rate`, and MPEG-2 is the one family
+        // whose re-encode has no CRF mode to fall back on — it targets the source's own rate
+        // instead (issue #110). Measure it with a bounded packet sample, only when the
+        // container didn't report it and only for that codec: every other source re-encodes
+        // at a fixed CRF and never reads the number, so no import pays for a second probe.
+        if result.video?.codec == "mpeg2video", result.video?.bitrate == nil {
+            result.video?.bitrate = await sampledVideoBitrate(url: url)
+        }
+        return result
+    }
+
+    // MARK: - Sampled video bitrate (#110)
+
+    /// How much of the video stream a bitrate sample reads. Bounded on purpose: a 4.8 h
+    /// broadcast capture is tens of gigabytes and the number only has to be right to within
+    /// a few percent — the ×1.25 headroom the re-encode target adds swamps the sampling
+    /// error. Measured on the real MPEG-PS fixture: a 60 s sample read in 0.05 s and landed
+    /// 5 % above the whole-file average (2.663 vs 2.531 Mbps).
+    static let bitrateSampleSeconds = 60
+
+    /// The video stream's average bitrate in bits/sec, measured by summing packet sizes over
+    /// the first `bitrateSampleSeconds` of the stream (issue #110). The window is the file's
+    /// head rather than the re-encoded span's neighbourhood — the probe runs at import, long
+    /// before any cut exists — which is why the target adds headroom rather than matching the
+    /// measurement exactly. nil when the probe fails or the window holds too few timed
+    /// packets to measure a span; the caller then falls back to a fixed quantiser.
+    /// The sample is a **per-packet** dump — thousands of entries, ~100 KB of JSON for a 60 s
+    /// window — so it streams to a temp file like the frame index does (`FrameIndexer`),
+    /// never through the result's in-memory `stdout`. That path reads the pipe only after the
+    /// process exits, so anything past the ~64 KB pipe buffer deadlocks: measured, this
+    /// probe hung for 10 minutes at 0 % CPU on the real fixture before the switch.
+    static func sampledVideoBitrate(url: URL) async -> Int? {
+        guard let ffprobe = try? FFTools.ffprobeURL() else { return nil }
+        let dump = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipstitcher-bitrate-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: dump) }
+        guard let output = try? await ProcessRunner.run(ffprobe, [
+                  "-v", "error",
+                  "-select_streams", "v:0",
+                  "-read_intervals", "%+\(bitrateSampleSeconds)",
+                  "-show_entries", "packet=pts_time,size",
+                  "-print_format", "json",
+                  url.path,
+              ], stdoutTo: dump),
+              output.status == 0,
+              let json = try? Data(contentsOf: dump) else { return nil }
+        return parseSampledBitrate(json: json)
+    }
+
+    /// Turns the sampled packet list into bits/sec. Pure, so the arithmetic is unit-testable
+    /// off canned ffprobe output. Two quirks it has to survive: packets carry no `pts_time`
+    /// at all on some MPEG-PS pictures (8 of 1500 on the real fixture), and they arrive in
+    /// **decode** order, so the window is `max − min`, never last − first. That span covers
+    /// the timed packets' presentation *instants*, one frame short of the content they
+    /// represent, so it is scaled by `n/(n−1)` — the mean interval added back. All packet
+    /// sizes count, timestamped or not: they are bytes the stream really spends.
+    static func parseSampledBitrate(json: Data) -> Int? {
+        guard let decoded = try? JSONDecoder().decode(FFPacketOutput.self, from: json) else { return nil }
+        let bytes = decoded.packets.compactMap { $0.size.flatMap(Int.init) }.reduce(0, +)
+        let times = decoded.packets.compactMap { $0.pts_time.flatMap(Double.init) }
+        guard bytes > 0, times.count >= 2,
+              let first = times.min(), let last = times.max() else { return nil }
+        let span = (last - first) * Double(times.count) / Double(times.count - 1)
+        guard span > 0 else { return nil }
+        return Int((Double(bytes) * 8 / span).rounded())
     }
 
     /// Maps ffprobe's `-print_format json -show_streams -show_format` output to a
@@ -54,7 +119,7 @@ enum MediaProbe {
         let v = decoded.streams.first { $0.codec_type == "video" }
         let audioStreams = decoded.streams.filter { $0.codec_type == "audio" }
 
-        let video = v.map { s in
+        let video: VideoProperties? = v.map { (s: FFStream) -> VideoProperties in
             VideoProperties(
                 codec: s.codec_name ?? "unknown",
                 profile: s.profile,
@@ -69,7 +134,8 @@ enum MediaProbe {
                 colorTransfer: s.color_transfer,
                 colorSpace: s.color_space,
                 colorRange: s.color_range,
-                reorderDepth: s.has_b_frames
+                reorderDepth: s.has_b_frames,
+                bitrate: s.bit_rate.flatMap(Int.init)
             )
         }
 
@@ -272,6 +338,17 @@ private extension Optional where Wrapped == [String: String] {
         let hit = dict.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
         return hit?.isEmpty == false ? hit : nil
     }
+}
+
+/// The `-show_entries packet=… -print_format json` shape the bitrate sample reads.
+private struct FFPacketOutput: Decodable {
+    var packets: [FFPacket]
+}
+
+private struct FFPacket: Decodable {
+    /// Absent on pictures the demuxer carries no timestamp for (real on MPEG-PS).
+    var pts_time: String?
+    var size: String?
 }
 
 private struct FFFormat: Decodable {

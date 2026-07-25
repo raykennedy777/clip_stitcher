@@ -30,6 +30,14 @@ struct VideoProperties: Codable, Equatable, Sendable {
     /// (`ExportEngine.joinReorderDepth`, ADR-0026). Defaulted so older saves decode as nil,
     /// which the join treats as the shallow 1.
     var reorderDepth: Int? = nil
+    /// The **video stream's** average bit rate in bits/sec — the rate a re-encoded piece
+    /// aims at when its encoder has no CRF mode (issue #110, MPEG-2). Never the format-level
+    /// bit rate, which includes the audio tracks' share. Measured, not guessed: the
+    /// container's reported `bit_rate` when it carries one, else — for MPEG-2, the only
+    /// family that needs the number — a bounded packet sample (`MediaProbe`). nil when
+    /// neither is available (and on every CRF-capable source, which doesn't need it), so
+    /// older saves decode too.
+    var bitrate: Int? = nil
 }
 
 /// One probed audio stream of a source file (ADR-0014). `language`/`title` come from

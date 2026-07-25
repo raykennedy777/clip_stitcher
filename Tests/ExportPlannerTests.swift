@@ -42,6 +42,26 @@ struct ExportPlannerTests {
         #expect(!encoder.isEmpty)
     }
 
+    /// The re-encode rate control rides the clip's *probe*, not the settings (issue #110):
+    /// a CRF-capable source takes the fixed near-lossless CRF, while MPEG-2 — which has no
+    /// CRF mode — targets the bitrate `MediaProbe` measured for it, and falls back to the
+    /// fixed quantiser when the source carried none.
+    @Test func theSmartRenderEncoderCarriesRateControlFromTheProbedBitrate() throws {
+        func encoder(_ v: VideoProperties) throws -> [String] {
+            guard case .smartRender(_, let encoder) = try ExportPlanner.videoTreatment(
+                for: clip(video: v), target: nil, index: index) else {
+                Issue.record("expected smart render"); return []
+            }
+            return encoder
+        }
+        var hevc = video(codec: "hevc"); hevc.bitrate = 12_000_000
+        #expect(try encoder(hevc).suffix(2) == ["-crf", "18"])
+        var mpeg2 = video(codec: "mpeg2video"); mpeg2.bitrate = 4_000_000
+        #expect(try encoder(mpeg2).suffix(6)
+            == ["-b:v", "5000000", "-maxrate", "7500000", "-bufsize", "10000000"])
+        #expect(try encoder(video(codec: "mpeg2video")).suffix(2) == ["-q:v", "2"])
+    }
+
     @Test func nonMatchingClipIsConformed() throws {
         let target = clip(video: video(codec: "h264"))
         let source = clip(video: video(codec: "mpeg2video"))

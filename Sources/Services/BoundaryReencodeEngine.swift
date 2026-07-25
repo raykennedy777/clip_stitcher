@@ -21,7 +21,8 @@ enum BoundaryReencodeEngine {
     /// matches; an unrecognised profile string is omitted rather than guessed, leaving the
     /// encoder's working inference in place.
     static func reencodeVideoArgs(
-        codec: String?, profile: String? = nil, pixelFormat: String?, fieldOrder: String?
+        codec: String?, profile: String? = nil, pixelFormat: String?, fieldOrder: String?,
+        bitrate: Int? = nil
     ) -> [String] {
         let pixFmt = pixelFormat ?? "yuv420p"
         var args = ["-c:v", EncoderSelection.encoder(for: codec), "-pix_fmt", pixFmt]
@@ -35,7 +36,51 @@ enum BoundaryReencodeEngine {
             default: break   // progressive / unknown — no interlace flags
             }
         }
-        return args
+        return args + rateControlArgs(codec: codec, bitrate: bitrate)
+    }
+
+    /// The **near-lossless CRF every re-encoded piece is held to** (issue #110) — the same
+    /// fixed engine constant `mbaffRepairVideoArgs` already pins for the same reason
+    /// (issue #54), not a user control: a boundary piece is seconds-to-minutes inside an
+    /// otherwise stream-copied file and has no target spec of its own to express
+    /// (`OutputSettings.conformCrf` stays conform-only).
+    static let reencodeCrf = 18
+
+    /// The fixed quantiser an MPEG-2 re-encode falls back to when the source's bitrate
+    /// couldn't be measured at all. Near the top of mpeg2video's 1–31 scale, so the piece is
+    /// bigger than the source (measured 6.6 vs 2.5 Mbps, PSNR-Y 48.2 dB) but never a quality
+    /// regression — the export still completes, just less efficiently.
+    static let reencodeMpeg2Quantiser = 2
+
+    /// How far above the source's measured average an MPEG-2 re-encode aims. Deliberate
+    /// headroom: re-encoding already-decoded frames is less efficient than the original
+    /// encode, so matching the average exactly reads as slightly softer than the copied
+    /// content either side. ~25 % more bytes across those seconds is the right trade for a
+    /// seam nobody can see.
+    static let reencodeBitrateHeadroom = 1.25
+
+    /// Rate control for a re-encoded piece, per codec family (issue #110). Without this every
+    /// piece encoded at its encoder's own default — CRF 28 on libx265, 23 on libx264, and on
+    /// mpeg2video ffmpeg's 200 kbps with the quantiser pinned at its 31 ceiling — so a
+    /// boundary re-encode landed at *half* the bitrate of the copied content beside it
+    /// (measured 2292 vs 5476 kbps on a real master, over ~2 minutes of content where the
+    /// source had no keyframe near the in-point).
+    ///
+    /// libx264/libx265 take the fixed `reencodeCrf`. **mpeg2video has no CRF mode**, so it
+    /// targets a bitrate derived from the source instead — the re-encoded span should just
+    /// look like part of the source — with `-maxrate`/`-bufsize` bounding the peaks at 1.5×
+    /// and 2× the target. De-risked in the shell on the real interlaced MPEG-PS fixture, in
+    /// the real output containers: the piece comes out at 3.37 Mbps against the source's
+    /// 2.53 (PSNR-Y 43.9 dB, against 34.0 dB for the old default), keeps `field_order`, SAR
+    /// and profile, and still concats cleanly with a copy piece into .mpg/.ts/.mkv with the
+    /// frame count and decode identical to before.
+    static func rateControlArgs(codec: String?, bitrate: Int?) -> [String] {
+        guard codec == "mpeg2video" else { return ["-crf", String(reencodeCrf)] }
+        guard let bitrate, bitrate > 0 else { return ["-q:v", String(reencodeMpeg2Quantiser)] }
+        let target = Int((Double(bitrate) * reencodeBitrateHeadroom).rounded())
+        return ["-b:v", String(target),
+                "-maxrate", String(target * 3 / 2),
+                "-bufsize", String(target * 2)]
     }
 
     /// libx264 encode args for the **field-coded (PAFF) damage-to-EOF repair** (issue #54,

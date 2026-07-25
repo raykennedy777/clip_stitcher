@@ -17,7 +17,7 @@ struct ProbeConsolidationIntegrationTests {
     /// A synthetic MPEG-TS clip (no copyrighted media): 1 s of `testsrc` + a sine tone muxed to
     /// TS so it carries a non-zero container start_time — the value the consolidation surfaces.
     /// Returns `nil` (the test then skips) when ffmpeg isn't available on this machine.
-    private static func makeClip() async throws -> URL? {
+    private static func makeClip(codec: String = "mpeg2video") async throws -> URL? {
         guard let ffmpeg = try? FFTools.ffmpegURL() else { return nil }
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-probe-\(UUID().uuidString)", isDirectory: true)
@@ -27,7 +27,7 @@ struct ProbeConsolidationIntegrationTests {
             "-v", "error",
             "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=25",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "mpeg2video", "-c:a", "mp2", "-y", url.path])
+            "-c:v", codec, "-c:a", "mp2", "-y", url.path])
         guard result.status == 0 else { return nil }
         return url
     }
@@ -36,7 +36,7 @@ struct ProbeConsolidationIntegrationTests {
     /// used to pay is gone. Counts subprocess launches via the task-local counter so parallel
     /// suites can't corrupt the tally.
     @Test func probeSurfacesContainerStartInASingleLaunch() async throws {
-        guard let url = try await Self.makeClip() else { return }
+        guard let url = try await Self.makeClip(codec: "libx264") else { return }
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
         let probeCounter = ProcessRunner.LaunchCounter()
@@ -46,6 +46,7 @@ struct ProbeConsolidationIntegrationTests {
         }
         // The full `-show_streams -show_format` probe is a single process — and it already
         // carried start_time, so the import path reads it from here, not a second launch.
+        // A CRF-capable source adds nothing: only MPEG-2 pays for a bitrate sample (#110).
         #expect(probeCounter.count == 1)
 
         let dedicatedCounter = ProcessRunner.LaunchCounter()
@@ -58,6 +59,25 @@ struct ProbeConsolidationIntegrationTests {
         #expect(dedicatedCounter.count == 1)
         #expect(probe?.containerStart == dedicated)
         #expect((probe?.containerStart ?? 0) > 0)   // TS carries a real non-zero start
+    }
+
+    /// An MPEG-2 source is the one exception to the single-launch import probe (issue #110):
+    /// MPEG-PS/TS generally report no video-stream `bit_rate`, and mpeg2video has no CRF mode
+    /// to fall back on, so its re-encode target has to be *measured* — one extra bounded
+    /// packet sample, once at import, and never for a CRF-capable codec.
+    @Test func mpeg2PaysOneExtraLaunchToMeasureItsBitrate() async throws {
+        guard let url = try await Self.makeClip() else { return }
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let counter = ProcessRunner.LaunchCounter()
+        var probe: MediaProbe.Result?
+        try await ProcessRunner.$launchCounter.withValue(counter) {
+            probe = try await MediaProbe.probe(url: url)
+        }
+        #expect(counter.count == 2)   // properties + the bitrate sample
+        #expect(probe?.video?.codec == "mpeg2video")
+        // A real measurement, not a placeholder: testsrc at 320x240 encodes well above zero.
+        #expect((probe?.video?.bitrate ?? 0) > 0)
     }
 
     /// Item 2: the document's container-start lookup (what the Output Preview now reads on every
