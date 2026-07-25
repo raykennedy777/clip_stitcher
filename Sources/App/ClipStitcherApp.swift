@@ -2,6 +2,14 @@ import SwiftUI
 
 @main
 struct ClipStitcherApp: App {
+    /// Reclaim the work directories a previous hard kill abandoned (issue #109). Off the main
+    /// actor at background priority so launch is never blocked by a listing — or by deleting
+    /// tens of gigabytes — and best-effort, so it can't fail the launch either. A live
+    /// concurrent export (this app's or a `clipstitch` run's) is claimed and never touched.
+    init() {
+        Task.detached(priority: .background) { WorkDirectorySweeper.sweep() }
+    }
+
     var body: some Scene {
         DocumentGroup(newDocument: { ProjectDocument() }) { configuration in
             RootView(document: configuration.document)

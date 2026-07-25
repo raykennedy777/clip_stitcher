@@ -37,6 +37,12 @@ struct ClipStitchMain {
         guard arguments.count == 2 else {
             fail(.usage, "expected a job file and an output file\n\(usage)")
         }
+        // Reclaim the work directories a previous hard kill abandoned (issue #109). The CLI
+        // leaks the same way the app does on ^C/SIGTERM, and an AFK render batch may never
+        // launch the app to sweep for it. Synchronous — the CLI is short-lived, so a detached
+        // task could be cut off by `exit` — and cheap: a directory listing, plus the unlinks
+        // for whatever it condemns. Logged, never printed: stderr stays the job's own output.
+        WorkDirectorySweeper.sweep()
         let jobPath = (arguments[0] as NSString).expandingTildeInPath
         let outputPath = (arguments[1] as NSString).expandingTildeInPath
 

@@ -943,6 +943,11 @@ enum ExportEngine {
         let work = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        // Claim it for this process before a single piece is written (issue #109), so a hard
+        // kill leaves a directory the next launch's sweep can recognise as a corpse — and so
+        // a concurrent launch can tell this run is alive and leave it alone. The defer below
+        // is unchanged: it still handles every exit a `defer` can reach.
+        WorkDirectorySweeper.claim(work)
         defer { try? FileManager.default.removeItem(at: work) }
 
         let wantsAudio = settings.type != .videoOnly
