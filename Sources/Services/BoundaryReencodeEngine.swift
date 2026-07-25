@@ -296,10 +296,11 @@ enum BoundaryReencodeEngine {
     enum CopyStrategy {
         /// The segment-muxer cut at start_time-corrected DTS midpoints, **no input seek**
         /// (`ExportEngine.cutArguments`/`remuxArguments` via `copySegmentPlan`). This is
-        /// the proven Milestone 1/2 cut/join path: it reads the source from frame 0 to EOF
-        /// and writes a discarded trailing segment for every copy span. One or two copy
-        /// spans per clip is fine; a whole-file repair plan's ~9 copy spans would re-read
-        /// the whole file ~9 times (~150 GB churn on a 4.8 h capture — the #52 finding).
+        /// the proven Milestone 1/2 cut/join path: it reads the source from frame 0 to the
+        /// span's end (`-t`, #107) and writes the pre-in-cut head as a discarded segment.
+        /// One or two copy spans per clip is fine; a whole-file repair plan's ~9 copy spans
+        /// would each re-read the file from 0, still re-reading most of it ~9 times
+        /// (~150 GB churn on a 4.8 h capture unbounded — the #52 finding).
         case segmentMux
         /// The bounded, input-seek, keyframe-to-keyframe copy (`boundedCopyArguments`): it
         /// seeks straight to the span's first frame and reads only the span. Frame-exact on
@@ -333,6 +334,18 @@ enum BoundaryReencodeEngine {
         args += ["-segment_frames", String(hi - lo), "-reset_timestamps", "1"]
         args += ["-t", ExportEngine.timeString(span + 2.0), segmentPattern]
         return args
+    }
+
+    /// How much output one segment-muxer copy run is expected to produce, for smoothing
+    /// the progress bar by ffmpeg's `out_time` (issue #9). The run writes discarded
+    /// segments as well as the wanted piece, so it is the *read* that sets the length: an
+    /// out-cut bounds it at the cut plus the read margin (`ExportEngine.cutArguments`,
+    /// issue #107), and without one it runs to EOF. Never past the source span — an
+    /// out-cut close to EOF stops there — and `nil` when the span couldn't be measured.
+    static func segmentMuxExpectedSeconds(plan: SegmentPlan, sourceSpan: Double?) -> Double? {
+        guard let out = plan.outSegmentTime else { return sourceSpan }
+        let bounded = out + ExportEngine.copyReadMargin
+        return sourceSpan.map { min(bounded, $0) } ?? bounded
     }
 
     /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
@@ -440,9 +453,14 @@ enum BoundaryReencodeEngine {
             case .reEncode: expected = interval.map { Double(segment.range.count) * $0 }
             case .copy:
                 switch copyStrategy {
-                // The segment-muxer cut reads the whole source span; the bounded copy
-                // reads only its own span (#52), so the bar tracks that instead.
-                case .segmentMux: expected = sourceSpan
+                // The segment-muxer cut reads from frame 0 to its out-cut plus the read
+                // margin (#107), or to EOF when it has no out-cut; the bounded copy reads
+                // only its own span (#52). The bar tracks whichever read this run does.
+                case .segmentMux:
+                    expected = segmentMuxExpectedSeconds(
+                        plan: copySegmentPlan(copyRange: segment.range,
+                                              outCutKeyframe: segment.outCutKeyframe, index: index),
+                        sourceSpan: sourceSpan)
                 case .boundedKeyframe:
                     let lo = segment.range.lowerBound, hi = segment.range.upperBound
                     expected = (lo < index.pts.count && hi < index.pts.count)

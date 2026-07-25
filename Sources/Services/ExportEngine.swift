@@ -290,11 +290,29 @@ enum ExportEngine {
         plan.inSegmentTime == nil ? 0 : 1
     }
 
+    /// How far past a copy's last wanted moment the read is allowed to run (issue #107).
+    /// The bound has to clear the wanted piece by **more than one frame interval**: the
+    /// muxer's split is placed by DTS, so a read stopping level with the cut time drops
+    /// the last frame or two — silently, exit 0, no stderr. Measured on the HEVC fixture:
+    /// 0 → 2 frames short, 0.02 → 1 short, 0.05 → exact but knife-edge. ~2 s is well clear
+    /// at any rate and still ~65% less temp than reading to EOF.
+    static let copyReadMargin = 2.0
+
     /// ffmpeg args to cut one clip's **video** into segments at its clean cut points.
     /// Cuts are placed by **decode** time (ADR-0008): the muxer splits at the first
     /// keyframe whose DTS reaches the segment time. With explicit `-segment_times` the
     /// muxer splits *only* there, so internal keyframes are carried through untouched.
     /// Assumes `needsCut(plan)`.
+    ///
+    /// An out-cut also bounds the **read** (`-t`, issue #107). Unbounded, the segment
+    /// muxer reads to EOF and writes every segment past the wanted one — the whole source
+    /// tail, as temp files, discarded (43 GB of trailing segments on a 4h36 capture). The
+    /// bound is evaluated on the *unreset* output timeline, so `-reset_timestamps 1`
+    /// doesn't interfere, and it is start-relative exactly like the segment times
+    /// (ADR-0008) — hence `-t` and not `-to`. Without an out-cut the wanted piece runs to
+    /// the file end, so the read must still reach EOF. The pre-in-cut *head* is still
+    /// written in full: skipping it needs an input seek, which lands on a different
+    /// keyframe than the cut does on open-GOP sources (issue #108).
     static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String,
                              bitstreamFilter: [String] = [], trackTimescale: Int? = nil) -> [String] {
         var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
@@ -307,7 +325,11 @@ enum ExportEngine {
         }
         let times = [plan.inSegmentTime, plan.outSegmentTime].compactMap { $0 }
         args += ["-segment_times", times.map(Self.timeString).joined(separator: ",")]
-        args += ["-reset_timestamps", "1", segmentPattern]
+        args += ["-reset_timestamps", "1"]
+        if let out = plan.outSegmentTime {
+            args += ["-t", Self.timeString(out + Self.copyReadMargin)]
+        }
+        args.append(segmentPattern)
         return args
     }
 

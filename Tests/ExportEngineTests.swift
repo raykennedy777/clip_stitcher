@@ -102,6 +102,47 @@ struct ExportEngineTests {
         #expect(!remux.contains("-bsf:v"))
     }
 
+    // MARK: - Bounded segment-muxer read (issue #107)
+
+    /// With no read bound the segment muxer reads to EOF and writes the whole source as
+    /// pieces to keep one — 43 GB of discarded trailing segments on a 4h36 capture. An
+    /// output `-t` past the out-cut stops the read just after the wanted piece; the bound
+    /// is evaluated on the unreset output timeline and is start-relative like the segment
+    /// times themselves (ADR-0008), so `-t`, not `-to`.
+    @Test func theCutStopsReadingJustPastTheOutCut() {
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
+        let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.mkv")
+        #expect(!args.contains("-to"))
+        let i = args.firstIndex(of: "-t")
+        #expect(i != nil)
+        #expect(Double(args[args.index(after: i!)]) == 82.0)
+        // an output option: after the muxer flags, before the segment pattern
+        #expect(i! > args.firstIndex(of: "-segment_times")!)
+        #expect(args.last == "/tmp/p_%03d.mkv")
+    }
+
+    /// The regression that matters: a margin at or below one frame interval truncates the
+    /// wanted piece **silently** — exit 0, no stderr, just a short piece. The de-risk run
+    /// on the HEVC fixture came back 2 frames short at margin 0 and 1 frame short at 0.02.
+    /// The bound must clear the out-cut by more than a frame at any plausible rate.
+    @Test func theReadBoundClearsTheOutCutByMoreThanAFrame() {
+        let slowestFrameInterval = 1.0 / 23.976     // the longest frame this app ever sees
+        for out in [0.5, 12.0, 80.0, 16_560.0] {
+            let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: out)
+            let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
+            let bound = Double(args[args.index(after: args.firstIndex(of: "-t")!)])
+            #expect(bound != nil && bound! - out > slowestFrameInterval)
+        }
+    }
+
+    /// No out-cut means nothing to bound — the wanted piece runs to the file end, so the
+    /// read must reach EOF.
+    @Test func aCutWithNoOutCutReadsToEof() {
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: nil)
+        let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
+        #expect(!args.contains("-t"))
+    }
+
     // MARK: export-wide MP4 timescale (issue #24)
 
     @Test func exportWideTimescaleIsTheLcmOfTheProbes() {

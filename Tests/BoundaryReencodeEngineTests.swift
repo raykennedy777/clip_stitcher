@@ -467,6 +467,32 @@ struct BoundaryReencodeEngineTests {
         #expect(args[args.firstIndex(of: "-segment_frames")! + 1] == "4")
     }
 
+    // MARK: - Progress expectation for a bounded segment-muxer run (issue #107)
+
+    /// The progress bar smooths a run by ffmpeg's `out_time` against how long that run's
+    /// output is expected to be. A segment-muxer cut used to read the source to EOF, so
+    /// the whole source span was the honest expectation; now an out-cut bounds the read
+    /// (`cutArguments`), and the run ends at the out-cut plus the read margin — expecting
+    /// the whole span would park the bar at a fraction of the segment and jump.
+    @Test func aBoundedCutExpectsOnlyTheReadItWillActuallyDo() {
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
+        #expect(BoundaryReencodeEngine.segmentMuxExpectedSeconds(plan: plan, sourceSpan: 16_560.0) == 82.0)
+    }
+
+    @Test func anUnboundedCutStillExpectsTheWholeSourceSpan() {
+        // No out-cut → the read runs to EOF, exactly as before, so does the expectation.
+        let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: nil)
+        #expect(BoundaryReencodeEngine.segmentMuxExpectedSeconds(plan: plan, sourceSpan: 16_560.0) == 16_560.0)
+        // An unmeasurable span stays unmeasurable (the bar then holds, it doesn't smooth).
+        #expect(BoundaryReencodeEngine.segmentMuxExpectedSeconds(plan: plan, sourceSpan: nil) == nil)
+    }
+
+    @Test func theReadMarginNeverPushesTheExpectationPastTheSource() {
+        // An out-cut within a margin of EOF: the read stops at EOF, so the expectation does.
+        let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: 11.5)
+        #expect(BoundaryReencodeEngine.segmentMuxExpectedSeconds(plan: plan, sourceSpan: 12.0) == 12.0)
+    }
+
     // MARK: - MBAFF field-coded tail encoder (issue #54)
 
     /// `-top` follows the source scan order: top-field-first stays 1, bottom-field-first 0.
