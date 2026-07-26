@@ -941,6 +941,140 @@ enum ExportEngine {
         }
     }
 
+    // MARK: - Output audio gate (issue #112)
+
+    /// How many encoded audio frames the extent check allows the written track to differ from
+    /// the plan by. Three, and each one is a named, unavoidable term rather than a number
+    /// tuned until the fixtures passed:
+    ///   1. the encoder's **priming** frame, which sits before zero (the deliberate ~10–21 ms
+    ///      audio-ahead compensation, not a sync defect);
+    ///   2. the plan's final partial frame, which the encoder must **pad** to a whole one;
+    ///   3. the container's rounding of the **last packet's slot**.
+    ///
+    /// Measured in the shell across the recipes this engine can produce — MPEG-2/H.264/HEVC
+    /// video in `.mkv`, `.mp4` and `.ts`, each of the four audio encoders the policy can pick
+    /// (aac/mp2/ac3/libmp3lame), audio-only outputs, a real broadcast MPEG-2 capture with
+    /// irregular timestamps, a real 4.5 h HEVC capture, and single-frame keeps — a clean
+    /// render's extent landed between +0.00 and +1.88 frames of the plan and was **never
+    /// short**, while the issue-#111 collapse landed 717–819 frames short. The three terms are
+    /// also each structurally bounded by one frame, so 3 is a ceiling on what correct output
+    /// can differ by, not the top of a measured range — and it stays two orders of magnitude
+    /// below the defect it separates. The error does not grow with length (the legs are
+    /// sample-exact by construction, ADR-0028): the 4.5 h capture's render measured the same
+    /// fraction of a frame off as the 7 s one, which is why this is a frame count and not a
+    /// proportion.
+    ///
+    /// Applied in **both** directions. Only a shortfall is the reported defect, but a track
+    /// longer than the clips it was built from is the same disagreement with the plan (a leg
+    /// contributing more than its clip drifts every later join), and the overshoot terms above
+    /// are what bound the allowance.
+    static let audioExtentToleranceFrames = 3.0
+
+    /// The audio frame this domain's encoders emit, nominally: 1024 samples at 48 kHz. Stands
+    /// in as the tolerance's unit only when a track carries too few packets to measure its
+    /// own interval — a single-frame keep in a 1536-sample codec really is one packet.
+    static let nominalAudioFrame = 1024.0 / 48000.0
+
+    /// The verdict on the audio a finished file actually carries (issue #112), or `nil` when
+    /// it agrees with the plan. Pure, so it is unit-tested against timeline facts measured off
+    /// real renders — clean ones that must pass and collapsed ones that must fail.
+    ///
+    /// Two independent checks, because #111 showed every sample can be present while the
+    /// timeline is broken:
+    ///   1. **The timeline advances** — no track may carry a packet whose timestamp repeats or
+    ///      goes backwards. This is what catches a collapse, and it asks only that timestamps
+    ///      *advance*, never that they are evenly spaced, which is what keeps it safe on a
+    ///      faithfully-copied irregular broadcast source (the issue-#19 class).
+    ///   2. **The extent matches the plan** — each track's measured length must land within
+    ///      `audioExtentToleranceFrames` of `expectedExtent`, the clips' combined kept
+    ///      duration. Necessary on its own because the **MP4 muxer masks check 1 entirely**:
+    ///      it bumps duplicate timestamps apart, so the collapsed render showed zero
+    ///      non-advancing packets there and only its 2.016 s extent (of a planned 7 s) gave it
+    ///      away.
+    ///
+    /// A stall is reported ahead of the short extent it causes — it is the more specific
+    /// diagnosis, naming where the timeline froze. `expectedExtent` is `nil` when any clip
+    /// lacks a kept duration; the extent check then has no expectation and skips rather than
+    /// guessing, while check 1 — and a track carrying no timestamped audio at all, the extreme
+    /// of the same defect — still applies.
+    ///
+    /// A track count short of `expectedTracks` fails too: a track the mux was told to write
+    /// and the file doesn't carry has no timeline for either check to look at, which is the
+    /// silent-shipping this gate exists to stop. Measured on two-track outputs in `.mkv`,
+    /// `.mp4` and `.ts`, where each written track reports its own packets exactly once (a TS
+    /// program's streams are *not* double-counted in a packet dump the way they are in
+    /// `-show_streams`).
+    ///
+    /// The tolerance's unit is the track's **own** mean packet interval, so it adapts to the
+    /// codec's frame size (21–32 ms across our encoders) and to a container that packs several
+    /// frames per packet. The trade-off is deliberate: a defect that *stretched* a track's
+    /// spacing would widen its own allowance, but a widened allowance is still orders of
+    /// magnitude short of a collapse, while a fixed unit would false-fail correct output whose
+    /// packets are legitimately larger — and false-failing correct output is the failure this
+    /// project has already paid for once (issue #19).
+    static func audioTimelineDefect(timelines: [MediaProbe.AudioTimeline],
+                                    expectedTracks: Int,
+                                    expectedExtent: Double?) -> String? {
+        guard expectedTracks > 0 else { return nil }
+        guard timelines.count == expectedTracks else {
+            return "The finished file carries \(timelines.count) audio track"
+                + "\(timelines.count == 1 ? "" : "s") but the export rebuilt \(expectedTracks)."
+        }
+        // Everything that needs no expectation first: a stalled timeline, and a track that
+        // carries no timestamped audio at all — the extreme of the same defect, and the one
+        // an unknown planned span must not excuse.
+        for (t, timeline) in timelines.enumerated() {
+            if let stall = timeline.firstNonAdvance {
+                return String(format: "The rebuilt audio of track %d stops advancing: packet %d is stamped %.3fs, no later than the packet before it (%.3fs).",
+                              t + 1, stall.ordinal, stall.pts, stall.previous)
+            }
+            guard timeline.extent(nominalInterval: nominalAudioFrame) != nil else {
+                return "The rebuilt audio of track \(t + 1) carries no timestamped audio"
+                    + " (\(timeline.untimedPackets) packet\(timeline.untimedPackets == 1 ? "" : "s"), none timestamped)."
+            }
+        }
+        guard let expectedExtent else { return nil }
+        for (t, timeline) in timelines.enumerated() {
+            guard let measured = timeline.extent(nominalInterval: nominalAudioFrame) else { continue }
+            // The tolerance's unit is the track's own encoded audio frame (see
+            // `audioExtentToleranceFrames`), which is why it is measured rather than assumed.
+            let tolerance = audioExtentToleranceFrames
+                * (timeline.packetInterval ?? nominalAudioFrame)
+            guard abs(measured - expectedExtent) <= tolerance else {
+                return String(format: "The rebuilt audio of track %d measures %.3fs but the clips keep %.3fs (allowed to differ by %.3fs).",
+                              t + 1, measured, expectedExtent, tolerance)
+            }
+        }
+        return nil
+    }
+
+    /// Verifies the audio of a file the export has just written and **discards the file** if
+    /// it disagrees with the plan (issue #112). Until this gate, nothing looked at the output
+    /// at all: each video piece was verified before the mux, and an audio track that stopped
+    /// advancing partway through was indistinguishable from a good export — ffmpeg exits 0,
+    /// stderr is empty, the video is frame-exact.
+    ///
+    /// Owns the discard because the promise is the pair: a failed verification must not leave
+    /// a passing-looking file at the destination. `expectedExtent` is the span this file's
+    /// clips keep — the whole join's in `.connect` mode, that one clip's in `.separate`.
+    /// A measurement that can't be taken is itself a failure: a gate that can't measure must
+    /// not pass.
+    static func verifyWrittenAudio(_ output: URL, expectedTracks: Int,
+                                   expectedExtent: Double?) async throws {
+        let timelines: [MediaProbe.AudioTimeline]
+        do {
+            timelines = try await MediaProbe.audioTimelines(url: output)
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            throw ExportError.verificationFailed("The rebuilt audio could not be read back from the finished file.\n\(detail)")
+        }
+        guard let defect = audioTimelineDefect(timelines: timelines, expectedTracks: expectedTracks,
+                                               expectedExtent: expectedExtent) else { return }
+        try? FileManager.default.removeItem(at: output)
+        throw ExportError.verificationFailed(defect)
+    }
+
     /// ffmpeg prints times locale-independently; format without scientific notation or
     /// a trailing locale decimal separator. Shared with the M2 boundary-re-encode engine.
     static func timeString(_ t: Double) -> String {
@@ -1200,6 +1334,12 @@ enum ExportEngine {
                     progress(ExportProgress.muxFraction(
                         withinMux: ExportProgress.runFraction(outTime: t, expectedSeconds: totalSpan)))
                 }
+                // Nothing above this line has looked at the file that was written (issue
+                // #112): the video pieces were verified before the mux, and a rebuilt audio
+                // track that collapsed or came out short exits 0 with an empty stderr. The
+                // join's expected extent is the same `totalSpan` the mux fraction just used.
+                try await verifyWrittenAudio(destination, expectedTracks: tracks.count,
+                                             expectedExtent: totalSpan)
             } else {
                 try placeFile(videoInput!, at: destination)
             }
@@ -1220,6 +1360,11 @@ enum ExportEngine {
                             clipIndex: i, clipCount: items.count,
                             withinMux: ExportProgress.runFraction(outTime: t, expectedSeconds: keptDuration(item))))
                     }
+                    // Each separate file is verified against **its own** clip's kept
+                    // duration, and against that clip's own track list where it has one
+                    // (cut-only, ADR-0018) — issue #112.
+                    try await verifyWrittenAudio(out, expectedTracks: itemTracks.count,
+                                                 expectedExtent: keptDuration(item))
                 } else {
                     // Video-only: the placed file must already be the chosen container,
                     // so the piece goes through the same rewrap funnel as connect mode.

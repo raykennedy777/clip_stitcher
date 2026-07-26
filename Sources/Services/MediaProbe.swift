@@ -201,6 +201,160 @@ enum MediaProbe {
         }
     }
 
+    // MARK: - Audio timeline (issue #112)
+
+    /// One audio track's timeline facts as a **written file** carries them — the input to the
+    /// export's post-mux audio gate (issue #112). Facts only: how many packets the track
+    /// holds, where its first and last timed packet sit, and whether its timestamps ever fail
+    /// to advance. What counts as a defect (and against what expected extent) is the engine's
+    /// policy, not this probe's (`ExportEngine.audioTimelineDefect`).
+    ///
+    /// Only the *timed* packets take part. A demuxer that reports no `pts_time` for a packet
+    /// (real on MPEG-PS) gives nothing to order or measure, so those are counted and
+    /// otherwise ignored rather than read as a stalled timeline.
+    struct AudioTimeline: Equatable, Sendable {
+        /// The container stream index the packets carry. The array position in
+        /// `audioTimelines`, not this, is the output audio track number (tracks are numbered
+        /// from 1 for the user, and a video output's audio streams start at index 1).
+        var streamIndex: Int
+        /// Packets carrying a usable timestamp.
+        var timedPackets: Int
+        /// Packets the demuxer reports no timestamp for.
+        var untimedPackets: Int = 0
+        var firstPts: Double? = nil
+        var lastPts: Double? = nil
+        /// The first timed packet whose timestamp doesn't advance on the one before it —
+        /// equal (the issue-#111 collapse) or going backwards. `nil` when the track's
+        /// timeline advances throughout.
+        var firstNonAdvance: NonAdvance? = nil
+
+        /// Where a track's timeline stopped advancing, positioned so a message can say
+        /// *where* rather than just *that* it happened.
+        struct NonAdvance: Equatable, Sendable {
+            /// 1-based position among the track's timed packets.
+            var ordinal: Int
+            /// The timestamp the previous packet carried.
+            var previous: Double
+            /// This packet's timestamp — at or before `previous`.
+            var pts: Double
+        }
+
+        /// First timed packet to last, in seconds. Deliberately *relative*: the mpegts muxer
+        /// starts its timeline at its own clock base (measured 1.43 s on a render of a 7 s
+        /// plan), so an absolute timestamp says nothing about how much audio a track holds.
+        /// `nil` below two timed packets.
+        var span: Double? {
+            guard timedPackets >= 2, let first = firstPts, let last = lastPts else { return nil }
+            return last - first
+        }
+
+        /// The mean interval between timed packets — one encoded audio frame, measured off
+        /// the track rather than assumed, because it differs per codec (1024 samples for aac,
+        /// 1152 for mp2/mp3, 1536 for ac3). It is the unit the gate's tolerance is expressed
+        /// in, and the amount the last packet's own frame adds to `span`. A rebuilt track is
+        /// uniformly spaced, so the mean is the interval; `nil` below two timed packets.
+        var packetInterval: Double? {
+            guard let span, timedPackets >= 2, span > 0 else { return nil }
+            return span / Double(timedPackets - 1)
+        }
+
+        /// How much audio the track holds, in seconds: its `span` plus the last packet's own
+        /// frame, because that frame's samples are part of the track's length. `nil` when the
+        /// track carries no timed packet at all — then there is no length to speak of, which
+        /// is a verdict for the caller rather than a number.
+        ///
+        /// `nominalInterval` stands in for the last frame when the track is too short to
+        /// measure its own spacing — a single-frame keep in a 1536-sample codec really is one
+        /// packet. What that nominal frame should be is the caller's domain knowledge, not
+        /// this probe's (`ExportEngine.nominalAudioFrame`).
+        func extent(nominalInterval: Double) -> Double? {
+            guard let first = firstPts, let last = lastPts else { return nil }
+            return (last - first) + (packetInterval ?? nominalInterval)
+        }
+    }
+
+    /// Every audio track's timeline facts for one written file, ordered by stream index
+    /// (issue #112) — so the array position is the output audio track the mux wrote.
+    ///
+    /// A **per-packet** dump of a whole file: hours of audio across several tracks is
+    /// millions of rows, which is why it is neither captured in memory nor written to a temp
+    /// file. It streams through `ProcessRunner`'s live stdout reader into the incremental
+    /// parse below, exactly as the import scan does (issue #84), so only the current chunk
+    /// plus the per-track counters are ever held — and the ~64 KB pipe-buffer deadlock a
+    /// captured dump hits (measured: 10 minutes at 0 % CPU) can't happen.
+    ///
+    /// Throws on a failed probe rather than reporting "no audio": a gate that can't measure
+    /// must not pass.
+    static func audioTimelines(url: URL) async throws -> [AudioTimeline] {
+        let ffprobe = try FFTools.ffprobeURL()
+        let live = LiveAudioTimelines()
+        let output = try await ProcessRunner.run(ffprobe, [
+            "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "packet=stream_index,pts_time",
+            "-of", "csv=p=0",
+            url.path,
+        ], onStdout: { live.feed($0) })
+        guard output.status == 0 else {
+            throw FFError.probeFailed(String(data: output.stderr, encoding: .utf8) ?? "exit \(output.status)")
+        }
+        // The run has reached EOF (ProcessRunner waits for its reader), so no feed is in
+        // flight and the accumulated counters are complete.
+        return live.finish()
+    }
+
+    /// Stream-parses the `audioTimelines` CSV (`stream_index,pts_time`) as it arrives:
+    /// assembles lines incrementally via `LineAssembler` and folds each packet straight into
+    /// its track's running counters. Nothing per-packet is retained, so cost is flat in the
+    /// file's length.
+    ///
+    /// ffprobe's CSV writer leaves a trailing comma on some streams, so a row can arrive as
+    /// `1,0.021333,`; splitting on commas and reading the first two fields covers both
+    /// shapes. An absent timestamp arrives as `N/A`.
+    struct StreamingAudioTimelines {
+        private var lines = LineAssembler()
+        private var tracks: [Int: AudioTimeline] = [:]
+
+        mutating func feed(_ chunk: String) {
+            for line in lines.feed(chunk) { ingest(line) }
+        }
+
+        /// Flushes any final unterminated line and returns the tracks ordered by stream
+        /// index. Call once after EOF.
+        mutating func finish() -> [AudioTimeline] {
+            if let last = lines.finish() { ingest(last) }
+            return tracks.values.sorted { $0.streamIndex < $1.streamIndex }
+        }
+
+        private mutating func ingest(_ line: String) {
+            let fields = line.split(separator: ",", omittingEmptySubsequences: false)
+            guard fields.count >= 2, let streamIndex = Int(fields[0]) else { return }
+            var track = tracks[streamIndex] ?? AudioTimeline(streamIndex: streamIndex,
+                                                             timedPackets: 0)
+            defer { tracks[streamIndex] = track }
+            guard let pts = Double(fields[1]) else {
+                track.untimedPackets += 1
+                return
+            }
+            if let previous = track.lastPts, pts <= previous, track.firstNonAdvance == nil {
+                track.firstNonAdvance = AudioTimeline.NonAdvance(
+                    ordinal: track.timedPackets + 1, previous: previous, pts: pts)
+            }
+            track.timedPackets += 1
+            if track.firstPts == nil { track.firstPts = pts }
+            track.lastPts = pts
+        }
+    }
+
+    /// Builds the timelines from a whole `audioTimelines` CSV in one shot — the pure entry
+    /// point the unit tests drive, feeding the same incremental parser the live read uses so
+    /// the two can't diverge.
+    static func parseAudioTimelines(csv: String) -> [AudioTimeline] {
+        var parse = StreamingAudioTimelines()
+        parse.feed(csv)
+        return parse.finish()
+    }
+
     /// A source stream Clip Doctor does **not** carry into the repaired file (ADR-0021,
     /// issue #53): the engine models only video + audio, so subtitle/teletext/data/
     /// attachment streams are dropped. Surfaced in the sheet so the omission is never
@@ -293,6 +447,35 @@ enum MediaProbe {
     /// treating one as "starts at 0" is the safe, meaningful reading.
     static func parseStartTime(csv: String) -> Double {
         max(0, Double(csv.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
+    }
+}
+
+/// Thread-safe wrapper around `MediaProbe.StreamingAudioTimelines` for the streamed
+/// per-packet read of a written output (issue #112) — one per read, fed from
+/// `ProcessRunner`'s stdout reader queue, so the lock guards the incremental parse. The same
+/// shape as `LiveScan`: nothing per-packet is materialized, only the per-track counters.
+final class LiveAudioTimelines: @unchecked Sendable {
+    private var parse = MediaProbe.StreamingAudioTimelines()
+    private let lock = NSLock()
+
+    /// Feeds one stdout chunk into the parse. The CSV fields are pure ASCII, so UTF-8
+    /// decodes cleanly and a chunk never splits a codepoint; a stray non-UTF-8 byte falls
+    /// back to Latin-1 (which never fails and maps bytes 1:1) rather than dropping a chunk
+    /// of real packet rows — the same rule `LiveScan` applies.
+    func feed(_ data: Data) {
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        lock.lock()
+        defer { lock.unlock() }
+        parse.feed(text)
+    }
+
+    /// Returns the per-track facts once the stream has reached EOF.
+    func finish() -> [MediaProbe.AudioTimeline] {
+        lock.lock()
+        defer { lock.unlock() }
+        return parse.finish()
     }
 }
 

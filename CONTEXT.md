@@ -262,6 +262,23 @@ for the re-encoded portion, so it is slower than a smart render and the sheet wa
 requires an explicit opt-in.
 _Avoid_: full re-encode (only true when the damage is early), transcode
 
+**Audio extent**:
+How much audio a written output actually holds, measured from its first timed packet to the end
+of its last one's own frame — per audio track, never for the file as a whole. Deliberately not
+the container's declared duration (which read 2.03 s of a file holding 8 s of samples on the
+issue-#111 render), not an absolute timestamp (the mpegts muxer starts its timeline at its own
+clock base), and not a sample count (which was already right on that broken render).
+_Avoid_: audio duration, audio length
+
+**Output audio gate**:
+The post-mux check that the audio a finished file carries agrees with the plan, and the refusal
+that follows when it doesn't: every track's timestamps must advance, and every track's **audio
+extent** must land within a few encoded audio frames of the kept duration its clips add up to
+(ADR-0029). A file that fails is discarded rather than left at the destination. It gates the
+*written output*, unlike the per-piece verification that runs before the mux (ADR-0008).
+_Avoid_: audio verification (too vague — say which gate), sync check (nothing here compares
+audio to video)
+
 ### Editing & UI
 
 **Timeline**:
