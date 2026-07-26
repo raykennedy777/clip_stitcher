@@ -422,19 +422,27 @@ struct ExportEngineTests {
         #expect(args.contains("0:v:0") && args.contains("-c:v") && args.contains("copy"))
         #expect(args.contains("-c:a") && args.contains("aac"))
         // two audio inputs (indices 1 and 2 after the video input), each leg conformed to
-        // the track's format with the defensive gap-fill resample (issue #44) and forced
-        // to its exact kept length (1 s / 2 s at 48 kHz — ADR-0014), then concatenated.
+        // the track's format with the defensive gap-fill resample (issue #44), backed by
+        // silence and cut to its exact kept length (1 s / 2 s at 48 kHz — ADR-0014 /
+        // ADR-0028), then concatenated.
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc == "[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,atrim=end_sample=48000,apad=whole_len=48000[c0t0];"
-                    + "[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c1t0];"
+        #expect(fc == "[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[c0t0src];"
+                    + "anullsrc=r=48000:cl=stereo[c0t0pad];"
+                    + "[c0t0src][c0t0pad]concat=n=2:v=0:a=1,atrim=end_sample=48000[c0t0];"
+                    + "[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[c1t0src];"
+                    + "anullsrc=r=48000:cl=stereo[c1t0pad];"
+                    + "[c1t0src][c1t0pad]concat=n=2:v=0:a=1,atrim=end_sample=96000[c1t0];"
                     + "[c0t0][c1t0]concat=n=2:v=0:a=1[a0]")
+        // the pre-#111 force is gone: `apad` wrote an empty leg's samples with no advancing
+        // timestamps, collapsing every later packet onto one pts.
+        #expect(!fc.contains("apad"))
         #expect(args.contains("[a0]"))
         #expect(args.last == "/tmp/out.ts")
     }
 
     @Test func audioMuxInsertsTheLegsMixBeforeItsConform() {
         // Clip 0 mixes track 0 to left-only (ADR-0019); clip 1 keeps Original. The pan
-        // sits before the conform and wholly before the sample-exact atrim/apad, and
+        // sits before the conform and wholly before the sample-exact length cut, and
         // only on clip 0's leg — the join's sample math is untouched (shell-verified).
         var mixed = ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 1)
         mixed.audioMixFilters = ["pan=stereo|c0=c0|c1=c0"]
@@ -442,10 +450,64 @@ struct ExportEngineTests {
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("[0:a:0]pan=stereo|c0=c0|c1=c0,aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,"
-                          + "atrim=end_sample=48000,apad=whole_len=48000[c0t0]"))
-        #expect(fc.contains("[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,"
-                          + "atrim=end_sample=48000,apad=whole_len=48000[c1t0]"))
+        #expect(fc.contains("[0:a:0]pan=stereo|c0=c0|c1=c0,aresample=48000:async=1:first_pts=0,"
+                          + "aformat=channel_layouts=stereo[c0t0src]"))
+        #expect(fc.contains("[c0t0src][c0t0pad]concat=n=2:v=0:a=1,atrim=end_sample=48000[c0t0]"))
+        #expect(fc.contains("[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[c1t0src]"))
+        #expect(fc.contains("[c1t0src][c1t0pad]concat=n=2:v=0:a=1,atrim=end_sample=48000[c1t0]"))
+    }
+
+    /// The #111 defect, at the argument level: every real leg carries its own silence
+    /// backing *before* the length cut, so a leg whose window decodes to zero frames still
+    /// contributes exactly its clip's samples instead of stamping every later packet with
+    /// one pts. `EmptyAudioLegIntegrationTests` proves the rendered result.
+    @Test func audioMuxBacksEveryRealLegWithSilenceBeforeTheLengthCut() {
+        let items = [
+            ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2),
+            ExportItem(source: src, codec: "h264", audioStart: 10, audioEnd: 14),
+        ]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        // one endless silence source per real leg, in the track's format…
+        #expect(fc.contains("anullsrc=r=48000:cl=stereo[c0t0pad]"))
+        #expect(fc.contains("anullsrc=r=48000:cl=stereo[c1t0pad]"))
+        // …concatenated behind the leg, and the cut applied to the pair
+        #expect(fc.contains("[c0t0src][c0t0pad]concat=n=2:v=0:a=1,atrim=end_sample=96000[c0t0]"))
+        #expect(fc.contains("[c1t0src][c1t0pad]concat=n=2:v=0:a=1,atrim=end_sample=192000[c1t0]"))
+        // the backing is per leg, never shared: two sources for two legs
+        #expect(fc.components(separatedBy: "anullsrc").count - 1 == 2)
+        // and nothing relies on apad, which is what failed on an empty leg
+        #expect(!fc.contains("apad"))
+    }
+
+    /// A leg whose clip has **no** known kept duration stays unforced, exactly as before
+    /// #111 — with no length there is nothing to cut to and nothing to back it with. The
+    /// leg must not acquire a zero-sample cut on the way.
+    @Test func audioMuxLeavesALegWithNoKnownLengthUnforced() {
+        // No audioDuration and an open window end: `keptDuration` is nil.
+        let items = [ExportItem(source: src, codec: "h264", audioStart: 1.0, audioEnd: nil)]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(fc == "[0:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[c0t0];"
+                    + "[c0t0]concat=n=1:v=0:a=1[a0]")
+        #expect(!fc.contains("atrim"))
+    }
+
+    /// No path emits a leg cut to zero samples (#111): a kept duration too short to round
+    /// to a whole sample still contributes one, rather than an empty leg that drags every
+    /// later clip earlier.
+    @Test func audioMuxNeverCutsALegToZeroSamples() {
+        let items = [ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
+                                audioSources: [.stream(0), nil], audioDuration: 0.000004)]
+        let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items,
+                                                  tracks: [stereoTrack, stereoTrack],
+                                                  audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
+        let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
+        #expect(!fc.contains("end_sample=0"))
+        #expect(fc.contains("atrim=end_sample=1[c0t0]"))                      // the real leg
+        #expect(fc.contains("anullsrc=r=48000:cl=stereo,atrim=end_sample=1[c0t1]"))  // the silence leg
     }
 
     @Test func audioMuxSilenceFillsAClipWithoutTheTrack(){
@@ -463,8 +525,8 @@ struct ExportEngineTests {
         let args = ExportEngine.audioMuxArguments(videoInput: video, items: items, tracks: [stereoTrack, monoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=mono,atrim=end_sample=96000,apad=whole_len=96000[c1t1]")
-                == false) // the second clip has no second source…
+        #expect(!fc.contains("[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=mono[c1t1src]"))
+        // the second clip has no second source…
         #expect(fc.contains("anullsrc=r=48000:cl=mono,atrim=end_sample=96000[c1t1]")) // …so it is silence
         // generated silence has no gaps to fill — the defensive resample stays off it
         #expect(!fc.contains("anullsrc=r=48000:cl=mono,aresample"))
@@ -488,7 +550,8 @@ struct ExportEngineTests {
         #expect(args.contains("/tmp/demo.mkv"))
         #expect(args.filter { $0 == "10" }.count == 2 && args.filter { $0 == "2" }.count == 2)
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("[2:a:1]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,atrim=end_sample=96000,apad=whole_len=96000[c0t1]"))
+        #expect(fc.contains("[2:a:1]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[c0t1src]"))
+        #expect(fc.contains("[c0t1src][c0t1pad]concat=n=2:v=0:a=1,atrim=end_sample=96000[c0t1]"))
     }
 
     @Test func audioMuxSharesOneInputAcrossTwoStreamsOfTheSameExternalFile() {
@@ -529,7 +592,7 @@ struct ExportEngineTests {
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/a.m4a"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        #expect(fc.contains("atrim=end_sample=72000,apad=whole_len=72000"))
+        #expect(fc.contains("concat=n=2:v=0:a=1,atrim=end_sample=72000[c0t0]"))
     }
 
     @Test func audioMuxWithoutVideoStartsAudioInputsAtZero() {
@@ -1055,6 +1118,77 @@ struct ExportSourceCollisionTests {
             #expect((error.errorDescription ?? "").contains(external.path))
         } catch {
             Issue.record("wrong error: \(error)")
+        }
+    }
+}
+
+/// The one audio leg the rebuild cannot express (issue #111): silence standing in for a
+/// track a clip doesn't have, on a clip with **no known kept duration**. Silence has to be
+/// generated to a length; written as zero samples it contributes nothing and pulls every
+/// later clip earlier, so the export refuses before it writes anything. A *real* leg of
+/// unknown length is allowed — it plays its own natural length.
+struct AudioLegLengthGuardTests {
+    private let src = URL(fileURLWithPath: "/tmp/clip.mkv")
+    private let stereoTrack = AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2)
+
+    /// No duration and no closed window → `keptDuration` is nil.
+    private func lengthless(audio: [ExportEngine.AudioSource?],
+                            ownTracks: [AudioCodecPolicy.OutputAudioTrack]? = nil) -> ExportItem {
+        ExportItem(source: src, displayName: "Clip A", audioStart: 1.0, audioEnd: nil,
+                   audioSources: audio, ownTracks: ownTracks)
+    }
+
+    @Test func aSilenceLegWithNoKnownLengthRefusesTheExport() {
+        // Two output tracks, one source: track 2 is silence, and there is no length for it.
+        let items = [lengthless(audio: [.stream(0)])]
+        do {
+            try ExportEngine.assertAudioLegLengthsKnown(items: items,
+                                                        tracks: [stereoTrack, stereoTrack],
+                                                        mode: .connect)
+            Issue.record("expected unknownSilenceLength")
+        } catch let error as ExportError {
+            let message = error.errorDescription ?? ""
+            #expect(message.contains("Clip A"))
+            #expect(message.contains("track 2"))
+        } catch {
+            Issue.record("wrong error: \(error)")
+        }
+    }
+
+    /// An explicitly nil source (a track the clip carries no audio for) is the same case.
+    @Test func anExplicitlyNilSourceWithNoKnownLengthRefusesToo() {
+        let items = [lengthless(audio: [nil])]
+        #expect(throws: ExportError.self) {
+            try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack],
+                                                        mode: .connect)
+        }
+    }
+
+    @Test func aRealLegWithNoKnownLengthIsAllowed() throws {
+        // Every track has a source: nothing has to be generated, so the legs just play
+        // their own lengths (`audioMuxLeavesALegWithNoKnownLengthUnforced`).
+        let items = [lengthless(audio: [.stream(0), .stream(1)])]
+        try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack, stereoTrack],
+                                                    mode: .connect)
+    }
+
+    @Test func aKnownLengthAllowsSilenceLegs() throws {
+        let items = [ExportItem(source: src, displayName: "Clip A", audioStart: 0, audioEnd: 2,
+                                audioSources: [.stream(0)])]
+        try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack, stereoTrack],
+                                                    mode: .connect)
+    }
+
+    /// Separate mode muxes each clip against its **own** tracks (ADR-0018), so the guard
+    /// reads the same list the mux will: a clip whose own tracks are all sourced passes,
+    /// even though the export-wide list would have needed silence.
+    @Test func separateModeJudgesAClipAgainstItsOwnTracks() throws {
+        let items = [lengthless(audio: [.stream(0)], ownTracks: [stereoTrack])]
+        try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack, stereoTrack],
+                                                    mode: .separate)
+        #expect(throws: ExportError.self) {
+            try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack, stereoTrack],
+                                                        mode: .connect)
         }
     }
 }

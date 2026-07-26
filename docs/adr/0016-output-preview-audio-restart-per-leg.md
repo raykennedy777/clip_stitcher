@@ -62,7 +62,8 @@ the old sleep pacing.
 - A mid-play track switch restarts the stream at the playhead — the cut-editor's
   monitor-switch semantics, per the pinned #8 decisions.
 - The frame-quantized leg boundaries (`outputCount / fps`) differ from the export's
-  sample-exact `atrim`+`apad` legs by under one frame at each join — inaudible for a
-  preview, and exactness stays the export's job.
+  sample-exact legs (`atrim`+`apad` when this was written, silence-backed `atrim` since
+  ADR-0028) by under one frame at each join — inaudible for a preview, and exactness stays
+  the export's job.
 - "Monitored track" is still not glossarized in `CONTEXT.md` — flagged for the next
   `/grill-with-docs`.

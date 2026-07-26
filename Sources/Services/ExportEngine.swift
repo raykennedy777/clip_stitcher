@@ -109,6 +109,12 @@ enum ExportError: LocalizedError {
     /// field-counting frame index and the whole-frame encoder disagree by 2×
     /// (ADR-0022). The planner refuses loudly instead of silently producing it.
     case fieldCodedPlanNotCopyOnly(clip: String)
+    /// A clip has no source for an output audio track *and* no usable kept duration —
+    /// unknown or zero (issue #111) — so its silence leg has no length to be generated to.
+    /// Written as zero samples it would contribute nothing and drag every later clip
+    /// earlier, so the export refuses instead. The planner always stamps a positive kept
+    /// duration, so this is an invariant guard.
+    case unknownSilenceLength(clip: String, track: Int)
 
     var errorDescription: String? {
         switch self {
@@ -125,6 +131,8 @@ enum ExportError: LocalizedError {
         case .clipNotReady(let reason): return reason
         case .fieldCodedPlanNotCopyOnly(let clip):
             return "Internal error: the cut points of “\(clip)” don’t sit on clean copy boundaries, but the clip is field-coded and can only be cut by pure stream copy. Re-mark the in and out points in the cut editor and export again."
+        case .unknownSilenceLength(let clip, let track):
+            return "Internal error: “\(clip)” has no audio for track \(track) and no known length, so the silence standing in for it can’t be measured. Re-mark the in and out points of that clip and export again."
         }
     }
 }
@@ -762,11 +770,11 @@ enum ExportEngine {
 
     /// Final-mux args (ADR-0014): copy `videoInput`'s video (when present) and rebuild N
     /// continuous audio tracks — one sample-level concat chain per output track. Every
-    /// leg is conformed to its track's rate/layout and forced to the clip's exact kept
-    /// duration in samples (`atrim`+`apad` — tracks of one clip decode to slightly
-    /// different lengths otherwise, and the output tracks would drift apart at every
-    /// join). A clip with no source for a track contributes `anullsrc` silence in the
-    /// track's format. `videoInput` is `nil` for an audio-only export.
+    /// leg is conformed to its track's rate/layout, backed by silence, and cut to the
+    /// clip's exact kept duration in samples (ADR-0028 — tracks of one clip decode to
+    /// slightly different lengths otherwise, and the output tracks would drift apart at
+    /// every join). A clip with no source for a track contributes `anullsrc` silence in
+    /// the track's format. `videoInput` is `nil` for an audio-only export.
     static func audioMuxArguments(videoInput: URL?, items: [ExportItem], tracks: [AudioCodecPolicy.OutputAudioTrack],
                                   audioCodec: String, output: URL) -> [String] {
         // -y: an existing file at the destination is overwritten silently — the
@@ -800,18 +808,31 @@ enum ExportEngine {
         for (t, track) in tracks.enumerated() {
             var labels: [String] = []
             for (i, item) in items.enumerated() {
-                let label = "[c\(i)t\(t)]"
-                let samples = keptDuration(item).map { Int(($0 * Double(track.sampleRate)).rounded()) }
-                let layout = ConformEngine.channelLayout(track.channels)
+                // The leg's name; `[…]` wraps it wherever a chain references it, and the
+                // leg's own intermediate labels suffix it (`c0t0src`, `c0t0pad`).
+                let leg = "c\(i)t\(t)"
+                let label = "[\(leg)]"
+                // A clip with a kept duration contributes at least one sample: rounding a
+                // sub-sample duration down to 0 would emit a zero-sample leg, which is the
+                // very thing ADR-0028 exists to prevent.
+                let samples = keptDuration(item).map { max(1, Int(($0 * Double(track.sampleRate)).rounded())) }
                 let source = t < item.audioSources.count ? item.audioSources[t] : nil
                 let mix = t < item.audioMixFilters.count ? item.audioMixFilters[t] : nil
-                switch source {
-                case .stream(let s):
-                    chains.append("[\(ownInput[i]):a:\(s)]" + legFilter(track: track, samples: samples, mix: mix) + label)
-                case .external(let url, let s):
-                    chains.append("[\(externalInput[i][url]!):a:\(s)]" + legFilter(track: track, samples: samples, mix: mix) + label)
-                case nil:
-                    chains.append("anullsrc=r=\(track.sampleRate):cl=\(layout),atrim=end_sample=\(samples ?? 0)" + label)
+                // Own stream and external file differ only in which input the leg reads.
+                let input: String? = switch source {
+                case .stream(let s): "[\(ownInput[i]):a:\(s)]"
+                case .external(let url, let s): "[\(externalInput[i][url]!):a:\(s)]"
+                case nil: nil
+                }
+                if let input {
+                    chains += legChains(from: input, track: track, samples: samples,
+                                        mix: mix, leg: leg)
+                } else {
+                    // A silence leg with no length can't be generated; the export refuses
+                    // before this point (`assertAudioLegLengthsKnown`). One sample is the
+                    // floor for the direct builder calls that don't go through it — a
+                    // zero-sample leg is the defect of issue #111.
+                    chains.append(silenceSource(track) + ",atrim=end_sample=\(samples ?? 1)" + label)
                 }
                 labels.append(label)
             }
@@ -843,22 +864,81 @@ enum ExportEngine {
         return args
     }
 
-    /// One real audio leg's filter: the leg's channel mix when it has one (ADR-0019 —
-    /// the mix shapes what *enters* the track, so it precedes the conform), conform to
-    /// the track's rate/layout with the gap-fill resample (issue #44 — damaged spans
-    /// become silence in place instead of closing up or aborting the run; a no-op on
-    /// clean sources), then force the exact kept length — trim the overshoot,
-    /// silence-pad the shortfall. The mix sits wholly before `atrim`/`apad`, so the
-    /// sample-exact trimming the joins depend on is untouched (shell-verified: counts
-    /// are identical with and without a mix on all three formats). Silence legs
-    /// (`anullsrc`) never come through here — generated silence has no gaps to fill.
-    private static func legFilter(track: AudioCodecPolicy.OutputAudioTrack, samples: Int?,
+    /// One real audio leg, as the filter chains it needs (ADR-0028). The leg is conformed
+    /// (`legFilter`), then **backed by an endless silence source and cut to the exact kept
+    /// length**: `[real][silence]concat=n=2:v=0:a=1,atrim=end_sample=N`. The silence backing
+    /// is what makes the length force survive a source that decodes to *nothing*.
+    ///
+    /// The pre-#111 force was `atrim=end_sample=N,apad=whole_len=N`. On a leg whose window
+    /// decodes to zero frames that padding still wrote its samples but stopped advancing
+    /// timestamps, so **every audio packet from that join onward carried one identical pts**
+    /// — measured on a source whose audio ends before its video: 281 of 376 packets stamped
+    /// 1.984 s, all 384 000 samples present, container duration 2.03 s of a planned 8 s,
+    /// ffmpeg exit 0 and stderr empty. Concatenating silence *before* the trim gives the
+    /// same graph a real stream to cut, so an empty leg becomes silence of exactly its
+    /// clip's length: monotonic pts, correct extent, later clips un-shifted. Healthy legs
+    /// are **bit-identical** to the old force (decoded-PCM md5, MPEG-2/H.264/HEVC, in .mkv,
+    /// .mp4 and .ts) and the graph still terminates promptly at 68 legs (`anullsrc` is
+    /// endless, but `atrim`'s EOF propagates: 0.42 s, same wall time and RSS as before).
+    ///
+    /// `samples == nil` — an unknown kept duration — leaves the leg **unforced**, exactly
+    /// as before: with no length to cut to there is nothing to back it with either. Such a
+    /// leg contributes its own natural length (nothing at all, if its window decodes to
+    /// nothing), which shifts the clips after it but keeps the timeline monotonic. The
+    /// planner always supplies a duration; only direct builder calls can reach this.
+    private static func legChains(from input: String, track: AudioCodecPolicy.OutputAudioTrack,
+                                  samples: Int?, mix: String?, leg: String) -> [String] {
+        let conformed = input + legFilter(track: track, mix: mix)
+        guard let n = samples else { return [conformed + "[\(leg)]"] }
+        return [conformed + "[\(leg)src]",
+                silenceSource(track) + "[\(leg)pad]",
+                "[\(leg)src][\(leg)pad]concat=n=2:v=0:a=1,atrim=end_sample=\(n)[\(leg)]"]
+    }
+
+    /// One real audio leg's conform: the leg's channel mix when it has one (ADR-0019 —
+    /// the mix shapes what *enters* the track, so it precedes the conform), then the
+    /// conform to the track's rate/layout with the gap-fill resample (issue #44 — damaged
+    /// spans become silence in place instead of closing up or aborting the run; a no-op on
+    /// clean sources). The mix sits wholly before the length force, so the sample-exact
+    /// cut the joins depend on is untouched (shell-verified: counts are identical with and
+    /// without a mix on all three formats). Silence legs never come through here —
+    /// generated silence has no gaps to fill.
+    private static func legFilter(track: AudioCodecPolicy.OutputAudioTrack,
                                   mix: String? = nil) -> String {
-        var f = ConformEngine.audioFilter(sampleRate: track.sampleRate, channels: track.channels,
-                                          fillGaps: true)
-        if let mix { f = mix + "," + f }
-        if let n = samples { f += ",atrim=end_sample=\(n),apad=whole_len=\(n)" }
-        return f
+        let conform = ConformEngine.audioFilter(sampleRate: track.sampleRate,
+                                                channels: track.channels, fillGaps: true)
+        return mix.map { $0 + "," + conform } ?? conform
+    }
+
+    /// Silence in one output track's format — the generator behind both a silence leg and
+    /// every real leg's backing (ADR-0028). Endless by design: the `atrim` downstream is
+    /// what sets the length, so no duration has to be computed twice.
+    private static func silenceSource(_ track: AudioCodecPolicy.OutputAudioTrack) -> String {
+        "anullsrc=r=\(track.sampleRate):cl=\(ConformEngine.channelLayout(track.channels))"
+    }
+
+    /// Refuses — before any file is written — if a clip would contribute a **silence** leg
+    /// with no usable kept duration (issue #111): unknown, or zero, which `keptDuration`
+    /// reports the same way. Silence has to be generated to a length, and the only lengths
+    /// available are the clip's; with none, the leg could only be written as
+    /// `end_sample=0`, which contributes nothing and pulls every later clip earlier. A
+    /// *real* leg without a length is fine — it plays its own natural length
+    /// (`legChains`) — so only the silence case refuses.
+    ///
+    /// The planner always stamps a kept duration (`ExportPlanner.planItem` → `keptWindow`,
+    /// issue #75), so this is an invariant guard, not a user-facing condition; it reads the
+    /// same track list the mux will use, per mode (`.separate` honours a clip's own tracks,
+    /// ADR-0018).
+    static func assertAudioLegLengthsKnown(items: [ExportItem],
+                                           tracks: [AudioCodecPolicy.OutputAudioTrack],
+                                           mode: OutputMode) throws {
+        for item in items where keptDuration(item) == nil {
+            let itemTracks = mode == .separate ? (item.ownTracks ?? tracks) : tracks
+            for t in itemTracks.indices
+            where t >= item.audioSources.count || item.audioSources[t] == nil {
+                throw ExportError.unknownSilenceLength(clip: item.displayName, track: t + 1)
+            }
+        }
     }
 
     /// ffmpeg prints times locale-independently; format without scientific notation or
@@ -996,6 +1076,13 @@ enum ExportEngine {
         let outputs = plannedOutputs(items: items, settings: settings, ext: ext,
                                      audioCodec: audioCodec, to: destination)
         try assertNoSourceCollision(items: items, outputs: outputs)
+        let wantsAudio = settings.type != .videoOnly
+        // And refuse, equally early, a silence leg with no length to generate it to (issue
+        // #111) — the one audio leg the rebuild cannot express without collapsing the
+        // track's timeline.
+        if wantsAudio {
+            try assertAudioLegLengthsKnown(items: items, tracks: tracks, mode: settings.mode)
+        }
         let work = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
@@ -1005,8 +1092,6 @@ enum ExportEngine {
         // is unchanged: it still handles every exit a `defer` can reach.
         WorkDirectorySweeper.claim(work)
         defer { try? FileManager.default.removeItem(at: work) }
-
-        let wantsAudio = settings.type != .videoOnly
 
         // A cancel (issue #32) discards the file being written but keeps `.separate`
         // files that already finished — they are valid exports. Both are tracked here

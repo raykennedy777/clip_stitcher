@@ -12,6 +12,12 @@ with the single-track test clips, in all three output containers (TS, MKV, MP4).
 
 ## Decision 1: one concat chain per output track, every leg forced to the exact kept duration
 
+> **The real leg's recipe below is superseded by ADR-0028** (issue #111): `apad` cannot force
+> a leg whose window decodes to *zero* frames — it wrote the samples without advancing their
+> timestamps, collapsing every later audio packet onto one pts. Every real leg is now backed
+> by a silence source before the length cut. Everything else in this decision, including the
+> exactness rationale below, stands.
+
 The rebuild becomes N independent filter chains — output track *t* concatenates, per
 clip in timeline order, either the clip's selected source for track *t* or generated
 silence:
@@ -69,9 +75,9 @@ A track re-pointed at an external audio file aligns **file start = video-file st
 the external file behaves exactly as if it were another audio stream inside the clip's
 own container, and the clip's in/out window cuts the same span out of it. (Confirmed
 with the user, 2026-06-10.) The same leg chain handles it — `aresample` absorbs a
-44.1 kHz file in a 48 kHz project; `apad` silence-fills when the file ends before the
-clip's out point; `atrim` discards what runs past it. Verified in the shell with a
-44.1 kHz MP3 shorter than the clip.
+44.1 kHz file in a 48 kHz project; the leg's silence backing fills the shortfall when the
+file ends before the clip's out point (`apad` did this until ADR-0028); `atrim` discards
+what runs past it. Verified in the shell with a 44.1 kHz MP3 shorter than the clip.
 
 **Length-mismatch rule** (the roadmap's open question, answered by the user,
 2026-06-10): always pad/trim as above; show a notice on the clip when the external
