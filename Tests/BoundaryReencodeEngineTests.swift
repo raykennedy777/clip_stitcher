@@ -140,6 +140,7 @@ struct BoundaryReencodeEngineTests {
             "-v", "error", "-ss", "0.16", "-i", src.path,
             "-vf", "select='between(n\\,2\\,3)',setpts=PTS-STARTPTS",
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-bsf:v", "dump_extra",
             "-frames:v", "2", "-an", out.path,
         ])
     }
@@ -162,6 +163,7 @@ struct BoundaryReencodeEngineTests {
             "-v", "error", "-ss", "0.16", "-i", src.path,
             "-vf", "select='between(n\\,2\\,3)',setpts=PTS-STARTPTS",
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-bsf:v", "dump_extra",
             "-video_track_timescale", "25000",
             "-frames:v", "2", "-an", mp4Piece.path,
         ])
@@ -333,6 +335,7 @@ struct BoundaryReencodeEngineTests {
             "-vf", "select='between(t\\,0.99\\,2.97)*not(between(t\\,1.49\\,2.01))'"
                 + ",setpts=PTS-STARTPTS,fps=25",
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-bsf:v", "dump_extra",
             "-frames:v", "50", "-an", out.path,
         ])
     }
@@ -356,6 +359,7 @@ struct BoundaryReencodeEngineTests {
             "-vf", "select='between(t\\,1.19\\,2.37)*not(between(t\\,1.39\\,1.81))'"
                 + ",setpts=PTS-STARTPTS,fps=25",
             "-c:v", "mpeg2video", "-pix_fmt", "yuv420p",
+            "-bsf:v", "dump_extra",
             "-frames:v", "30", "-an", out.path,
         ])
     }
@@ -611,7 +615,10 @@ struct BoundaryReencodeEngineTests {
         #expect(tff[tff.firstIndex(of: "-forced-idr")! + 1] == "1")  // clean IDR entry seam
         let params = tff[tff.firstIndex(of: "-x264-params")! + 1]
         #expect(params.contains("ref=5") && params.contains("open_gop=0") && params.contains("b-pyramid=0"))
-        #expect(tff[tff.firstIndex(of: "-bsf:v")! + 1] == "dump_extra")
+        // The parameter-set repeat this recipe used to append is now applied to *every*
+        // re-encoded piece by the segment builders (issue #113). Keeping it here as well
+        // would emit a second `-bsf:v`, which replaces the first rather than adding to it.
+        #expect(!tff.contains("-bsf:v"))
 
         let bff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "bb")
         #expect(bff[bff.firstIndex(of: "-top")! + 1] == "0")

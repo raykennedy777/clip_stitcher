@@ -134,7 +134,7 @@ struct CopyHeadSeekIntegrationTests {
         let copyPlan = BoundaryReencodeEngine.copySegmentPlan(
             copyRange: lo..<outCut, outCutKeyframe: outCut, index: index)
         #expect(copyPlan.inSegmentTime != nil, "the span must have a head to skip")
-        let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: spec.codec, ext: ext)
+        let bsf = ExportEngine.copyPieceBitstreamFilter(codec: spec.codec, ext: ext)
 
         // The reference: today's read-from-zero recipe, run exactly as `cutArguments` builds it.
         let refDir = try Self.scratch()

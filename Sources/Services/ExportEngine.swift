@@ -179,7 +179,80 @@ enum ExportEngine {
     /// with unknown timestamp"). Every clean clip's command stays byte-identical.
     static func ptsRefillBitstreamFilter(codec: String?, ext: String, damaged: Bool = false) -> [String] {
         guard codec == "mpeg2video" || damaged, ext.lowercased() == "mkv" else { return [] }
-        return ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"]
+        return ["-bsf:v", ptsRefillFilter]
+    }
+
+    /// The `setts` refill from `ptsRefillBitstreamFilter`, as a bare filter so it can be
+    /// composed into a chain — ffmpeg takes **one** `-bsf:v` per stream and a second
+    /// occurrence silently replaces the first, so every filter a piece needs has to arrive
+    /// in a single comma-separated argument.
+    static let ptsRefillFilter = "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"
+
+    /// The filter that makes a **re-encoded** piece carry its own parameter sets in-band
+    /// (issue #113): it repeats the encoder's extradata — H.264/HEVC SPS/PPS/VPS, an MPEG-2
+    /// sequence header — into the bitstream ahead of every keyframe packet.
+    ///
+    /// A join needs this because the concat demuxer produces **one** output stream, and a
+    /// container carries exactly **one** parameter-set header for it (Matroska `CodecPrivate`,
+    /// MP4 `hvcC`/`avcC`), taken from the *first* piece in the list. Any later piece whose
+    /// parameter sets live only in its own header is then decoded against a foreign SPS/PPS:
+    /// slice headers misparse and every frame of that piece comes out as garbage, while the
+    /// packet count, PTS spacing and duration all stay exactly right. That is precisely what
+    /// an encoder writes into MKV/MP4 — ffmpeg lifts the encoder's parameter sets into the
+    /// container header and does not repeat them in the stream — so a boundary re-encode or
+    /// a conform beside a stream-copied body was decoded with the *source's* parameter sets.
+    /// Measured on the real HEVC Main 10 capture: 165 decode-error lines across a
+    /// copy→re-encode join, 0 with this filter (all three formats, `.mkv`/`.mp4`/`.ts`).
+    ///
+    /// `mbaffRepairVideoArgs` has carried it since issue #54 for the same reason at the
+    /// copy→MBAFF entry seam; this is that fix applied to every re-encoded piece.
+    static let parameterSetRepeatFilter = "dump_extra"
+
+    /// The mirror of `parameterSetRepeatFilter` for a **copied** piece (issue #113): the
+    /// codec's `mp4toannexb`, which converts the piece to Annex-B framing and inserts the
+    /// source's parameter sets at every IRAP. `dump_extra` cannot do this job on a copy —
+    /// a Matroska/MP4 source's extradata is an `hvcC`/`avcC` config record, not a NAL, so
+    /// prepending it verbatim would be nonsense.
+    ///
+    /// A copy needs it whenever the join's single container header comes from some *other*
+    /// piece: a source that keeps its parameter sets only in its header (anything an encoder
+    /// wrote — the re-encoded control capture in the issue-#113 report) then decodes against
+    /// a foreign SPS/PPS exactly like an un-filtered re-encode does. Measured on that
+    /// capture: 601 decode-error lines behind a re-encoded first piece, 0 with this filter.
+    /// A broadcast capture already repeats its parameter sets in-band and only gains
+    /// duplicates, which decoders ignore; a source that is already Annex-B (`.ts`) passes
+    /// through untouched (verified, exit 0). The filter inserts NAL units and rewrites NAL
+    /// framing only — the coded pictures are bit-identical, so the copy stays lossless.
+    ///
+    /// `nil` for a codec with no such filter: MPEG-2 needs none (its sequence header is
+    /// repeated per GOP in the elementary stream by construction).
+    static func parameterSetRepeatFilter(forCopyOf codec: String?) -> String? {
+        switch codec {
+        case "hevc": return "hevc_mp4toannexb"
+        case "h264": return "h264_mp4toannexb"
+        default: return nil
+        }
+    }
+
+    /// The whole `-bsf:v` chain a **copied** piece carries: its parameter-set repeat
+    /// (`parameterSetRepeatFilter(forCopyOf:)`) and, where the container needs it, the
+    /// `setts` PTS refill (`ptsRefillBitstreamFilter`) — in one argument, because a second
+    /// `-bsf:v` would replace the first rather than add to it.
+    ///
+    /// A **damaged** source is deliberately left on the refill alone. Its truncated pictures
+    /// are what the `mp4toannexb` parser would have to walk, and a repair export has no need
+    /// of the parameter-set repeat: it is one source's own pieces, so the container header a
+    /// copy is decoded against is either that source's or a repair re-encode's (which carries
+    /// its parameter sets in-band), never a foreign clip's.
+    static func copyPieceBitstreamFilter(codec: String?, ext: String, damaged: Bool = false) -> [String] {
+        var chain: [String] = []
+        if !damaged, let repeatFilter = parameterSetRepeatFilter(forCopyOf: codec) {
+            chain.append(repeatFilter)
+        }
+        if !ptsRefillBitstreamFilter(codec: codec, ext: ext, damaged: damaged).isEmpty {
+            chain.append(ptsRefillFilter)
+        }
+        return chain.isEmpty ? [] : ["-bsf:v", chain.joined(separator: ",")]
     }
 
     /// Whether the plan trims either end. When neither end is cut the clip is copied
@@ -1409,6 +1482,19 @@ enum ExportEngine {
             .write(to: listFile, atomically: true, encoding: .utf8)
         try await runFFmpeg(ffmpeg, concatArguments(listFile: listFile, output: output), failure: ExportError.concatFailed)
     }
+
+    // The cross-clip seam itself is deliberately **not** decode-checked here, and the attempt
+    // is worth recording (issue #113). Decoding a two-second window around each seam does
+    // separate a good render from a broken one on the reporter's reproducer — 0 error lines
+    // per window against 1583–1737 — but it cannot tell a seam defect from two things that are
+    // not defects: seeking into the window lands on an open-GOP entry, whose leading pictures
+    // print "co located POCs unavailable" / "Could not find ref with POC −60" on perfectly good
+    // `.ts` output, and a source that is out of spec to begin with (the real PAFF capture's
+    // 5-refs-at-L4.0) prints "number of reference frames (0+5) exceeds max" wherever it is
+    // decoded. Both failed clean exports in the integration suite. What makes the issue-#113
+    // class catchable is not this window but `decodeCheck`'s `requireSilentDecode`: the
+    // corruption lives *inside* a clip's own piece, which is decoded from its start with no
+    // seek, and that gate is silent on all nine format×container integration exports.
 
     /// File names for `.separate` mode, one per clip in timeline order (issue #30):
     /// `NN <clip name>.<ext>` — `NN` is the 1-based position zero-padded to the digit

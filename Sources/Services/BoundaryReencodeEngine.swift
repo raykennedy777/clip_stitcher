@@ -102,15 +102,19 @@ enum BoundaryReencodeEngine {
     ///     single copy→MBAFF *entry* seam re-initialises the decoder;
     ///   - `ref=5:level=4.0` matches the source's out-of-spec 5-ref-at-L4.0 cadence,
     ///     `b-pyramid=0` avoids the MKV/TS duplicate-PTS collapse (issue #2), `keyint=25`
-    ///     keeps seekable GOPs, `scenecut=0` keeps them regular;
-    ///   - `dump_extra` repeats SPS/PPS into the stream so the entry seam re-inits cleanly.
+    ///     keeps seekable GOPs, `scenecut=0` keeps them regular.
+    ///
+    /// The `dump_extra` this recipe used to append itself — repeating SPS/PPS into the stream
+    /// so the entry seam re-inits cleanly — now comes from the segment argument builders, which
+    /// apply it to **every** re-encoded piece for the same reason (issue #113,
+    /// `ExportEngine.parameterSetRepeatFilter`). Keeping it here too would emit a second
+    /// `-bsf:v` that silently replaced the first rather than adding to it.
     static func mbaffRepairVideoArgs(fieldOrder: String?) -> [String] {
         let top = (fieldOrder == "bb" || fieldOrder == "bt") ? "0" : "1"
         return [
             "-c:v", "libx264", "-flags", "+ildct+ilme", "-top", top,
             "-preset", "medium", "-crf", "18", "-forced-idr", "1",
             "-x264-params", "ref=5:keyint=25:scenecut=0:open_gop=0:b-pyramid=0:level=4.0",
-            "-bsf:v", "dump_extra",
         ]
     }
 
@@ -149,6 +153,7 @@ enum BoundaryReencodeEngine {
         var args = ["-v", "error", "-ss", ExportEngine.timeString(seek), "-i", source.path]
         args += ["-vf", "select='between(n\\,\(relStart)\\,\(relEnd))',setpts=PTS-STARTPTS"]
         args += encoder
+        args += ["-bsf:v", ExportEngine.parameterSetRepeatFilter]
         if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
             args += ["-video_track_timescale", String(trackTimescale)]
         }
@@ -210,6 +215,7 @@ enum BoundaryReencodeEngine {
         args += ["-i", source.path]
         args += ["-vf", "select='\(select)',setpts=PTS-STARTPTS,fps=\(ConformEngine.fpsToken(frameRate, double: false))"]
         args += encoder
+        args += ["-bsf:v", ExportEngine.parameterSetRepeatFilter]
         if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
             args += ["-video_track_timescale", String(trackTimescale)]
         }
@@ -516,10 +522,11 @@ enum BoundaryReencodeEngine {
             throw ExportError.invalidPlan
         }
         let repairRate = parsedRate ?? "25/1"
-        // mpeg2video→MKV copy needs the missing-PTS refill (issue #2), as does any
-        // damaged *source*→MKV — its truncated pictures choke the muxer even from
-        // discarded segments, whatever window is kept (issue #47); [] otherwise.
-        let bsf = ExportEngine.ptsRefillBitstreamFilter(
+        // Every copy piece carries its own parameter sets in-band (issue #113) so the join's
+        // single container header can't decide how it decodes, plus — for mpeg2video→MKV
+        // (issue #2) and any damaged *source*→MKV, whose truncated pictures choke the muxer
+        // even from discarded segments (issue #47) — the missing-PTS refill.
+        let bsf = ExportEngine.copyPieceBitstreamFilter(
             codec: codec, ext: ext,
             damaged: sourceDamaged || plan.contains { !$0.damage.isEmpty })
 
@@ -698,6 +705,7 @@ enum BoundaryReencodeEngine {
         }
         try await verifyPiece(ffmpeg, result, expectedCounts: outputCounts,
                               shortfallAllowance: shortfallAllowance,
+                              sourceDamaged: sourceDamaged,
                               plan: plan, sourcePts: index.pts)
         return result
     }
@@ -753,19 +761,32 @@ enum BoundaryReencodeEngine {
     /// the OS pipe and deadlocks at 0% CPU on a multi-hour repair — the failure detail is the
     /// tail's final fatal lines. `failureLabel` opens the thrown message so each caller names
     /// what failed (a cut vs the repaired video).
-    private static func decodeCheck(_ ffmpeg: URL, _ piece: URL, failureLabel: String) async throws {
+    ///
+    /// **`requireSilentDecode` is what gives this check teeth** (issue #113). The exit status
+    /// alone is nearly blind: a video decoder conceals what it cannot parse and returns
+    /// success, so `-xerror` exits 0 on a piece whose every frame came out as colour garbage —
+    /// measured at exit 0 on a 6002-frame render with 2150 decode-error lines. What the
+    /// decoder *says* is the real signal, so on a clean source the pass must also be silent.
+    /// A damaged source is exempt: its piece legitimately prints a per-frame flood (the whole
+    /// point of the repair is that the source doesn't decode), and there the exit status is
+    /// all this check can honestly assert.
+    private static func decodeCheck(_ ffmpeg: URL, _ piece: URL, failureLabel: String,
+                                   requireSilentDecode: Bool) async throws {
         let decode = try await ProcessRunner.run(
             ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
+        let complaints = String(data: decode.stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard decode.status == 0 else {
-            let detail = String(data: decode.stderr, encoding: .utf8).flatMap {
-                $0.isEmpty ? nil : $0
-            } ?? "decode exited \(decode.status)"
-            throw ExportError.verificationFailed("\(failureLabel)\n\(detail)")
+            throw ExportError.verificationFailed(
+                "\(failureLabel)\n\(complaints.isEmpty ? "decode exited \(decode.status)" : complaints)")
+        }
+        guard !requireSilentDecode || complaints.isEmpty else {
+            throw ExportError.verificationFailed("\(failureLabel)\n\(complaints)")
         }
     }
 
     private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedCounts: [Int],
-                                    shortfallAllowance: Int = 0,
+                                    shortfallAllowance: Int = 0, sourceDamaged: Bool = false,
                                     plan: [PlannedSegment], sourcePts: [Double]) async throws {
         let expectedFrames = expectedCounts.reduce(0, +)
         let actual = try await FrameIndexer.frameCount(url: piece)
@@ -781,7 +802,9 @@ enum BoundaryReencodeEngine {
            let last = plan.lastIndex(where: { !$0.damage.isEmpty }) {
             outputCounts[last] -= expectedFrames - actual
         }
-        try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the cut.")
+        try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the cut.",
+                              requireSilentDecode: !sourceDamaged
+                                  && plan.allSatisfy { $0.damage.isEmpty })
         let pts = try await FrameIndexer.buildIndex(url: piece).pts
         if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts,
                                                      outputCounts: outputCounts) {
@@ -801,8 +824,14 @@ enum BoundaryReencodeEngine {
     /// muxer" line the null muxer prints on field-coded rescale is benign (exit 0,
     /// de-risked); real DTS is monotonic once muxed to the container. Duration preservation
     /// and a zero-zones verdict are confirmed by the engine's post-mux re-scan.
+    ///
+    /// The exit status is also all this gate can assert (`requireSilentDecode: false`): the
+    /// repair exists because the source is damaged, so a per-frame decoder flood is the
+    /// expected output, and the null muxer's benign "non monotonically increasing dts to
+    /// muxer" line on field-coded rescale would fail a silence requirement on a correct piece.
     private static func verifyFieldCodedPiece(_ ffmpeg: URL, _ piece: URL) async throws {
-        try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the repaired video.")
+        try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the repaired video.",
+                              requireSilentDecode: false)
     }
 
     /// The clip's mean frame interval in seconds — exact under CFR; a timestamp-dirty

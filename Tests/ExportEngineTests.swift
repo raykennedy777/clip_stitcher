@@ -102,6 +102,79 @@ struct ExportEngineTests {
         #expect(!remux.contains("-bsf:v"))
     }
 
+    // MARK: - Parameter sets travel with the piece (issue #113)
+
+    /// A join's container carries exactly one parameter-set header, taken from the *first*
+    /// piece in the concat list, so every other piece has to carry its own SPS/PPS/VPS in-band
+    /// or it is decoded against a foreign one — garbage pictures at an exactly correct frame
+    /// count, PTS spacing and duration. A copy gets there via the codec's `mp4toannexb`, which
+    /// inserts the source's parameter sets at every IRAP; `dump_extra` can't do it on a copy
+    /// because a Matroska/MP4 source's extradata is an `hvcC`/`avcC` record, not a NAL.
+    @Test func copiedH264AndHevcPiecesRepeatTheirParameterSetsInBand() {
+        #expect(ExportEngine.copyPieceBitstreamFilter(codec: "hevc", ext: "mkv")
+            == ["-bsf:v", "hevc_mp4toannexb"])
+        #expect(ExportEngine.copyPieceBitstreamFilter(codec: "h264", ext: "mp4")
+            == ["-bsf:v", "h264_mp4toannexb"])
+        // MPEG-2 needs none: its sequence header is already repeated per GOP in the
+        // elementary stream, so the chain stays empty off MKV.
+        #expect(ExportEngine.copyPieceBitstreamFilter(codec: "mpeg2video", ext: "ts").isEmpty)
+        #expect(ExportEngine.copyPieceBitstreamFilter(codec: nil, ext: "ts").isEmpty)
+    }
+
+    /// ffmpeg takes **one** `-bsf:v` per stream and a second occurrence replaces the first
+    /// rather than adding to it, so whatever a copy piece needs has to arrive as a single
+    /// comma-separated chain. No combination reaches for both filters today — the two rules
+    /// don't overlap, since the refill is mpeg2video-or-damaged and neither of those takes the
+    /// parameter-set repeat — but the chain form is what stops a later overlap from silently
+    /// dropping one of them, so the invariant is asserted across the whole grid.
+    @Test func aCopyPieceNeverEmitsMoreThanOneBitstreamFilterArgument() {
+        for codec in ["hevc", "h264", "mpeg2video", nil] {
+            for ext in ["mkv", "mp4", "ts"] {
+                for damaged in [false, true] {
+                    let args = ExportEngine.copyPieceBitstreamFilter(
+                        codec: codec, ext: ext, damaged: damaged)
+                    #expect(args.count == (args.isEmpty ? 0 : 2))
+                    #expect(args.filter { $0 == "-bsf:v" }.count == (args.isEmpty ? 0 : 1))
+                }
+            }
+        }
+        // The MKV refill rule itself is unchanged (issue #2): mpeg2video into MKV still gets it.
+        #expect(ExportEngine.copyPieceBitstreamFilter(codec: "mpeg2video", ext: "mkv")
+            == ["-bsf:v", ExportEngine.ptsRefillFilter])
+    }
+
+    /// A damaged source stays on the PTS refill alone: its truncated pictures are what the
+    /// `mp4toannexb` parser would have to walk, and a repair export is one source's own
+    /// pieces — the container header a copy is decoded against is either that source's or a
+    /// repair re-encode's (which carries its parameter sets in-band), never a foreign clip's.
+    @Test func aDamagedSourcesCopyKeepsTheRefillWithoutTheAnnexbConversion() {
+        let args = ExportEngine.copyPieceBitstreamFilter(codec: "hevc", ext: "mkv", damaged: true)
+        #expect(args == ["-bsf:v", ExportEngine.ptsRefillFilter])
+        #expect(!args.contains { $0.contains("mp4toannexb") })
+        #expect(ExportEngine.copyPieceBitstreamFilter(codec: "hevc", ext: "ts", damaged: true).isEmpty)
+    }
+
+    /// Every re-encoded piece carries the repeat too, so a boundary GOP or a conform beside a
+    /// stream-copied body re-initialises the decoder at its own first frame instead of
+    /// inheriting whichever piece happened to be first in the concat list.
+    @Test func everyReencodedPieceRepeatsItsParameterSetsInBand() {
+        let index = FrameIndex(pts: (0..<8).map { 0.24 + Double($0) * 0.04 },
+                               keyframeFlags: [true, false, false, false, true, false, false, false])
+        let boundary = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 6..<8, index: index,
+            encoder: ["-c:v", "libx264"], output: URL(fileURLWithPath: "/tmp/seg.mkv"))
+        #expect(boundary[boundary.firstIndex(of: "-bsf:v")! + 1] == ExportEngine.parameterSetRepeatFilter)
+        let repaired = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: src, range: 0..<8, index: index,
+            zones: [DamageZone(start: 0.5, end: 0.6, affectsVideo: true)],
+            containerStart: 0.24, frameRate: "25/1",
+            encoder: ["-c:v", "libx264"], output: URL(fileURLWithPath: "/tmp/rep.mkv"))
+        #expect(repaired[repaired.firstIndex(of: "-bsf:v")! + 1] == ExportEngine.parameterSetRepeatFilter)
+        // One -bsf:v per piece, always: a second occurrence would replace the first.
+        #expect(boundary.filter { $0 == "-bsf:v" }.count == 1)
+        #expect(repaired.filter { $0 == "-bsf:v" }.count == 1)
+    }
+
     // MARK: - Bounded segment-muxer read (issue #107)
 
     /// With no read bound the segment muxer reads to EOF and writes the whole source as

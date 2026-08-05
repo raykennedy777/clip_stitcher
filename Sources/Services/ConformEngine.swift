@@ -162,6 +162,13 @@ enum ConformEngine {
         args += conformVideoArgs(source: sourceVideo, target: targetVideo,
                                  damage: damage, windowStart: start, windowEnd: end, crf: crf,
                                  reorderDepth: reorderDepth)
+        // The conformed piece carries its own parameter sets in-band (issue #113). A conform
+        // is re-encoded to the *target's* spec, but it is still a distinct encoder run from
+        // every other piece in the join — and the join's container holds only the first
+        // piece's header — so without this the Fill between two stream-copied clips decoded
+        // against the copies' SPS/PPS and came out as garbage at an exactly-correct frame
+        // count (`ExportEngine.parameterSetRepeatFilter`).
+        args += ["-bsf:v", ExportEngine.parameterSetRepeatFilter]
         // The export-wide MP4 pin (issue #24): without it the encoder-default 1/12800
         // track collapses next to a copy piece at the cross-clip concat.
         if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
@@ -228,7 +235,8 @@ enum ConformEngine {
         try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected,
                                   shortfallAllowance: eofShortfallAllowance(
                                       trimEnd: trimEnd, fileEnd: windowEnd,
-                                      targetFrameRate: conform.targetVideo.frameRate))
+                                      targetFrameRate: conform.targetVideo.frameRate),
+                                  requireSilentDecode: conform.damage.isEmpty)
         return piece
     }
 
@@ -261,9 +269,14 @@ enum ConformEngine {
     /// must match the target spec, its frame count must be within ±1 of the kept window at the
     /// target rate (the relaxed M2 assertion — plus the EOF-damage shortfall allowance,
     /// issue #48), and a full decode must succeed.
+    ///
+    /// "Succeed" means **silently** unless the source is damaged (`requireSilentDecode`, issue
+    /// #113): a decoder conceals what it cannot parse and still exits 0, so the status alone
+    /// would pass a piece whose every frame is colour garbage. A repair conform is exempt — its
+    /// damaged source legitimately prints a per-frame flood.
     private static func verifyConformed(
         _ ffmpeg: URL, _ piece: URL, target: VideoProperties, expectedFrames: Int?,
-        shortfallAllowance: Int = 0
+        shortfallAllowance: Int = 0, requireSilentDecode: Bool = true
     ) async throws {
         let probed = try await MediaProbe.probe(url: piece).video
         guard let v = probed, MatchEvaluator.conformedVideoMatches(v, target) else {
@@ -281,10 +294,15 @@ enum ConformEngine {
         }
         let decode = try await ProcessRunner.run(
             ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
+        let complaints = String(data: decode.stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard decode.status == 0 else {
-            let detail = String(data: decode.stderr, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
-                ?? "decode exited \(decode.status)"
-            throw ExportError.verificationFailed("A decode check failed on the conformed clip.\n\(detail)")
+            throw ExportError.verificationFailed(
+                "A decode check failed on the conformed clip.\n"
+                + (complaints.isEmpty ? "decode exited \(decode.status)" : complaints))
+        }
+        guard !requireSilentDecode || complaints.isEmpty else {
+            throw ExportError.verificationFailed("A decode check failed on the conformed clip.\n\(complaints)")
         }
         // A conformed clip is a single re-encode at the target frame rate, so its timestamps
         // should be uniformly spaced; this catches the duplicate PTS that the B-pyramid/MKV

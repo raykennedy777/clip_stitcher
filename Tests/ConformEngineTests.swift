@@ -234,12 +234,15 @@ struct ConformEngineTests {
 
     /// Conform re-encodes only the kept range as a time window (ADR-0011): a fast seek to the
     /// in-point time and a read duration, then the transform args, dropping audio (rebuilt
-    /// separately). An open end reads to the file end (no `-t`).
+    /// separately). An open end reads to the file end (no `-t`). The piece also repeats its own
+    /// parameter sets in-band (issue #113) — a conform is a distinct encoder run from every
+    /// other piece in the join, and the join's container header holds only the first piece's.
     @Test func conformArgumentsSeekTheKeptRangeAndDropAudio() {
         #expect(ConformEngine.conformArguments(
             source: src, start: 5.0, end: 9.0, sourceVideo: hevc, targetVideo: mpeg2, output: out)
             == ["-v", "error", "-ss", "5", "-t", "4", "-i", src.path]
                 + ConformEngine.conformVideoArgs(source: hevc, target: mpeg2)
+                + ["-bsf:v", ExportEngine.parameterSetRepeatFilter]
                 + ["-an", out.path])
     }
 
