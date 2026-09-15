@@ -1352,7 +1352,7 @@ enum ExportEngine {
                     videoPieces.append(try await ConformEngine.produceConformedPiece(
                         ffmpeg, source: item.source, conform: conform,
                         start: item.audioStart, end: item.audioEnd, work: work,
-                        ext: pieceExts[i], clipIndex: i,
+                        ext: pieceExts[i], clipIndex: i, displayName: item.displayName,
                         trackTimescale: exportTimescale, reorderDepth: depth,
                         onProgress: withinClip))
                 } else {
@@ -1363,7 +1363,7 @@ enum ExportEngine {
                     videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
                         ffmpeg, source: item.source, plan: item.segments, index: item.index,
                         encoder: item.encoder, work: work, ext: pieceExts[i], clipIndex: i,
-                        codec: item.codec, trackTimescale: exportTimescale,
+                        displayName: item.displayName, codec: item.codec, trackTimescale: exportTimescale,
                         containerStart: item.containerStart, frameRate: item.frameRate,
                         sourceDamaged: item.sourceDamaged,
                         fieldCoded: item.fieldCoded, reorderDepth: depth,

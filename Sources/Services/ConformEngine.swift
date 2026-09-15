@@ -190,7 +190,7 @@ enum ConformEngine {
     static func produceConformedPiece(
         _ ffmpeg: URL, source: URL, conform: VideoConform,
         start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int,
-        trackTimescale: Int? = nil, reorderDepth: Int = 1,
+        displayName: String = "", trackTimescale: Int? = nil, reorderDepth: Int = 1,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         let piece = work.appendingPathComponent("c\(clipIndex)_conform.\(ext)")
@@ -236,7 +236,10 @@ enum ConformEngine {
                                   shortfallAllowance: eofShortfallAllowance(
                                       trimEnd: trimEnd, fileEnd: windowEnd,
                                       targetFrameRate: conform.targetVideo.frameRate),
-                                  requireSilentDecode: conform.damage.isEmpty)
+                                  requireSilentDecode: conform.damage.isEmpty,
+                                  at: VerificationLocation(
+                                      clipIndex: clipIndex, displayName: displayName,
+                                      piece: piece.lastPathComponent, conformed: true))
         return piece
     }
 
@@ -276,20 +279,21 @@ enum ConformEngine {
     /// damaged source legitimately prints a per-frame flood.
     private static func verifyConformed(
         _ ffmpeg: URL, _ piece: URL, target: VideoProperties, expectedFrames: Int?,
-        shortfallAllowance: Int = 0, requireSilentDecode: Bool = true
+        shortfallAllowance: Int = 0, requireSilentDecode: Bool = true,
+        at location: VerificationLocation
     ) async throws {
         let probed = try await MediaProbe.probe(url: piece).video
         guard let v = probed, MatchEvaluator.conformedVideoMatches(v, target) else {
-            throw ExportError.verificationFailed(
-                "The conformed clip did not reach the target spec (\(mismatchSummary(probed, target))).")
+            throw ExportError.verificationFailed(location.message(
+                "The conformed clip did not reach the target spec (\(mismatchSummary(probed, target)))."))
         }
         if let expected = expectedFrames {
             let actual = try await FrameIndexer.frameCount(url: piece)
             guard actual <= expected + 1, actual >= expected - 1 - shortfallAllowance else {
-                throw ExportError.verificationFailed(
+                throw ExportError.verificationFailed(location.message(
                     "The conformed clip has \(actual) frames but the kept range at the target rate is ~\(expected) (±1"
                     + (shortfallAllowance > 0 ? ", −\(shortfallAllowance) allowed at the damaged file end" : "")
-                    + ").")
+                    + ")."))
             }
         }
         let decode = try await ProcessRunner.run(
@@ -297,19 +301,21 @@ enum ConformEngine {
         let complaints = String(data: decode.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard decode.status == 0 else {
-            throw ExportError.verificationFailed(
-                "A decode check failed on the conformed clip.\n"
-                + (complaints.isEmpty ? "decode exited \(decode.status)" : complaints))
+            throw ExportError.verificationFailed(location.message(
+                "A decode check failed on the conformed clip.",
+                detail: complaints.isEmpty ? "decode exited \(decode.status)" : complaints))
         }
         guard !requireSilentDecode || complaints.isEmpty else {
-            throw ExportError.verificationFailed("A decode check failed on the conformed clip.\n\(complaints)")
+            throw ExportError.verificationFailed(location.message(
+                "A decode check failed on the conformed clip.", detail: complaints))
         }
         // A conformed clip is a single re-encode at the target frame rate, so its timestamps
         // should be uniformly spaced; this catches the duplicate PTS that the B-pyramid/MKV
         // stream-copy collapse once produced (ADR-0011) before the clip ships.
         let pts = try await FrameIndexer.buildIndex(url: piece).pts
         if let reason = ExportEngine.timestampDefect(pts: pts) {
-            throw ExportError.verificationFailed("The conformed clip has irregular timestamps: \(reason)")
+            throw ExportError.verificationFailed(location.message(
+                "The conformed clip has irregular timestamps: \(reason)"))
         }
     }
 

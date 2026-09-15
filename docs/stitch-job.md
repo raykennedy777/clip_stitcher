@@ -9,7 +9,7 @@ CLI runs the exact planning and export engine the GUI runs (ADR-0025) — a job 
 project the way a script would write one.
 
 ```
-clipstitch <job.json> <output-file>
+clipstitch [--verbose] <job.json> <output-file>
 ```
 
 The CLI is headless and non-interactive: sources are plain file paths (no
@@ -123,3 +123,35 @@ Warnings (repair reports, conform color assumptions, codec fallbacks — the sam
 notices the app shows after an export) go to stderr prefixed `warning:` and do not
 affect the exit code. Progress prints to stderr as `progress: N%` lines in 10 %
 steps.
+
+## The verdict line
+
+The **last** stderr line of every run is one line that gives the outcome, so
+`tail -1` of a piped log is the answer. A success ends with the output path:
+
+```
+Done: /media/out/stitched.mkv
+```
+
+A failure ends with the exit code, its class, and where the failure happened:
+
+```
+clipstitch: FAILED (70 export failure): clip 3 “part 4” — piece c3_joined.mkv — plan: reEncode [1234,14682) · copy [14682,56790)
+```
+
+The verdict never wraps a newline, and for a verification refusal it repeats that
+refusal's own first line — the **location line**, which every verification refusal
+opens with. The location line names:
+
+- the clip's number, which is its **0-based index in `clips[]`**, and its `name`
+  when the job gives one;
+- the piece file the gate refused, whose `c<index>_` prefix is that same clip
+  number;
+- the segment plan that produced it (`reEncode`/`copy`/`repair` with each
+  segment's half-open frame range), or `conform` for a conformed clip. A plan
+  longer than four segments counts the rest as `· +N more`.
+
+Above the verdict, a failure's detail is printed **bounded**: the first 5 lines, a
+`… N more lines …` marker, and the last 10 lines. A decode refusal can carry
+thousands of near-identical decoder lines, and the ones that matter are at the two
+ends. `--verbose` prints the detail whole (stderr only — stdout stays silent).

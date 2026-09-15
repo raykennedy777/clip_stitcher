@@ -15,7 +15,7 @@ import Foundation
 @main
 struct ClipStitchMain {
     static let usage = """
-    usage: clipstitch <job.json> <output-file>
+    usage: clipstitch [--verbose] <job.json> <output-file>
 
     Stitches the clips described by a Stitch Job JSON (see docs/stitch-job.md) into
     one frame-accurate output file, exactly as the Clip Stitcher app would: matching
@@ -24,16 +24,26 @@ struct ClipStitchMain {
     An existing file at <output-file> is overwritten. Requires ffmpeg and ffprobe
     (Homebrew or system install).
 
+    An error prints a bounded excerpt of a long detail (a decoder's output can run to
+    thousands of lines); --verbose prints all of it. The last stderr line of every run is
+    one verdict line: “Done: <path>” or “clipstitch: FAILED (…)”.
+
     exit codes: 0 success · 64 usage · 65 invalid job · 66 probe/index failure ·
     70 export failure
     """
 
+    /// `--verbose` prints an error's whole detail instead of the bounded excerpt (issue #113).
+    /// stderr only — stdout stays silent whatever the flag.
+    nonisolated(unsafe) static var verbose = false
+
     static func main() async {
-        let arguments = Array(CommandLine.arguments.dropFirst())
+        var arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.contains("--help") || arguments.contains("-h") {
             print(usage)
             exit(0)
         }
+        verbose = arguments.contains("--verbose")
+        arguments.removeAll { $0 == "--verbose" }
         guard arguments.count == 2 else {
             fail(.usage, "expected a job file and an output file\n\(usage)")
         }
@@ -82,7 +92,7 @@ struct ClipStitchMain {
         } catch let error as FFError {
             fail(.probeFailure, describe(error))
         } catch {
-            fail(.exportFailure, describe(error))
+            fail(.exportFailure, describe(error), short: shortForm(error))
         }
     }
 
@@ -91,15 +101,53 @@ struct ClipStitchMain {
         case invalidJob = 65     // EX_DATAERR
         case probeFailure = 66   // EX_NOINPUT
         case exportFailure = 70  // EX_SOFTWARE
+
+        /// The verdict line's name for this code, for example “70 export failure”.
+        var label: String {
+            switch self {
+            case .usage: return "64 usage"
+            case .invalidJob: return "65 invalid job"
+            case .probeFailure: return "66 probe/index failure"
+            case .exportFailure: return "70 export failure"
+            }
+        }
     }
 
-    static func fail(_ code: ExitCode, _ message: String) -> Never {
-        FileHandle.standardError.write(Data("clipstitch: error: \(message)\n".utf8))
+    /// Prints the error, then the verdict line, then exits (issue #113). The verdict is the
+    /// **last** stderr line of the run, so `tail -1` of a piped log is the outcome — the
+    /// message above it can be thousands of decoder lines long. `short` is the verdict's own
+    /// one-line summary; it defaults to the message's first line, and never wraps a newline
+    /// into the verdict. A usage error prints whole: its message is the fixed usage text,
+    /// not an unbounded detail, and an excerpt of it would help no one.
+    static func fail(_ code: ExitCode, _ message: String, short: String? = nil) -> Never {
+        let body = verbose || code == .usage ? message : BoundedExcerpt.bounded(message)
+        FileHandle.standardError.write(Data("clipstitch: error: \(body)\n".utf8))
+        FileHandle.standardError.write(
+            Data("clipstitch: FAILED (\(code.label)): \(oneLine(short ?? message))\n".utf8))
         exit(code.rawValue)
     }
 
     static func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    /// The verdict's short form for an export error. A verification refusal carries its
+    /// location line as the first line of its own payload (issue #113) — the same text the
+    /// message shows, so there is no second source of truth — while
+    /// `errorDescription` puts a fixed preamble above it. Any other error uses its
+    /// description's first line.
+    static func shortForm(_ error: Error) -> String {
+        if case .verificationFailed(let payload)? = error as? ExportError {
+            return payload
+        }
+        return describe(error)
+    }
+
+    /// The first line of `text`, trimmed and capped, for the one-line verdict.
+    static func oneLine(_ text: String, limit: Int = 200) -> String {
+        let first = text.components(separatedBy: "\n").first?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        return first.count <= limit ? first : String(first.prefix(limit - 1)) + "\u{2026}"
     }
 
     /// Serializes the engine's cross-queue progress callbacks into coarse stderr

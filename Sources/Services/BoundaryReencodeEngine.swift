@@ -493,7 +493,8 @@ enum BoundaryReencodeEngine {
     /// at the clip's top edge while they run.
     static func produceVideoPiece(
         _ ffmpeg: URL, source: URL, plan: [PlannedSegment], index: FrameIndex,
-        encoder: [String], work: URL, ext: String, clipIndex: Int, codec: String? = nil,
+        encoder: [String], work: URL, ext: String, clipIndex: Int, displayName: String = "",
+        codec: String? = nil,
         trackTimescale: Int? = nil, containerStart: Double = 0, frameRate: String? = nil,
         sourceDamaged: Bool = false, copyStrategy: CopyStrategy = .segmentMux,
         fieldCoded: Bool = false, reorderDepth: Int? = nil,
@@ -683,8 +684,11 @@ enum BoundaryReencodeEngine {
         // `timestampDefect` — both false-fail. The decode check is the one that catches
         // what matters here (a corrupt copy→MBAFF entry seam), so that is the whole gate;
         // duration and zero-zones are confirmed by the engine's post-mux re-scan.
+        let location = VerificationLocation(
+            clipIndex: clipIndex, displayName: displayName,
+            piece: result.lastPathComponent, plan: plan)
         if fieldCoded {
-            try await verifyFieldCodedPiece(ffmpeg, result)
+            try await verifyFieldCodedPiece(ffmpeg, result, at: location)
             return result
         }
         // Per-segment expected output counts: a copy or plain re-encode produces
@@ -706,7 +710,7 @@ enum BoundaryReencodeEngine {
         try await verifyPiece(ffmpeg, result, expectedCounts: outputCounts,
                               shortfallAllowance: shortfallAllowance,
                               sourceDamaged: sourceDamaged,
-                              plan: plan, sourcePts: index.pts)
+                              plan: plan, sourcePts: index.pts, at: location)
         return result
     }
 
@@ -759,8 +763,9 @@ enum BoundaryReencodeEngine {
     /// decodes with a per-frame warning flood even at `-v error`; `ProcessRunner` drains
     /// stderr live into a bounded tail (issue #59), so the `-f null -` pass no longer backs up
     /// the OS pipe and deadlocks at 0% CPU on a multi-hour repair — the failure detail is the
-    /// tail's final fatal lines. `failureLabel` opens the thrown message so each caller names
-    /// what failed (a cut vs the repaired video).
+    /// tail's final fatal lines. The thrown message opens with `location`'s line (issue #113),
+    /// then `failureLabel`, so each refusal names both where it happened and what failed
+    /// (a cut vs the repaired video).
     ///
     /// **`requireSilentDecode` is what gives this check teeth** (issue #113). The exit status
     /// alone is nearly blind: a video decoder conceals what it cannot parse and returns
@@ -771,29 +776,32 @@ enum BoundaryReencodeEngine {
     /// point of the repair is that the source doesn't decode), and there the exit status is
     /// all this check can honestly assert.
     private static func decodeCheck(_ ffmpeg: URL, _ piece: URL, failureLabel: String,
-                                   requireSilentDecode: Bool) async throws {
+                                   requireSilentDecode: Bool,
+                                   at location: VerificationLocation) async throws {
         let decode = try await ProcessRunner.run(
             ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
         let complaints = String(data: decode.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard decode.status == 0 else {
-            throw ExportError.verificationFailed(
-                "\(failureLabel)\n\(complaints.isEmpty ? "decode exited \(decode.status)" : complaints)")
+            throw ExportError.verificationFailed(location.message(
+                failureLabel,
+                detail: complaints.isEmpty ? "decode exited \(decode.status)" : complaints))
         }
         guard !requireSilentDecode || complaints.isEmpty else {
-            throw ExportError.verificationFailed("\(failureLabel)\n\(complaints)")
+            throw ExportError.verificationFailed(location.message(failureLabel, detail: complaints))
         }
     }
 
     private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedCounts: [Int],
                                     shortfallAllowance: Int = 0, sourceDamaged: Bool = false,
-                                    plan: [PlannedSegment], sourcePts: [Double]) async throws {
+                                    plan: [PlannedSegment], sourcePts: [Double],
+                                    at location: VerificationLocation) async throws {
         let expectedFrames = expectedCounts.reduce(0, +)
         let actual = try await FrameIndexer.frameCount(url: piece)
         guard actual <= expectedFrames, actual >= expectedFrames - shortfallAllowance else {
-            throw ExportError.verificationFailed(
+            throw ExportError.verificationFailed(location.message(
                 "Produced \(actual) video frames but the cut kept \(expectedFrames)"
-                + (shortfallAllowance > 0 ? " (−\(shortfallAllowance) allowed at the damaged file end)." : "."))
+                + (shortfallAllowance > 0 ? " (−\(shortfallAllowance) allowed at the damaged file end)." : ".")))
         }
         // Any EOF shortfall lands in the trailing repaired segment — re-anchor the
         // timestamp mapping so the copy spans before it still line up.
@@ -804,11 +812,13 @@ enum BoundaryReencodeEngine {
         }
         try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the cut.",
                               requireSilentDecode: !sourceDamaged
-                                  && plan.allSatisfy { $0.damage.isEmpty })
+                                  && plan.allSatisfy { $0.damage.isEmpty },
+                              at: location)
         let pts = try await FrameIndexer.buildIndex(url: piece).pts
         if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts,
                                                      outputCounts: outputCounts) {
-            throw ExportError.verificationFailed("The cut produced irregular timestamps: \(reason)")
+            throw ExportError.verificationFailed(location.message(
+                "The cut produced irregular timestamps: \(reason)"))
         }
     }
 
@@ -829,9 +839,10 @@ enum BoundaryReencodeEngine {
     /// repair exists because the source is damaged, so a per-frame decoder flood is the
     /// expected output, and the null muxer's benign "non monotonically increasing dts to
     /// muxer" line on field-coded rescale would fail a silence requirement on a correct piece.
-    private static func verifyFieldCodedPiece(_ ffmpeg: URL, _ piece: URL) async throws {
+    private static func verifyFieldCodedPiece(_ ffmpeg: URL, _ piece: URL,
+                                              at location: VerificationLocation) async throws {
         try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the repaired video.",
-                              requireSilentDecode: false)
+                              requireSilentDecode: false, at: location)
     }
 
     /// The clip's mean frame interval in seconds — exact under CFR; a timestamp-dirty

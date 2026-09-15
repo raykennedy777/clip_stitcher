@@ -502,7 +502,8 @@ enum ClipDoctorEngine {
         //    timestamps) by `produceVideoPiece` before it ships (ADR-0008).
         let videoPiece = try await BoundaryReencodeEngine.produceVideoPiece(
             ffmpeg, source: source, plan: plan, index: index, encoder: encoder,
-            work: work, ext: ext, clipIndex: 0, codec: video.codec,
+            work: work, ext: ext, clipIndex: 0, displayName: clip.displayName,
+            codec: video.codec,
             containerStart: containerStart, frameRate: video.frameRate,
             sourceDamaged: true, copyStrategy: .boundedKeyframe, fieldCoded: fieldCoded,
             // A repair joins re-encoded spans with copies of this one source, so the depth
