@@ -739,6 +739,103 @@ enum BoundaryReencodeEngine {
         }
     }
 
+    /// The **verify windows** a finished piece's decode gate is bounded to (ADR-0030, issue
+    /// #114): one keyframe-anchored span per re-encoded segment, in the piece's own reset
+    /// timeline. Pure over the plan and the piece's own index, so every plan shape is
+    /// unit-tested without ffmpeg.
+    ///
+    /// Each re-encoded segment gets a window that covers **both of its seams plus a copied
+    /// GOP on each side**, because every failure the decode can catch is seam-local — an
+    /// orphaned leading picture at a re-encode↔copy seam, a retained RASL, a bad copy→MBAFF
+    /// entry, or the parameter-set mismatch of commit 8bacae6, which shows on the frames of
+    /// whichever piece does not own the join's single container header:
+    ///
+    /// - **start** — the nearest **copy-safe** keyframe at or before the last keyframe
+    ///   strictly before the seam, searched only inside the preceding copy segment. None →
+    ///   that copy segment's own start, which is copy-safe by construction — and the piece
+    ///   start if a plan ever hands over a copy that does not begin on a keyframe. No
+    ///   preceding copy segment → the piece start. It is never merely *a* keyframe: entering a decode at an
+    ///   open-GOP keyframe orphans its leading pictures, and the flood that produces is
+    ///   indistinguishable from the defect this gate exists to refuse (ADR-0030 step 5).
+    /// - **end** — the **second** keyframe of the following copy segment, so one whole copied
+    ///   GOP after the seam is decoded. No following copy segment → the piece end.
+    ///
+    /// A copy-only plan gets one window from the piece start to its second keyframe: the cut
+    /// start is its only seam. Windows sort and merge. **`nil` means "decode the whole
+    /// piece"** — a plan whose windows cover it, a piece too short to bound, an empty or
+    /// mismatched input. `pieceSpan` is the piece's own first…last presentation time, which
+    /// the keyframe map alone cannot give (a piece rarely ends on a keyframe).
+    static func verifyWindows(
+        plan: [PlannedSegment], outputCounts: [Int],
+        pieceKeyframePts: [Int: Double], pieceCopySafeFlags: [Int: Bool],
+        pieceSpan: ClosedRange<Double>
+    ) -> [ClosedRange<Double>]? {
+        guard !plan.isEmpty, plan.count == outputCounts.count,
+              pieceSpan.upperBound > pieceSpan.lowerBound else { return nil }
+        var segmentStarts: [Int] = []
+        var offset = 0
+        for count in outputCounts { segmentStarts.append(offset); offset += count }
+        let total = offset
+        let keyframes = pieceKeyframePts.keys.sorted()
+
+        func secondKeyframe(from lo: Int, below hi: Int) -> Double? {
+            let inside = keyframes.filter { $0 >= lo && $0 < hi }
+            return inside.count > 1 ? pieceKeyframePts[inside[1]] : nil
+        }
+        func windowStart(before seam: Int, inCopyFrom copyStart: Int) -> Double {
+            // The last keyframe before the seam opens the final copied GOP; the window has to
+            // start at a copy-safe keyframe at or before it, or not be placed at all.
+            guard let lastBefore = keyframes.last(where: { $0 < seam && $0 >= copyStart }),
+                  let safe = keyframes.last(where: {
+                      $0 <= lastBefore && $0 >= copyStart && pieceCopySafeFlags[$0] == true
+                  }), let pts = pieceKeyframePts[safe]
+            else { return pieceKeyframePts[copyStart] ?? pieceSpan.lowerBound }
+            return pts
+        }
+
+        var windows: [ClosedRange<Double>] = []
+        guard plan.contains(where: { $0.kind == .reEncode }) else {
+            let end = secondKeyframe(from: 0, below: total) ?? pieceSpan.upperBound
+            windows.append(pieceSpan.lowerBound...max(end, pieceSpan.lowerBound))
+            return merged(windows, in: pieceSpan)
+        }
+        for (i, segment) in plan.enumerated() where segment.kind == .reEncode {
+            let seam = segmentStarts[i]
+            let start = (i > 0 && plan[i - 1].kind == .copy)
+                ? windowStart(before: seam, inCopyFrom: segmentStarts[i - 1])
+                : pieceSpan.lowerBound
+            let end: Double
+            if i + 1 < plan.count, plan[i + 1].kind == .copy {
+                let next = segmentStarts[i + 1]
+                end = secondKeyframe(from: next, below: next + outputCounts[i + 1])
+                    ?? pieceSpan.upperBound
+            } else {
+                end = pieceSpan.upperBound
+            }
+            windows.append(min(start, end)...max(start, end))
+        }
+        return merged(windows, in: pieceSpan)
+    }
+
+    /// Overlapping windows joined into one, and `nil` when what is left covers the piece —
+    /// the plan shapes that have nothing to save (a tiny piece, a plan whose seams sit within
+    /// one copied GOP of each other) say so by asking for the whole-piece decode.
+    private static func merged(_ windows: [ClosedRange<Double>],
+                               in span: ClosedRange<Double>) -> [ClosedRange<Double>]? {
+        var joined: [ClosedRange<Double>] = []
+        for window in windows.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = joined.last, window.lowerBound <= last.upperBound {
+                joined[joined.count - 1] = last.lowerBound...max(last.upperBound, window.upperBound)
+            } else {
+                joined.append(window)
+            }
+        }
+        guard let only = joined.first, joined.count > 1
+                || only.lowerBound > span.lowerBound || only.upperBound < span.upperBound
+        else { return nil }
+        return joined
+    }
+
     /// Verifies a produced video piece before it ships (ADR-0008). Three checks, any of
     /// which throws rather than letting a silently-wrong cut through:
     ///   1. Frame count — the output's video packet count must equal the planned total
@@ -775,9 +872,30 @@ enum BoundaryReencodeEngine {
     /// A damaged source is exempt: its piece legitimately prints a per-frame flood (the whole
     /// point of the repair is that the source doesn't decode), and there the exit status is
     /// all this check can honestly assert.
-    private static func decodeCheck(_ ffmpeg: URL, _ piece: URL, failureLabel: String,
+    ///
+    /// `windows` bounds the pass to the seams (ADR-0030): one decode per **verify window**
+    /// instead of one over the whole piece, which on the 8-clip round job of the 2026-09-15
+    /// review was 06:16 of a 15:36 wall clock, nearly all of it decoding stream-copied frames
+    /// no cut had touched. `nil` — the field-coded caller, a piece too short to bound, a plan
+    /// whose windows merge to cover it — is the whole-piece pass, unchanged. The bound never
+    /// costs the gate teeth: a window that cannot be entered on a copy-safe keyframe, or that
+    /// comes back with anything to say, falls through to the whole-piece pass, and *that* is
+    /// the verdict (`boundedDecodePassed`).
+    /// Internal rather than private so `BoundedVerifyIntegrationTests` can run the two
+    /// decodes side by side on one piece and compare their verdicts (issue #114).
+    static func decodeCheck(_ ffmpeg: URL, _ piece: URL, failureLabel: String,
                                    requireSilentDecode: Bool,
-                                   at location: VerificationLocation) async throws {
+                                   at location: VerificationLocation,
+                                   windows: [ClosedRange<Double>]? = nil,
+                                   pieceStart: Double = 0,
+                                   copySafeKeyframePts: [Double] = []) async throws {
+        if let windows, !windows.isEmpty,
+           try await boundedDecodePassed(
+               ffmpeg, piece, windows: windows, pieceStart: pieceStart,
+               copySafeKeyframePts: copySafeKeyframePts,
+               requireSilentDecode: requireSilentDecode) {
+            return
+        }
         let decode = try await ProcessRunner.run(
             ffmpeg, ["-v", "error", "-xerror", "-i", piece.path, "-f", "null", "-"])
         let complaints = String(data: decode.stderr, encoding: .utf8)?
@@ -792,7 +910,126 @@ enum BoundaryReencodeEngine {
         }
     }
 
-    private static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedCounts: [Int],
+    /// How close two presentation times must be to count as the same one — well under a
+    /// frame at any rate this app handles, and above the millisecond a Matroska timestamp
+    /// rounds to.
+    static let seekTolerance = 0.001
+
+    /// Runs the bounded verify decode over `windows` and reports whether it **proved** the
+    /// piece clean. `false` means "not proven here", never "defective": a window whose decode
+    /// entry could not be measured onto a copy-safe keyframe, or that exited non-zero, or that
+    /// spoke when silence was required. The caller then decodes the whole piece and that pass
+    /// refuses or passes — so the bounded decode can only ever be as strict as the gate it
+    /// shortens, and a new way for a seek to go wrong costs wall time, never teeth.
+    ///
+    /// A window starting at the piece's own first frame takes no seek at all; every other
+    /// window's entry is **measured** (`seekLanding`), because `-ss <pts>` does not land where
+    /// it is asked — Matroska lands one keyframe early (ffmpeg subtracts a version-dependent
+    /// `dts_heuristic` of ≈ 0.13 s from a reordered stream's seek target), which is why the ask
+    /// is corrected by `(target − landing)` and re-measured rather than nudged by a constant.
+    /// The landing must be a copy-safe keyframe at or before the window start: entering at an
+    /// open-GOP keyframe orphans its leading pictures, and the flood that produces is exactly
+    /// what `requireSilentDecode` exists to catch elsewhere (measured on H.264: rc 183, and no
+    /// frame decoded at all until the next IDR — ADR-0030 step 5).
+    private static func boundedDecodePassed(
+        _ ffmpeg: URL, _ piece: URL, windows: [ClosedRange<Double>], pieceStart: Double,
+        copySafeKeyframePts: [Double], requireSilentDecode: Bool
+    ) async throws -> Bool {
+        for window in windows {
+            var seekArgs: [String] = []
+            var span = window.upperBound - pieceStart
+            if window.lowerBound > pieceStart + seekTolerance {
+                guard let entry = try await measuredEntry(
+                    ffmpeg, piece, to: window.lowerBound, from: pieceStart,
+                    copySafeKeyframePts: copySafeKeyframePts) else { return false }
+                seekArgs = ["-ss", ExportEngine.timeString(entry.ask)]
+                span = window.upperBound - entry.landing
+            }
+            guard span > 0 else { return false }
+            let decode = try await ProcessRunner.run(
+                ffmpeg, ["-v", "error", "-xerror"] + seekArgs + ["-i", piece.path]
+                    + ["-t", ExportEngine.timeString(span), "-f", "null", "-"])
+            let complaints = String(data: decode.stderr, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard decode.status == 0, !requireSilentDecode || complaints.isEmpty else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// The `-ss` value that makes a decode enter `piece` at `target`, and where it measured
+    /// the entry. `nil` when no ask lands on a copy-safe keyframe at or before `target` — on
+    /// an H.264 or HEVC `.ts` piece that is every ask, because the mpegts demuxer seeks by
+    /// byte position and hands the decoder whatever precedes the keyframe (ADR-0030 step 4).
+    private static func measuredEntry(
+        _ ffmpeg: URL, _ piece: URL, to target: Double, from pieceStart: Double,
+        copySafeKeyframePts: [Double]
+    ) async throws -> (ask: Double, landing: Double)? {
+        var ask = target - pieceStart
+        for _ in 0..<2 {
+            guard let landing = try await seekLanding(ffmpeg, piece: piece, seek: ask) else {
+                return nil
+            }
+            // Accept only a measured landing that is itself a copy-safe keyframe, at or before
+            // the window start. Landing *earlier* than asked is fine — it decodes more of the
+            // copied body, not less.
+            if landing <= target + seekTolerance,
+               copySafeKeyframePts.contains(where: { abs($0 - landing) <= seekTolerance }) {
+                return (ask, landing)
+            }
+            ask += target - landing
+            if ask < 0 { return nil }
+        }
+        return nil
+    }
+
+    /// Where an input seek really lands — the landing probe of ADR-0027, pointed at a finished
+    /// piece instead of a source. One stream-copied packet, written as `framecrc` rather than
+    /// into a container: the **mpegts muxer adds its own ~1.4 s base** to every timestamp it
+    /// writes, so a probe muxed to `.ts` reports a landing 1.4 s late and a correction then
+    /// walks the entry onto an open-GOP keyframe. It **copies, never decodes**, for the same
+    /// reason: a decode reports the first frame the decoder could *recover*, which on H.264 is
+    /// the next IDR — measured 4.78 s past the real landing. `nil` when the probe writes
+    /// nothing readable, which the caller reads as "decode the whole piece".
+    static func seekLanding(_ ffmpeg: URL, piece: URL, seek: Double) async throws -> Double? {
+        let probe = try await ProcessRunner.run(ffmpeg, [
+            "-v", "error", "-copyts", "-ss", ExportEngine.timeString(seek), "-i", piece.path,
+            "-frames:v", "1", "-map", "0:v:0", "-c", "copy", "-f", "framecrc", "-"])
+        guard probe.status == 0, let text = String(data: probe.stdout, encoding: .utf8) else {
+            return nil
+        }
+        return framecrcFirstPts(text)
+    }
+
+    /// The first packet's presentation time from a `framecrc` dump: its `#tb <stream>: n/d`
+    /// header gives the time base, and each row is `stream, dts, pts, duration, size, crc`.
+    /// `nil` for a dump with no timed row — a probe that landed past the end, or a packet
+    /// whose pts is `N/A`.
+    static func framecrcFirstPts(_ text: String) -> Double? {
+        var timeBase: Double?
+        for line in text.split(separator: "\n") {
+            if line.hasPrefix("#tb ") {
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                let ratio = line[line.index(after: colon)...]
+                    .trimmingCharacters(in: .whitespaces).split(separator: "/")
+                if ratio.count == 2, let n = Double(ratio[0]), let d = Double(ratio[1]), d != 0 {
+                    timeBase = n / d
+                }
+            } else if !line.hasPrefix("#") {
+                let fields = line.split(separator: ",", omittingEmptySubsequences: false)
+                guard fields.count > 2, let base = timeBase,
+                      let ticks = Double(fields[2].trimmingCharacters(in: .whitespaces))
+                else { return nil }
+                return ticks * base
+            }
+        }
+        return nil
+    }
+
+    /// Internal rather than private so `BoundedVerifyIntegrationTests` can point the gate at
+    /// a piece built to be wrong — the executor refuses to produce one (issue #114).
+    static func verifyPiece(_ ffmpeg: URL, _ piece: URL, expectedCounts: [Int],
                                     shortfallAllowance: Int = 0, sourceDamaged: Bool = false,
                                     plan: [PlannedSegment], sourcePts: [Double],
                                     at location: VerificationLocation) async throws {
@@ -810,11 +1047,30 @@ enum BoundaryReencodeEngine {
            let last = plan.lastIndex(where: { !$0.damage.isEmpty }) {
             outputCounts[last] -= expectedFrames - actual
         }
+        // The piece's own index, built once: it anchors the verify windows on the piece's
+        // keyframes and is the timestamp gate's input either way (ADR-0030).
+        let pieceIndex = try await FrameIndexer.buildIndex(url: piece)
+        let pts = pieceIndex.pts
+        let copySafe = CopySafeBoundaryDetector.copySafeFlags(
+            keyframeFlags: pieceIndex.keyframeFlags, dts: pieceIndex.dts)
+        var keyframePts: [Int: Double] = [:]
+        var copySafeFlags: [Int: Bool] = [:]
+        for i in pieceIndex.keyframeFlags.indices where pieceIndex.keyframeFlags[i] {
+            keyframePts[i] = pts[i]
+            copySafeFlags[i] = i < copySafe.count && copySafe[i]
+        }
+        let span = (pts.first ?? 0)...(pts.last ?? 0)
+        let windows = verifyWindows(plan: plan, outputCounts: outputCounts,
+                                    pieceKeyframePts: keyframePts,
+                                    pieceCopySafeFlags: copySafeFlags, pieceSpan: span)
         try await decodeCheck(ffmpeg, piece, failureLabel: "A decode check failed on the cut.",
                               requireSilentDecode: !sourceDamaged
                                   && plan.allSatisfy { $0.damage.isEmpty },
-                              at: location)
-        let pts = try await FrameIndexer.buildIndex(url: piece).pts
+                              at: location,
+                              windows: windows, pieceStart: span.lowerBound,
+                              copySafeKeyframePts: keyframePts.compactMap {
+                                  copySafeFlags[$0.key] == true ? $0.value : nil
+                              }.sorted())
         if let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: sourcePts,
                                                      outputCounts: outputCounts) {
             throw ExportError.verificationFailed(location.message(

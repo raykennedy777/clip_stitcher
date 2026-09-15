@@ -1,0 +1,5 @@
+# Long-GOP sources for the bounded verify decode suite (issue #114, ADR-0030). Nothing here is
+# copyrighted — they are synthesised from ffmpeg's own `testsrc2` on first run (ADR-0023) —
+# but they are generated build artefacts, so they are cached, never committed.
+*
+!.gitignore

@@ -74,6 +74,19 @@ demuxer reads every piece in one timebase (#18, ADR-0009). MP4-only — MKV and 
 one timebase per container.
 _Avoid_: timebase probe (a stream has a timebase; an MP4 *track* has a timescale)
 
+**Verify window**:
+A keyframe-anchored span of a *finished piece* that the verify decode is bounded to, one
+per re-encoded segment: from a copy-safe keyframe in the copy before the seam, through the
+re-encode, to the second keyframe of the copy after it. Every defect the decode can catch
+is seam-local, so the copied middle need not be decoded at all — it was 06:16 of a 15:36
+render. A window never *starts* at an open-GOP keyframe (the orphaned leading pictures
+print the same flood as the defect the gate exists to refuse), its decode entry is
+measured, not predicted (see Landing probe), and a window that cannot be entered or that
+is not silent falls back to decoding the whole piece, which stays the verdict (#114,
+ADR-0030).
+_Avoid_: decode window, seam window, partial verify (it verifies the whole piece — by
+decoding part of it)
+
 **Conform**:
 Fully re-encoding a non-matching clip so its properties match the target clip.
 _Avoid_: convert, transcode (when specifically meaning re-encode-to-target)
