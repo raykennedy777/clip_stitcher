@@ -178,7 +178,7 @@ written as `null`, never omitted, so a reader can index it without checking the 
 | `clips[].kept` | The job's own coordinates — `outFrame` **inclusive** — plus that range's frame count and duration. |
 | `clips[].segments` | The copy/re-encode plan; `null` on a conformed clip. `frames` is half-open `[start, end)`. `reason` is `null` on a copy. |
 | `clips[].copySafeKeyframes` | Where the marks may move; `null` on a conformed clip, and per side when that side has no such keyframe. |
-| `clips[].reason` | Why a conformed clip doesn't match — one entry per strict-compare property (ADR-0005). `null` on a smart-rendered clip. |
+| `clips[].reason` | Why a conformed clip doesn't match — one entry per strict-compare property (ADR-0005). `null` on a smart-rendered clip. `Scan type` compares the scan **direction**: a `tt` clip matches a `tb` target, and the values keep ffprobe's spelling. |
 | `clips[].copiedFraction` | How much of the kept range is stream-copied, 0–1, weighted by duration. |
 | `clips[].expectedFrames` | How many video frames this clip contributes to the output. The per-clip counts sum to the output's frame count. A conformed clip counts at the **target's** frame rate, which is the rate it is re-encoded to. |
 | `audio.codec`, `audio.bitrate` | Per output track what the **target clip's** source carries (`in`), beside what every track encodes to (`out`). |

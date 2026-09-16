@@ -131,4 +131,43 @@ field direction is forced to `bff`. See ADR-0009's amendment for the full de-ris
 `-field_order` no-op trap.
 
 **Known gap, not introduced here.** An interlaced H.264 or HEVC conform target still gets no
-interlace flags and no scan filter. It never got `-top` either. Out of scope for #117.
+interlace flags and no scan filter. It never got `-top` either. Out of scope for #117. (H.264
+closed by the amendment below; HEVC is assumed never interlaced.)
+
+## Amendment — 2026-09-16: the conform gate compares scan direction, read off the coded frames (issue #119)
+
+A job with an H.264 `tt` target and a progressive fill did every encode and then failed the
+self-verify with `field tb≠tt`. The two spellings are one coded stream probed in two places:
+ffmpeg 9 tags every interlaced encode `tb`/`bt` and only Matroska stores the tag, so an
+encoder-written MKV piece can never spell `tt` (ADR-0009, "Why the container decides").
+
+**Rule.** Scan is compared as a **direction** — top-field-first, bottom-field-first, or
+progressive — everywhere: the strict match and its plan reason (ADR-0005), and the conform
+gate. `tt`≡`tb`, `bb`≡`bt`; progressive against interlaced, or top-first against bottom-first,
+still fails. The plan reason keeps ffprobe's spelling in its values, so a reader sees what was
+probed.
+
+**The gate measures.** `verifyConformed` reads the piece's first coded frames
+(`interlaced_frame`, `top_field_first`) and compares that, not the stream tag. The stream tag is
+wrong in two ways the direction rule alone would not catch: an interlaced H.264 stream in MP4 or
+MPEG-TS probes `tt` whichever field leads (a bottom-first piece would false-fail), and the
+Matroska tag repeats what ffmpeg's front end believed, not what the encoder coded (libx265
+ignores the interlace flags, so an interlaced HEVC piece would false-pass). The measurement falls
+back to the stream probe when ffprobe gives no verdict.
+
+**The H.264 encoder is told.** An interlaced H.264 target now gets `-flags +ildct+ilme` and,
+for an interlaced source, the `setparams=field_mode` tail — the same shape MPEG-2 got for #117.
+Without the flags libx264 codes the combed frames as progressive pictures whatever the chain did.
+De-risked in the real conform chain shape (scale, setsar, format, fps=2×, interlace, colour
+strip; profile, level, CRF, reorder-depth params) into `.mkv` and `.mp4`, tff and bff: every
+frame interlaced in the asked direction, exact frame count, silent `-xerror` decode. A
+synthetic end-to-end job (H.264 `tt` MP4 target, progressive fill, MKV and MP4 output) renders
+to completion with every output frame interlaced top-first.
+
+**Assumption.** An HEVC clip is never interlaced. libx265 does not code interlaced under
+ffmpeg's flags, so an interlaced HEVC target would have no honest conform; the engine gives HEVC
+neither flags nor scan filter, and the measured gate would refuse such a piece loudly.
+
+**Not the stale-flag case.** The job that surfaced this had a target whose `tt` came from an
+H.264 stream in MPEG-TS that `idet` reads as progressive — the MPEG-TS `tt` trap above. The
+fix is not keyed on that; a target's probed scan is taken as the spec.

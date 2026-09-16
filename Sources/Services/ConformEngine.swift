@@ -282,7 +282,15 @@ enum ConformEngine {
         shortfallAllowance: Int = 0, requireSilentDecode: Bool = true,
         at location: VerificationLocation
     ) async throws {
-        let probed = try await MediaProbe.probe(url: piece).video
+        var probed = try await MediaProbe.probe(url: piece).video
+        // The stream-level `field_order` carries no direction outside Matroska — an
+        // interlaced H.264 stream in MP4 or MPEG-TS probes `tt` whichever field leads — and
+        // Matroska's tag only says what ffmpeg's front end believed, not what the encoder
+        // coded (libx265 ignores the interlace flags). The coded frames are authoritative,
+        // so the scan the gate compares is read off them (issue #119).
+        if let measured = await MediaProbe.codedFieldOrder(url: piece) {
+            probed?.fieldOrder = measured
+        }
         guard let v = probed, MatchEvaluator.conformedVideoMatches(v, target) else {
             throw ExportError.verificationFailed(location.message(
                 "The conformed clip did not reach the target spec (\(mismatchSummary(probed, target)))."))
@@ -331,8 +339,8 @@ enum ConformEngine {
         }
         if g.frameRate != want.frameRate { diffs.append("fps \(g.frameRate)≠\(want.frameRate)") }
         if g.pixelFormat != want.pixelFormat { diffs.append("pixfmt \(g.pixelFormat)≠\(want.pixelFormat)") }
-        if MatchEvaluator.normalizedFieldOrder(g.fieldOrder) != MatchEvaluator.normalizedFieldOrder(want.fieldOrder) {
-            diffs.append("field \(g.fieldOrder ?? "?")≠\(want.fieldOrder ?? "?")")
+        if MatchEvaluator.scanDirection(g.fieldOrder) != MatchEvaluator.scanDirection(want.fieldOrder) {
+            diffs.append("scan \(g.fieldOrder ?? "?")≠\(want.fieldOrder ?? "?")")
         }
         if g.sampleAspectRatio != want.sampleAspectRatio {
             diffs.append("sar \(g.sampleAspectRatio ?? "?")≠\(want.sampleAspectRatio ?? "?")")
@@ -402,9 +410,9 @@ enum ConformEngine {
         // the chain, so nothing above has set which field leads; the encoder used to pin it
         // with `-top`, which ffmpeg 9 removed as an encoding option. `setparams` sets it on
         // the frames instead, and goes last so no later filter can reset it. A **progressive**
-        // source is already served by the `interlace=scan=…` filter above. This is the
-        // MPEG-2 path only — the same scope `-top` had (ADR-0011).
-        if tgtInterlaced, srcInterlaced, target.codec == "mpeg2video" {
+        // source is already served by the `interlace=scan=…` filter above. MPEG-2 and H.264
+        // only: HEVC is assumed never interlaced (ADR-0011, issue #119).
+        if tgtInterlaced, srcInterlaced, BoundaryReencodeEngine.interlaceCapable(target.codec) {
             filters.append(BoundaryReencodeEngine.fieldOrderFilter(target.fieldOrder)
                 ?? BoundaryReencodeEngine.topFirstScanFilter)
         }
@@ -586,6 +594,12 @@ enum ConformEngine {
         default:   // h264
             if let crf { args += ["-crf", String(crf)] }
             if let lvl = EncoderSelection.h264Level(target.level) { args += ["-level", lvl] }
+            // Without these libx264 codes the combed frames as progressive pictures
+            // (frame-level `interlaced_frame=0`) whatever the filter chain did; only the
+            // Matroska tag would claim otherwise (issue #119, ADR-0011).
+            if isInterlaced(target.fieldOrder) {
+                args += ["-flags", "+ildct+ilme"]
+            }
             // Match the join's reorder depth (ADR-0026): a shallow join drops libx264's
             // default B-pyramid — with it, B-frames reference other B-frames and the piece
             // needs a depth of 2, which Matroska can only carry when the join's first piece
@@ -637,12 +651,11 @@ enum ConformEngine {
     /// Internal (not private): the preview's spatial conform chain shares this scan
     /// check so the two can't drift (ADR-0012).
     static func isInterlaced(_ field: String?) -> Bool {
-        ["tt", "bb", "tb", "bt"].contains(MatchEvaluator.normalizedFieldOrder(field))
+        MatchEvaluator.scanDirection(field) != "progressive"
     }
 
     private static func topFieldFirst(_ field: String?) -> Bool {
-        let f = MatchEvaluator.normalizedFieldOrder(field)
-        return f == "tt" || f == "tb"
+        MatchEvaluator.scanDirection(field) == "tff"
     }
 
     private static func displayAspectsMatch(source: VideoProperties, target: VideoProperties) -> Bool {

@@ -421,6 +421,41 @@ enum MediaProbe {
     /// full `probe(url:)` (e.g. Clip Doctor's verify, the reopen copy-share warm-up). The
     /// import path does **not** use this — `probe(url:)` already surfaces the same value
     /// from its `-show_format` block, so importing needs no second launch (issue #85).
+    /// The scan the first coded frames actually carry, as a `field_order` token: `tt` for
+    /// interlaced top-field-first, `bb` for interlaced bottom-field-first, `progressive`
+    /// otherwise. `nil` when ffprobe fails or the file has no decodable frame.
+    ///
+    /// Frame-level `interlaced_frame`/`top_field_first` are the authoritative scan probe
+    /// (ADR-0009): the stream-level tag depends on the container and on what wrote it, not
+    /// on the coded pictures. Three frames are enough — a re-encode codes every frame the
+    /// same way — and the read stops at the third, so the cost is one short decode.
+    static func codedFieldOrder(url: URL, frames: Int = 3) async -> String? {
+        guard let ffprobe = try? FFTools.ffprobeURL(),
+              let output = try? await ProcessRunner.run(ffprobe, [
+                  "-v", "error", "-select_streams", "v:0", "-show_frames",
+                  "-show_entries", "frame=interlaced_frame,top_field_first",
+                  "-of", "csv=p=0", "-read_intervals", "%+#\(frames)",
+                  url.path,
+              ]),
+              output.status == 0,
+              let text = String(data: output.stdout, encoding: .utf8) else { return nil }
+        return parseCodedFieldOrder(csv: text)
+    }
+
+    /// Reduces `interlaced_frame,top_field_first` CSV rows to one `field_order` token. The
+    /// rows must agree: a run whose frames disagree with each other is `nil`, so the caller
+    /// falls back to the stream-level probe.
+    static func parseCodedFieldOrder(csv: String) -> String? {
+        let tokens = csv.split(separator: "\n").compactMap { line -> String? in
+            let f = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 2 else { return nil }
+            if f[0] != "1" { return "progressive" }
+            return f[1] == "1" ? "tt" : "bb"
+        }
+        guard let first = tokens.first, tokens.allSatisfy({ $0 == first }) else { return nil }
+        return first
+    }
+
     static func containerStartTime(url: URL) async -> Double {
         guard let ffprobe = try? FFTools.ffprobeURL(),
               let output = try? await ProcessRunner.run(ffprobe, [

@@ -33,6 +33,21 @@ struct BoundaryReencodeEngineTests {
                 "-vf", "setparams=field_mode=tff"])
     }
 
+    @Test func interlacedH264ReencodesInterlacedInTheSourcesDirection() {
+        // Issue #119: an interlaced H.264 boundary piece used to be coded as progressive
+        // pictures (no flags), so 25 combed frames sat next to interlaced neighbours. `tb`
+        // is the same direction as `tt`; HEVC is assumed never interlaced.
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "h264", pixelFormat: "yuv420p", fieldOrder: "tt")
+            == ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-flags", "+ildct+ilme", "-crf", "18",
+                "-vf", "setparams=field_mode=tff"])
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(codec: "h264", pixelFormat: "yuv420p", fieldOrder: "bt")
+            == BoundaryReencodeEngine.reencodeVideoArgs(codec: "h264", pixelFormat: "yuv420p", fieldOrder: "bb"))
+        #expect(BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "hevc", pixelFormat: "yuv420p10le", fieldOrder: "tt")
+            == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "18"])
+    }
+
     @Test func progressiveMpeg2HasNoInterlaceFlags() {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "progressive",

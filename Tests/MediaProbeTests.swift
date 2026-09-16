@@ -245,6 +245,18 @@ struct MediaProbeTests {
 
     // MARK: container start_time CSV (issue #3)
 
+    /// The coded-scan probe (issue #119) reduces frame-level `interlaced_frame,top_field_first`
+    /// rows to one `field_order` token — the value the conform gate compares, because the
+    /// stream-level tag depends on the container, not on the coded pictures.
+    @Test func parseCodedFieldOrderReadsTheFrameFlags() {
+        #expect(MediaProbe.parseCodedFieldOrder(csv: "1,1\n1,1\n1,1,\n") == "tt")
+        #expect(MediaProbe.parseCodedFieldOrder(csv: "1,0\n1,0\n") == "bb")
+        #expect(MediaProbe.parseCodedFieldOrder(csv: "0,0\n0,0\n") == "progressive")
+        // Frames that disagree, or no frames at all, give no verdict.
+        #expect(MediaProbe.parseCodedFieldOrder(csv: "1,1\n0,0\n") == nil)
+        #expect(MediaProbe.parseCodedFieldOrder(csv: "") == nil)
+    }
+
     @Test func parseStartTimeReadsTheOffsetSeconds() {
         // the measured MPEG-PS case: a 0.24 s container start (the input -ss trap)
         #expect(MediaProbe.parseStartTime(csv: "0.240000\n") == 0.24)

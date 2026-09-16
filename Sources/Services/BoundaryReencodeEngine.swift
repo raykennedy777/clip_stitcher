@@ -35,7 +35,10 @@ enum BoundaryReencodeEngine {
             args += ["-profile:v", p]
         }
         var fieldFilter: [String] = []
-        if codec == "mpeg2video", let filter = fieldOrderFilter(fieldOrder) {
+        // MPEG-2 and H.264 (issue #119: an interlaced H.264 boundary piece used to be coded
+        // as progressive pictures next to its interlaced neighbours). HEVC is assumed never
+        // interlaced (`interlaceCapable`).
+        if interlaceCapable(codec), let filter = fieldOrderFilter(fieldOrder) {
             args += ["-flags", "+ildct+ilme"]
             fieldFilter = ["-vf", filter]   // progressive / unknown sources get neither
         }
@@ -123,6 +126,14 @@ enum BoundaryReencodeEngine {
             "-x264-params", "ref=5:keyint=25:scenecut=0:open_gop=0:b-pyramid=0:level=4.0",
             "-vf", filter,
         ]
+    }
+
+    /// The codecs whose encoder codes interlaced pictures under ffmpeg's `+ildct+ilme` flags.
+    /// libx265 accepts the flags and ignores them (shell-proven: the frames come out
+    /// progressive), and the project assumes an HEVC clip is never interlaced (ADR-0011,
+    /// issue #119).
+    static func interlaceCapable(_ codec: String?) -> Bool {
+        codec == "mpeg2video" || codec == "h264"
     }
 
     /// The filter that makes a re-encoded piece carry `fieldOrder`'s scan direction —

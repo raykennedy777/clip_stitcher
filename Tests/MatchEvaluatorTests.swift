@@ -62,6 +62,35 @@ struct MatchEvaluatorTests {
         #expect(MatchEvaluator.normalizedFieldOrder("unknown") == "progressive")
     }
 
+    @Test func scanIsComparedByDirectionNotBySpelling() {
+        // Issue #119: ffprobe's `tt` and `tb` are one coded stream read in two containers —
+        // ffmpeg 9 tags every interlaced encode `tb`/`bt` and only Matroska stores the tag, so
+        // a `tt` target was unreachable by any conform. Top-first is top-first.
+        #expect(MatchEvaluator.scanDirection("tt") == "tff")
+        #expect(MatchEvaluator.scanDirection("tb") == "tff")
+        #expect(MatchEvaluator.scanDirection("bb") == "bff")
+        #expect(MatchEvaluator.scanDirection("bt") == "bff")
+        #expect(MatchEvaluator.scanDirection(nil) == "progressive")
+        #expect(MatchEvaluator.scanDirection("unknown") == "progressive")
+        let tt = video(field: "tt")
+        #expect(MatchEvaluator.conformedVideoMatches(video(field: "tb"), tt))
+        #expect(MatchEvaluator.videoMatches(video(field: "tb"), tt))
+        #expect(MatchEvaluator.conformedVideoMatches(video(field: "bt"), video(field: "bb")))
+        #expect(MatchEvaluator.matches(clip(video: video(field: "tb"), audio: nil),
+                                       target: clip(video: tt, audio: nil)))
+        // A genuine scan difference still fails loudly, in both gates.
+        #expect(!MatchEvaluator.conformedVideoMatches(video(field: "bb"), tt))
+        #expect(!MatchEvaluator.conformedVideoMatches(video(field: "bt"), video(field: "tb")))
+        #expect(!MatchEvaluator.conformedVideoMatches(video(field: "progressive"), tt))
+        #expect(!MatchEvaluator.conformedVideoMatches(tt, video(field: nil)))
+        #expect(!MatchEvaluator.videoMatches(video(field: "bb"), tt))
+        // The plan's reason line names the two spellings, so a reader sees what was probed.
+        let diffs = MatchEvaluator.videoDifferences(video(field: "bb"), tt)
+        #expect(diffs.map(\.label) == ["Scan type"])
+        #expect(diffs.first?.clipValue == "Interlaced (bb)")
+        #expect(MatchEvaluator.videoDifferences(video(field: "tb"), tt).isEmpty)
+    }
+
     @Test func videoMatchesComparesVideoDimensionsAlone() {
         // The conform self-verify checks a produced video piece (which has no audio) against
         // the target's video spec, so the video comparison is exposed on its own.

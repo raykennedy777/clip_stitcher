@@ -53,6 +53,41 @@ struct ConformEngineTests {
         #expect(tff[tff.firstIndex(of: "-vf")! + 1].hasSuffix(",setparams=field_mode=tff"))
     }
 
+    /// Progressive H.264 → interlaced H.264 (issue #119): the field-rate fps + `interlace`
+    /// tail sets the direction on the frames, and libx264 gets `+ildct+ilme`, without which
+    /// it codes the combed frames as progressive pictures whatever the chain did.
+    @Test func conformsProgressiveH264ToInterlacedH264() {
+        var tt = h264; tt.width = 720; tt.height = 576; tt.frameRate = "50/1"
+        tt.fieldOrder = "tt"; tt.sampleAspectRatio = "16:15"
+        #expect(ConformEngine.conformVideoArgs(source: h264, target: tt) == [
+            "-vf", "scale=720:576,setsar=16/15,format=yuv420p,fps=100,interlace=scan=tff,"
+                + "setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown",
+            "-c:v", "libx264", "-profile:v", "high", "-level", "4.0", "-flags", "+ildct+ilme",
+            "-x264-params", "b-pyramid=0",
+        ])
+        // The `tb` spelling of the same target asks for the same command.
+        var tb = tt; tb.fieldOrder = "tb"
+        #expect(ConformEngine.conformVideoArgs(source: h264, target: tb)
+            == ConformEngine.conformVideoArgs(source: h264, target: tt))
+    }
+
+    /// Interlaced H.264 → interlaced H.264 in the other direction (issue #119): the source
+    /// keeps its frames, so the scan filter goes last to force the target's direction — the
+    /// same tail the MPEG-2 path got for issue #117.
+    @Test func interlacedH264SourceGetsTheScanFilterForAnInterlacedH264Target() {
+        var tt = h264; tt.fieldOrder = "tt"
+        var bb = h264; bb.fieldOrder = "bb"
+        let args = ConformEngine.conformVideoArgs(source: tt, target: bb)
+        #expect(args[args.firstIndex(of: "-vf")! + 1].hasSuffix(",setparams=field_mode=bff"))
+        #expect(!args[args.firstIndex(of: "-vf")! + 1].contains("interlace=scan"))
+        #expect(args[args.firstIndex(of: "-flags")! + 1] == "+ildct+ilme")
+        // HEVC is assumed never interlaced: no flags, no scan filter, even if a probe says so.
+        var ihevc = hevc; ihevc.fieldOrder = "tt"
+        let h = ConformEngine.conformVideoArgs(source: ihevc, target: ihevc)
+        #expect(!h.contains("-flags"))
+        #expect(!h.contains { $0.contains("field_mode") })
+    }
+
     /// MPEG-2 → H.264: interlaced → progressive deinterlaces with bwdif, and a 16:9 source
     /// into a 4:3 frame letterboxes (bars top/bottom: scale 704×396, pad to 704×528 at y=66).
     /// The anamorphic source (SAR 64:45) is fitted in display space, not storage pixels.

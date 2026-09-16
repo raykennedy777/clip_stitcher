@@ -258,8 +258,15 @@ placed last in the filter chain; `-flags +ildct+ilme` on the encoder is a separa
 only says the piece is interlaced. ffmpeg 9 removed the old `-top` encoder flag and its
 `-field_order` output option does nothing, so the filter is the only way (issue #117,
 ADR-0009). The conform **sets** a direction the target asks for; every other re-encode
-**keeps** the source's, measured with `idet` when the probed value is indefinite.
-_Avoid_: scan order, field order for the flag itself (that is ffprobe's `field_order` value), `-top`
+**keeps** the source's, measured with `idet` when the probed value is indefinite. Every scan
+comparison is on the direction (`MatchEvaluator.scanDirection`): ffprobe's `tt` and `tb` are one
+top-first stream probed in two containers, because ffmpeg 9 tags every interlaced encode `tb`
+and only Matroska stores the tag (issue #119, ADR-0011). The conform gate reads the direction
+off the coded frames (`MediaProbe.codedFieldOrder`), since the stream tag carries none for
+H.264 outside MKV. MPEG-2 and H.264 re-encodes code interlaced; an HEVC clip is assumed never
+interlaced.
+_Avoid_: scan order, field order for the flag itself (that is ffprobe's `field_order` value), `-top`,
+comparing `field_order` strings
 
 **Copy-cut route**:
 The field-coded (H.264) cut/join path (issue #96, ADR-0024): every in point, out point, and

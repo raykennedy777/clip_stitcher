@@ -40,8 +40,9 @@ enum MatchEvaluator {
     /// "why it doesn't match" section, so the two can never drift.
     ///
     /// The comparison operators are exactly those the strict rule uses: raw equality on every
-    /// field, but `normalizedFieldOrder` on scan type (a clean progressive stream may report no
-    /// field order — ADR-0011) and the color matrix included as the third color leg (issue #35).
+    /// field, but `scanDirection` on scan type (a clean progressive stream may report no field
+    /// order — ADR-0011 — and `tt`/`tb` are one direction spelled two ways — issue #119) and the
+    /// color matrix included as the third color leg (issue #35).
     static func videoDifferences(_ cv: VideoProperties, _ tv: VideoProperties) -> [VideoDifference] {
         var diffs: [VideoDifference] = []
         func check(_ label: String, equal: Bool,
@@ -60,7 +61,7 @@ enum MatchEvaluator {
         check("Frame rate", equal: cv.frameRate == tv.frameRate,
               MediaFormatting.frameRate(cv.frameRate), MediaFormatting.frameRate(tv.frameRate))
         check("Pixel format", equal: cv.pixelFormat == tv.pixelFormat, cv.pixelFormat, tv.pixelFormat)
-        check("Scan type", equal: normalizedFieldOrder(cv.fieldOrder) == normalizedFieldOrder(tv.fieldOrder),
+        check("Scan type", equal: scanDirection(cv.fieldOrder) == scanDirection(tv.fieldOrder),
               MediaFormatting.scanType(cv.fieldOrder), MediaFormatting.scanType(tv.fieldOrder))
         check("Pixel aspect ratio", equal: cv.sampleAspectRatio == tv.sampleAspectRatio,
               display(cv.sampleAspectRatio), display(tv.sampleAspectRatio))
@@ -143,7 +144,7 @@ enum MatchEvaluator {
         output.height == target.height &&
         output.frameRate == target.frameRate &&
         output.pixelFormat == target.pixelFormat &&
-        normalizedFieldOrder(output.fieldOrder) == normalizedFieldOrder(target.fieldOrder) &&
+        scanDirection(output.fieldOrder) == scanDirection(target.fieldOrder) &&
         output.sampleAspectRatio == target.sampleAspectRatio &&
         colorSatisfies(output.colorPrimaries, target: target.colorPrimaries) &&
         colorSatisfies(output.colorTransfer, target: target.colorTransfer) &&
@@ -157,15 +158,34 @@ enum MatchEvaluator {
         target == nil || output == target
     }
 
-    /// Canonicalises an ffprobe `field_order` for comparison and conform targeting: a missing,
+    /// Canonicalises an ffprobe `field_order` for display and conform targeting: a missing,
     /// empty, or "unknown" value means progressive (a clean progressive HEVC stream often
     /// reports no field order at all, so the target clip would otherwise be unmatchable even
     /// by a copy of itself — ADR-0011). Interlaced values (`tt`/`bb`/`tb`/`bt`) are returned
-    /// unchanged, so a real scan-type difference still fails the match.
+    /// unchanged. Comparisons go through `scanDirection`, not this.
     static func normalizedFieldOrder(_ value: String?) -> String {
         switch value {
         case nil, "", "unknown", "progressive": return "progressive"
         default: return value!
+        }
+    }
+
+    /// The scan direction an ffprobe `field_order` spells (issue #119, ADR-0005): `tt` and `tb`
+    /// are both top-field-first, `bb` and `bt` both bottom-field-first, everything else
+    /// progressive. This is the value every scan comparison uses.
+    ///
+    /// The second letter (the *display* order) is not a property of the coded stream but of
+    /// where the probe read it: ffmpeg 9's encoder front end tags every interlaced encode
+    /// `tb`/`bt`, and only Matroska stores that tag, so the same libx264 bitstream probes `tb`
+    /// in an encoder-written MKV and `tt` in MPEG-TS, MP4, or an MKV it was stream-copied
+    /// into. Comparing the spelling made a `tt` target unreachable by any conform (ADR-0009
+    /// probe trap). A genuine difference — progressive against interlaced, or top-first against
+    /// bottom-first — still fails.
+    static func scanDirection(_ value: String?) -> String {
+        switch normalizedFieldOrder(value) {
+        case "tt", "tb": return "tff"
+        case "bb", "bt": return "bff"
+        default: return "progressive"
         }
     }
 }

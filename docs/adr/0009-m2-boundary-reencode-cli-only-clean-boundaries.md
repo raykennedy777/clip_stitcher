@@ -151,5 +151,26 @@ Containers: .mpg, .ts, .mkv and .mp4, both directions. Chains de-risked in their
 `tb` for top-first. H.264 in MPEG-TS reports `tt` whichever field leads. Frame-level
 `top_field_first` is the authoritative probe.
 
+**Why the container decides (issue #119).** ffmpeg 9's `fftools/ffmpeg_enc.c` sets the
+encoder's stream-level field order from the first frame's flags, unconditionally: `tb` for
+top-first, `bt` for bottom-first, `tt`/`bb` only for MJPEG. That overwrite is also why
+`-field_order` is a no-op. Matroska is the one output container that stores the tag, so an
+encoder-written MKV probes `tb`, while the same bitstream in MPEG-TS or MP4 — or stream-copied
+from either into an MKV — probes `tt`, because those probes come from the parsed bitstream. No
+ffmpeg 9 encoder writes a `tt` MKV directly; a `tt` fixture is made by encoding to `.ts` or
+`.mp4`, or by stream-copying that into `.mkv`. The spelling therefore says where a stream was
+probed, not how it was coded, and `MatchEvaluator.scanDirection` compares direction only.
+`MediaProbe.codedFieldOrder` reads the coded frames for the conform gate.
+
 `FieldOrderReencodeIntegrationTests` now **runs** the builders' output and reads the field
 order back, in both directions. The string assertions alone let this break reach `main`.
+
+## Amendment — 2026-09-16: the H.264 boundary re-encode is coded interlaced too (issue #119)
+
+`reencodeVideoArgs` gave `+ildct+ilme` and the scan filter to MPEG-2 only, the scope `-top`
+had. An interlaced H.264 target's boundary piece was therefore coded as progressive pictures:
+in a synthetic 175-frame join, the 25 re-encoded frames probed `interlaced_frame=0` next to 150
+interlaced copies, in MKV and MP4 alike. The gate is now `interlaceCapable` — MPEG-2 and H.264.
+libx264 honours the flags (frame-level `interlaced_frame=1`, direction from the filter, both
+directions, `.ts`/`.mkv`/`.mp4`). libx265 accepts them and ignores them; the project assumes
+an HEVC clip is never interlaced, so HEVC gets neither.

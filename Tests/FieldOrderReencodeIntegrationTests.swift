@@ -108,6 +108,71 @@ struct FieldOrderReencodeIntegrationTests {
         #expect(try await MediaProbe.probe(url: piece).video?.fieldOrder == "bb")
     }
 
+    /// The H.264 boundary re-encode (issue #119) on the same interlaced source, both
+    /// directions, read at frame level because MPEG-TS spells every interlaced H.264 stream
+    /// `tt`.
+    @Test(arguments: ["tt", "bb"])
+    func anH264ReencodedPieceIsCodedInTheAskedForScanDirection(asked: String) async throws {
+        guard let ffmpeg = try? FFTools.ffmpegURL() else { return }
+        let work = try Self.scratch()
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let src = try await Self.interlacedSource(ffmpeg, in: work)
+        let index = try await FrameIndexer.buildIndex(url: src)
+        let piece = work.appendingPathComponent("h264_\(asked).ts")
+        let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "h264", pixelFormat: "yuv420p", fieldOrder: asked)
+        let args = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 0..<min(25, index.count), index: index,
+            encoder: encoder, output: piece)
+        #expect(args.filter { $0 == "-vf" }.count == 1)
+
+        let made = try await ProcessRunner.run(ffmpeg, args)
+        #expect(made.status == 0, "\(String(data: made.stderr, encoding: .utf8) ?? "")")
+        #expect(await MediaProbe.codedFieldOrder(url: piece) == asked)
+    }
+
+    /// A progressive source conformed to an interlaced H.264 target (issue #119), in both
+    /// output containers and both directions. The coded frames carry the asked-for scan; the
+    /// stream-level tag does not — Matroska says `tb`/`bt`, MP4 says `tt` whichever field
+    /// leads — so the gate's measured probe, not the stream probe, is what the verify reads.
+    @Test(arguments: ["tt", "bb"], ["mkv", "mp4"])
+    func aConformedH264PieceIsCodedInTheAskedForScanDirection(asked: String, ext: String) async throws {
+        guard let ffmpeg = try? FFTools.ffmpegURL() else { return }
+        let work = try Self.scratch()
+        defer { try? FileManager.default.removeItem(at: work) }
+
+        let src = work.appendingPathComponent("prog.mp4")
+        let made = try await ProcessRunner.run(ffmpeg, [
+            "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=352x288:rate=25:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "12", "-an", src.path,
+        ])
+        #expect(made.status == 0)
+        guard let source = try await MediaProbe.probe(url: src).video else { return }
+        var target = source
+        target.fieldOrder = asked; target.frameRate = "50/1"
+        target.profile = "High"; target.level = "30"
+
+        let piece = work.appendingPathComponent("conf_\(asked).\(ext)")
+        let args = ["-v", "error", "-xerror", "-y", "-i", src.path]
+            + ConformEngine.conformVideoArgs(source: source, target: target) + ["-an", piece.path]
+        let run = try await ProcessRunner.run(ffmpeg, args)
+        #expect(run.status == 0, "\(String(data: run.stderr, encoding: .utf8) ?? "")")
+
+        let coded = await MediaProbe.codedFieldOrder(url: piece)
+        #expect(coded == asked)
+        // The gate's rule: the measured scan satisfies the target however the target spells it.
+        var probed = try await MediaProbe.probe(url: piece).video
+        probed?.fieldOrder = coded
+        #expect(probed.map { MatchEvaluator.conformedVideoMatches($0, target) } == true)
+        var otherSpelling = target
+        otherSpelling.fieldOrder = asked == "tt" ? "tb" : "bt"
+        #expect(probed.map { MatchEvaluator.conformedVideoMatches($0, otherSpelling) } == true)
+        var wrongWay = target
+        wrongWay.fieldOrder = asked == "tt" ? "bb" : "tt"
+        #expect(probed.map { MatchEvaluator.conformedVideoMatches($0, wrongWay) } == false)
+    }
+
     /// The MBAFF field-coded tail (ADR-0022) runs on libx264. MPEG-TS reports every
     /// interlaced H.264 stream as `tt`, so the direction is read at frame level instead.
     @Test(arguments: ["tt", "bb"])
