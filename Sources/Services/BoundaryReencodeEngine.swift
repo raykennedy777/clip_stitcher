@@ -421,16 +421,27 @@ enum BoundaryReencodeEngine {
     /// frame is a copy-safe keyframe the seek lands on, and the split frame is the next
     /// copy-safe keyframe (proven produced == planned on the real 1844 capture, #51).
     /// `segmentPattern` must carry a `%03d`; the wanted piece is always `…000.<ext>`.
+    ///
+    /// `bitstreamFilter`/`inputFlags` carry the same MPEG-PS PTS refill the segment-mux copy
+    /// path gets (`ExportEngine.copyPieceBitstreamFilter` / `ptsRefillInputFlags`, issue
+    /// #118): an MPEG-PS source's occasional no-PTS packet otherwise makes an MKV bounded
+    /// copy fail the same "Can't write packet with unknown timestamp" mux error #2 and #116
+    /// fixed for `cutArguments`. Placed exactly where `cutArguments` places them — the
+    /// input flags before `-i`, the bsf right after `-c copy` — so the two copy paths agree.
     static func boundedCopyArguments(
         source: URL, range: Range<Int>, index: FrameIndex, containerStart: Double,
-        segmentPattern: String
+        segmentPattern: String, bitstreamFilter: [String] = [], inputFlags: [String] = []
     ) -> [String] {
         let lo = range.lowerBound, hi = range.upperBound
         let seek = max(0, index.pts[lo] - containerStart)
         let spanEnd = hi < index.pts.count ? index.pts[hi] : (index.pts.last ?? index.pts[lo])
         let span = max(0, spanEnd - index.pts[lo])
-        var args = ["-v", "error", "-ss", ExportEngine.timeString(seek), "-i", source.path]
-        args += ["-map", "0:v:0", "-c", "copy", "-f", "segment"]
+        var args = ["-v", "error"]
+        args += inputFlags
+        args += ["-ss", ExportEngine.timeString(seek), "-i", source.path]
+        args += ["-map", "0:v:0", "-c", "copy"]
+        args += bitstreamFilter
+        args += ["-f", "segment"]
         args += ["-segment_frames", String(hi - lo), "-reset_timestamps", "1"]
         args += ["-t", ExportEngine.timeString(span + 2.0), segmentPattern]
         return args
@@ -674,7 +685,8 @@ enum BoundaryReencodeEngine {
                 let pattern = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp_%03d.\(ext)").path
                 try await run(ffmpeg, boundedCopyArguments(
                     source: source, range: segment.range, index: index,
-                    containerStart: containerStart, segmentPattern: pattern), onOutTime: onOutTime)
+                    containerStart: containerStart, segmentPattern: pattern,
+                    bitstreamFilter: bsf, inputFlags: copyInputFlags), onOutTime: onOutTime)
                 piece = work.appendingPathComponent(String(
                     format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)", 0))
             case .copy:

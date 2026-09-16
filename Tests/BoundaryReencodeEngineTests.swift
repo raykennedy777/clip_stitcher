@@ -565,6 +565,48 @@ struct BoundaryReencodeEngineTests {
         #expect(args[args.firstIndex(of: "-segment_frames")! + 1] == "4")
     }
 
+    /// Issue #118: a Clip Doctor repair of an MPEG-PS source into `.mkv` carries the same
+    /// PTS refill the segment-mux copy path gets (`ExportEngine.ptsRefillInputFlags` /
+    /// `copyPieceBitstreamFilter`), placed exactly like `cutArguments` places them — the
+    /// input flag before `-i`, the bsf right after `-c copy`.
+    @Test func boundedCopyOfAnMpegPsSourceIntoMkvCarriesTheRefill() {
+        let bsf = ExportEngine.copyPieceBitstreamFilter(codec: "mpeg2video", ext: "mkv")
+        let inputFlags = ExportEngine.ptsRefillInputFlags(codec: "mpeg2video", ext: "mkv")
+        let args = BoundaryReencodeEngine.boundedCopyArguments(
+            source: src, range: 2..<6, index: boundedCopyIndex, containerStart: 1.0,
+            segmentPattern: "/tmp/cp_%03d.mkv", bitstreamFilter: bsf, inputFlags: inputFlags)
+        // -fflags +genpts sits before -i, exactly where cutArguments puts it.
+        #expect(args[args.firstIndex(of: "-fflags")! + 1] == "+genpts")
+        #expect(args.firstIndex(of: "-fflags")! < args.firstIndex(of: "-i")!)
+        // The setts bsf sits right after -c copy, as a single -bsf:v argument.
+        let cIndex = args.firstIndex(of: "-c")!
+        #expect(args[cIndex + 1] == "copy")
+        #expect(args[cIndex + 2] == "-bsf:v")
+        #expect(args[cIndex + 3] == ExportEngine.ptsRefillFilter)
+        #expect(args.firstIndex(of: "-bsf:v")! < args.firstIndex(of: "-f")!)
+    }
+
+    /// Scope check (mirrors the #116 scope test in ExportEngineTests): a clean MPEG-2 → `.ts`
+    /// bounded copy and a clean H.264 → `.mkv` bounded copy carry neither flag — `.ts`
+    /// tolerates a missing PTS, and only mpeg2video (or a damaged source) needs `setts`/
+    /// `+genpts` into `.mkv`.
+    @Test func boundedCopyOutsideTheRefillScopeCarriesNeither() {
+        let tsArgs = BoundaryReencodeEngine.boundedCopyArguments(
+            source: src, range: 2..<6, index: boundedCopyIndex, containerStart: 1.0,
+            segmentPattern: "/tmp/cp_%03d.ts",
+            bitstreamFilter: ExportEngine.copyPieceBitstreamFilter(codec: "mpeg2video", ext: "ts"),
+            inputFlags: ExportEngine.ptsRefillInputFlags(codec: "mpeg2video", ext: "ts"))
+        #expect(!tsArgs.contains("-fflags"))
+        #expect(!tsArgs.contains("-bsf:v"))
+
+        let h264Args = BoundaryReencodeEngine.boundedCopyArguments(
+            source: src, range: 2..<6, index: boundedCopyIndex, containerStart: 1.0,
+            segmentPattern: "/tmp/cp_%03d.mkv",
+            bitstreamFilter: ExportEngine.copyPieceBitstreamFilter(codec: "h264", ext: "mkv"),
+            inputFlags: ExportEngine.ptsRefillInputFlags(codec: "h264", ext: "mkv"))
+        #expect(!h264Args.contains("-fflags"))
+    }
+
     // MARK: - Progress expectation for a bounded segment-muxer run (issue #107)
 
     /// The progress bar smooths a run by ffmpeg's `out_time` against how long that run's
