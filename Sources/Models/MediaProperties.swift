@@ -52,6 +52,14 @@ struct AudioProperties: Codable, Equatable, Sendable {
     var language: String? = nil
     /// Human-readable track title from the container (e.g. "World Feed"), if any.
     var title: String? = nil
+    /// The stream's average bit rate in bits/sec, as the container reports it — nil when
+    /// it reports none (MKV and MP4 often omit it; TS broadcast captures carry it). Not a
+    /// match dimension and never an export input: the rebuilt audio encodes at
+    /// `ExportEngine.audioBitrate` whatever the source rate was (ADR-0010). It exists so a
+    /// plan query can print source rate beside output rate (issue #115) and make a drop
+    /// like 384k → 192k visible before the render, not after. Defaulted so older saves
+    /// decode.
+    var bitrate: Int? = nil
 
     /// The name shown for this track (ADR-0014): the container title when present,
     /// else "Track N"; the language tag is always appended when present.

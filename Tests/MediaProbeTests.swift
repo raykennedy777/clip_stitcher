@@ -38,6 +38,7 @@ struct MediaProbeTests {
                 "sample_rate": "48000",
                 "channels": 2,
                 "channel_layout": "stereo",
+                "bit_rate": "384000",
                 "tags": { "LANGUAGE": "eng", "title": "World Feed" }
             },
             {
@@ -73,6 +74,15 @@ struct MediaProbeTests {
         // an empty tag value counts as absent
         #expect(result.audioTracks[1].language == nil)
         #expect(result.audioTracks[1].title == nil)
+    }
+
+    /// An audio stream's own reported `bit_rate` rides on `AudioProperties` (issue #115), so
+    /// a plan query can print the source rate beside the fixed output rate. Absent on a
+    /// container that reports none — nil, never a guess.
+    @Test func parseProbeReadsAudioBitrateWhenReported() throws {
+        let result = try MediaProbe.parseProbe(json: cannedJSON)
+        #expect(result.audioTracks[0].bitrate == 384_000)
+        #expect(result.audioTracks[1].bitrate == nil)
     }
 
     @Test func parseProbeFillsMissingFieldsWithDefaults() throws {

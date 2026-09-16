@@ -10,6 +10,7 @@ project the way a script would write one.
 
 ```
 clipstitch [--verbose] <job.json> <output-file>
+clipstitch [--verbose] --plan <job.json>
 ```
 
 The CLI is headless and non-interactive: sources are plain file paths (no
@@ -17,6 +18,9 @@ security-scoped bookmarks), all human-readable output goes to stderr, stdout sta
 silent, and the exit code plus the output file are the whole scriptable surface. An
 existing file at `<output-file>` is overwritten. ffmpeg/ffprobe must be installed
 (Homebrew or system paths) unless bundled.
+
+`--plan` is the one deliberate exception to the silent stdout: it is a **query**, and
+its answer — the plan, as JSON — is the output. See "Plan query" below.
 
 ## Example
 
@@ -107,6 +111,100 @@ and every selected audio stream must exist. The CLI **refuses** mismatches rathe
 than adapting (the GUI's reset-to-whole-clip and silence-fill reconciliations exist
 for interactive edits, not for a script that asked for exact coordinates).
 
+## Plan query
+
+```
+clipstitch --plan <job.json>
+```
+
+Prints what the job **would** do, as one JSON document on stdout, and exits. No media
+is written and no encoder runs: the query pays only for the import-time scans every run
+pays anyway, so it answers in seconds on a job whose render takes hours.
+Stage lines and the verdict stay on stderr, so `clipstitch --plan job.json 2>/dev/null`
+is the JSON alone. An output-file argument is a usage error (exit 64) — a plan query
+writes no file, so naming one means the caller expected a render.
+
+The same exit codes as a run: `64` usage, `65` invalid job, `66` probe/index failure,
+`70` planning failure. The verdict line is `Planned: <job path>`.
+
+```json
+{
+  "version": 1,
+  "output": { "container": "mkv", "type": "videoAndAudio", "conformCrf": null },
+  "target": 0,
+  "clips": [
+    {
+      "index": 0, "name": "part 1", "path": "/media/main.mkv",
+      "treatment": "smartRender",
+      "kept": { "inFrame": 1234, "outFrame": 56789, "frames": 55556, "seconds": 2222.24 },
+      "segments": [
+        { "kind": "reEncode", "frames": [1234, 14682], "seconds": 537.92,
+          "reason": "in point is not a copy-safe keyframe; nearest copy-safe keyframe at or after it is 14682" },
+        { "kind": "copy", "frames": [14682, 56790], "seconds": 1684.32, "reason": null }
+      ],
+      "copySafeKeyframes": { "beforeIn": 1000, "afterIn": 14682, "beforeOut": 56790, "afterOut": null },
+      "reason": null,
+      "copiedFraction": 0.758,
+      "expectedFrames": 55556
+    },
+    {
+      "index": 1, "name": "Fill", "path": "/media/fill.mp4",
+      "treatment": "conform",
+      "kept": { "inFrame": 0, "outFrame": 6533, "frames": 6534, "seconds": 261.36 },
+      "segments": null,
+      "copySafeKeyframes": null,
+      "reason": [ { "property": "Pixel aspect ratio", "clip": "1:1", "target": "64:45" } ],
+      "copiedFraction": 0,
+      "expectedFrames": 6534
+    }
+  ],
+  "audio": {
+    "codec": { "in": ["ac3", "ac3"], "out": "ac3", "fellBack": false },
+    "bitrate": { "in": ["384k", null], "out": "192k" },
+    "tracks": 2
+  },
+  "warnings": []
+}
+```
+
+`version` is the **plan contract's** version, not the job's. Every optional field is
+written as `null`, never omitted, so a reader can index it without checking the key.
+
+| field | meaning |
+|-------|---------|
+| `output`, `target` | The resolved output settings, and the target clip's index in `clips`. |
+| `clips[].index` | The clip's 0-based position in the job's `clips[]` — the number warnings, errors and piece file names use. |
+| `clips[].treatment` | `"smartRender"` (stream-copied outside the boundary GOPs) or `"conform"` (re-encoded whole to the target's spec). |
+| `clips[].kept` | The job's own coordinates — `outFrame` **inclusive** — plus that range's frame count and duration. |
+| `clips[].segments` | The copy/re-encode plan; `null` on a conformed clip. `frames` is half-open `[start, end)`. `reason` is `null` on a copy. |
+| `clips[].copySafeKeyframes` | Where the marks may move; `null` on a conformed clip, and per side when that side has no such keyframe. |
+| `clips[].reason` | Why a conformed clip doesn't match — one entry per strict-compare property (ADR-0005). `null` on a smart-rendered clip. |
+| `clips[].copiedFraction` | How much of the kept range is stream-copied, 0–1, weighted by duration. |
+| `clips[].expectedFrames` | How many video frames this clip contributes to the output. The per-clip counts sum to the output's frame count. A conformed clip counts at the **target's** frame rate, which is the rate it is re-encoded to. |
+| `audio.codec`, `audio.bitrate` | Per output track what the **target clip's** source carries (`in`), beside what every track encodes to (`out`). |
+| `warnings` | The same notices the export prints to stderr, in the same order. |
+
+**Moving a mark to a copy boundary.** `copySafeKeyframes` is how a caller trades frame
+accuracy for a shorter re-encode. The `beforeIn`/`afterIn` pair brackets `inFrame`; the
+`beforeOut`/`afterOut` pair brackets the kept range's **exclusive** end, `outFrame + 1`.
+So `inFrame = afterIn` makes the head a pure copy, and `outFrame = beforeOut - 1` makes
+the tail one. The out side is conservative: it reports keyframes a copy may *start* on,
+and the planner can also end a copy just before an open keyframe — a mark moved here is
+always copyable, a mark the planner also copies may sit closer.
+
+**Frame counts on a field-coded source.** `kept` and `segments` stay in the job's own
+coordinates, which count *fields* on a PAFF source (two per displayed frame, ADR-0022).
+`expectedFrames` counts what the output carries: frames.
+
+**Audio bit rate.** `in` is the source rate the container reports, rounded to the
+nearest kilobit, and `null` when it reports none (MKV and MP4 often omit it). `out` is
+fixed today, so a 384k source landing at 192k is visible here before the render.
+
+**Video-only and audio-only outputs.** A `videoOnly` output writes no audio, so
+`audio.tracks` is `0` and both `in` arrays are empty. An `audioOnly` output writes no
+video, and `expectedFrames` then measures the kept video range each audio leg is rebuilt
+over (ADR-0014) rather than frames in the file.
+
 ## Exit codes
 
 Sysexits-flavored, so a driving script can tell whose fault a failure is:
@@ -114,7 +212,7 @@ Sysexits-flavored, so a driving script can tell whose fault a failure is:
 | code | class | meaning |
 |------|-------|---------|
 | `0`  | success | The output file was written and verified. |
-| `64` | usage | Bad arguments, or the output file's extension doesn't match the job's container. |
+| `64` | usage | Bad arguments, an unknown option, an output file given to `--plan`, or an output file whose extension doesn't match the job's container. |
 | `65` | invalid job | Unreadable/malformed job file, structural validation failure, a named source missing on disk, or a job/source mismatch (frame or audio index out of range). |
 | `66` | probe/index failure | A source exists but couldn't be probed or frame-indexed (unreadable/corrupt media, no video track, ffmpeg/ffprobe not found). |
 | `70` | export failure | Planning or producing the output failed (invalid plan, cut/conform/concat/mux error, output verification failure). |
@@ -131,6 +229,12 @@ The **last** stderr line of every run is one line that gives the outcome, so
 
 ```
 Done: /media/out/stitched.mkv
+```
+
+A plan query ends with the job it answered for:
+
+```
+Planned: /media/jobs/round.json
 ```
 
 A failure ends with the exit code, its class, and where the failure happened:

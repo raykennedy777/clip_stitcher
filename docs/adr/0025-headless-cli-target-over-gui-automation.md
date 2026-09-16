@@ -25,6 +25,14 @@ the same engine layer the app calls.
 - Failure classes map to exit codes (64 usage / 65 invalid job / 66 probe-index /
   70 export), stderr carries the humans' text, stdout stays silent.
 
+**Amended 2026-09-16 (issue #115):** stdout has one exception — `clipstitch --plan
+<job.json>`. That flag is a **query**, not a run: it stops after the probe/index/plan
+half of `StitchPipeline`, writes no media, and prints the plan as one JSON document
+(`PlanReport`, contract version 1, documented in docs/stitch-job.md). The rule the
+original decision was protecting still holds, because the answer *is* the output: a
+caller reads stdout whole, with no log parsing, and stage lines, warnings and the
+verdict stay on stderr. `--plan job.json 2>/dev/null` is the JSON alone.
+
 ## Why not the AX/automation route
 
 - **The AX route needs a login session and screen.** It exists for *testing the

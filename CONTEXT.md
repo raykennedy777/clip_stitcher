@@ -168,6 +168,15 @@ stream selections, exactly one target, and output settings. A Project as a scrip
 write one; consumed by the `clipstitch` tool target (ADR-0025), never persisted by the app.
 _Avoid_: job file, batch file, manifest
 
+**Plan query**:
+`clipstitch --plan <job.json>` and the JSON document it prints (docs/stitch-job.md, issue
+#115): every decision a Stitch Job has already made before its first encoder starts — each
+clip's treatment, its segment plan with per-segment reasons, its copy boundaries, its copied
+share and its frame count, plus the output audio and the run's warnings. It costs the
+import-time scans every run pays anyway and writes no media, so a caller can read what a job
+would do instead of rendering to find out. The CLI's one deliberate use of stdout.
+_Avoid_: dry run, preview, --dry-run
+
 **Frame index**:
 The per-clip map of frame number → timestamp + keyframe flag, built on import. The basis of
 frame accuracy on variable-frame-rate content.

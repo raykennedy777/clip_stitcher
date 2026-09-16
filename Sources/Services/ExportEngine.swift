@@ -150,7 +150,9 @@ enum ExportError: LocalizedError {
 /// The argument builders are pure so the exact command shape can be unit-tested; the
 /// recipes themselves were validated against real H.264/HEVC/MPEG-2 footage in the shell.
 enum ExportEngine {
-    private static let audioBitrate = "192k"
+    /// The bit rate every rebuilt audio track encodes at. Fixed today — a plan query
+    /// prints it as the output rate (issue #115), and issue #4 covers letting a job set it.
+    static let audioBitrate = "192k"
 
     /// What feeds one audio leg (ADR-0014).
     enum AudioSource: Equatable {

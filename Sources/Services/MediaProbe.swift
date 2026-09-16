@@ -146,7 +146,8 @@ enum MediaProbe {
                 channels: s.channels ?? 0,
                 channelLayout: s.channel_layout,
                 language: s.tags.tag("language"),
-                title: s.tags.tag("title")
+                title: s.tags.tag("title"),
+                bitrate: s.bit_rate.flatMap(Int.init)
             )
         }
 

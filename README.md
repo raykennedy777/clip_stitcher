@@ -46,6 +46,9 @@ xcodebuild -scheme clipstitch -configuration Release build
 clipstitch job.json output.mkv
 ```
 
+`clipstitch --plan job.json` answers what the job *would* do — each clip's treatment,
+its copy/re-encode split and its frame count — as JSON on stdout, without rendering.
+
 Exit codes distinguish invalid jobs, unreadable sources, and export failures — see
 [docs/stitch-job.md](docs/stitch-job.md) for the schema and codes.
 

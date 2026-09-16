@@ -47,6 +47,21 @@ struct StitchPipelineIntegrationTests {
         return (target, fill)
     }
 
+    /// 1 s of green HEVC + one AAC stream, or nil when this ffmpeg has no libx265 — the
+    /// third format the engine supports (MPEG-2, H.264, HEVC), so the plan query is proved
+    /// on all three rather than on the two the older case happened to use.
+    private static func makeHevcSource(in dir: URL) async throws -> URL? {
+        guard let ffmpeg = try? FFTools.ffmpegURL() else { return nil }
+        let url = dir.appendingPathComponent("hevc.mkv")
+        let made = try await ProcessRunner.run(ffmpeg, [
+            "-v", "error",
+            "-f", "lavfi", "-i", "color=c=green:size=320x240:rate=25:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=660:duration=1",
+            "-c:v", "libx265", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-y", url.path])
+        return made.status == 0 ? url : nil
+    }
+
     private static func tempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-stitchjob-\(UUID().uuidString)", isDirectory: true)
@@ -134,6 +149,59 @@ struct StitchPipelineIntegrationTests {
             "-show_entries", "stream=codec_name", "-of", "csv=p=0", output.path])
         #expect((String(data: codec.stdout, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines) == "h264")
+    }
+
+    /// The plan query's promise (issue #115): what `--plan` says the job will produce is
+    /// what the export then produces. Same job, same `prepare` — the report's per-clip
+    /// `expectedFrames` must sum to the frame count of the file `run` writes, or an agent
+    /// that plans instead of rendering is reading a number that means nothing.
+    @Test func planReportPredictsTheFrameCountTheExportWrites() async throws {
+        let dir = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        guard let sources = try await Self.makeSources(in: dir) else { return }
+
+        // All three formats the engine supports in one job (the issue's "Done when"):
+        // an H.264 target, an MPEG-2 fill and an HEVC fill, both fills conformed.
+        let hevc = try await Self.makeHevcSource(in: dir)
+        let hevcClip = hevc.map { ",\n            { \"path\": \"\($0.path)\" }" } ?? ""
+        let job = try StitchJob.parse(Data("""
+        {
+          "version": 1,
+          "clips": [
+            { "path": "\(sources.target.path)", "inFrame": 5, "outFrame": 44,
+              "audioTracks": [0], "target": true },
+            { "path": "\(sources.fill.path)", "audioTracks": [1] }\(hevcClip)
+          ],
+          "output": { "container": "mkv" }
+        }
+        """.utf8))
+        let report = PlanReport.make(prepared: try await StitchPipeline.prepare(job: job))
+
+        // The plan itself: a smart-rendered target cut between keyframes, conformed fills
+        // (MPEG-2 and HEVC against an H.264 target), and one audio track out.
+        #expect(report.version == PlanReport.contractVersion)
+        #expect(report.target == 0)
+        #expect(report.clips.map(\.treatment)
+                == [.smartRender, .conform] + (hevc == nil ? [] : [.conform]))
+        #expect(report.clips[0].segments?.contains { $0.kind == .copy } == true)
+        #expect(report.clips[0].copySafeKeyframes?.afterIn != nil)
+        #expect(report.clips[1].reason?.contains { $0.property == "Codec" } == true)
+        #expect(report.audio.bitrate.out == ExportEngine.audioBitrate)
+
+        // And it round-trips as JSON with every key a reader indexes.
+        let decoded = try JSONDecoder().decode(PlanReport.self, from: report.jsonData())
+        #expect(decoded == report)
+
+        // The promise: sum of expectedFrames == the frames the export writes.
+        let output = dir.appendingPathComponent("out.mkv")
+        _ = try await StitchPipeline.run(job: job, output: output)
+        guard let ffprobe = try? FFTools.ffprobeURL() else { return }
+        let count = try await ProcessRunner.run(ffprobe, [
+            "-v", "error", "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", output.path])
+        let written = Int((String(data: count.stdout, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines))
+        #expect(written == report.clips.reduce(0) { $0 + $1.expectedFrames })
     }
 
     @Test func jobSourceMismatchesAreRefusedAsInvalidJob() async throws {

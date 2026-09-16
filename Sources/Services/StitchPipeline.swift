@@ -33,6 +33,37 @@ enum StitchPipeline {
         var damageZones: [DamageZone]
     }
 
+    /// Everything the job decides **before** any encoder starts: the probed sources, the
+    /// materialized clips, the per-clip export plan, the output audio codec and track
+    /// list, and the warnings the run will print. `run` hands it straight to
+    /// `ExportEngine.export`; the CLI's plan query (issue #115) reports it and stops.
+    ///
+    /// The split is where the cost changes class. Reaching a `Prepared` costs the
+    /// import-time scans of each distinct source — seconds on a multi-GB capture — while
+    /// everything after it is the render. So a caller that only wants to know *what the
+    /// job would do* can stop here and pay the cheap half.
+    struct Prepared {
+        var job: StitchJob
+        var settings: OutputSettings
+        /// The probed/indexed sources, keyed by tilde-expanded path.
+        var facts: [String: SourceFacts]
+        /// The model clips in job order, parallel to `job.clips` and to `items`.
+        var clips: [Clip]
+        var targetIndex: Int
+        var items: [ExportItem]
+        var audio: AudioCodecPolicy.AudioEncodeChoice
+        var tracks: [AudioCodecPolicy.OutputAudioTrack]
+        var warnings: [String]
+
+        var target: Clip { clips[targetIndex] }
+
+        /// The probed facts behind clip `i`. Force-unwrappable: `prepare` fills `facts`
+        /// from every clip's own path before it builds anything that reads this.
+        func facts(forClip i: Int) -> SourceFacts {
+            facts[(job.clips[i].path as NSString).expandingTildeInPath]!
+        }
+    }
+
     /// Runs a validated job end to end, writing the connected output to `output`.
     /// `log` receives human-readable stage lines (the CLI sends them to stderr);
     /// `progress` is the engine's 0…1 export fraction.
@@ -40,6 +71,20 @@ enum StitchPipeline {
     static func run(job: StitchJob, output: URL,
                     log: @escaping (String) -> Void = { _ in },
                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> Outcome {
+        let prepared = try await prepare(job: job, log: log)
+        log("Exporting \(prepared.items.count) clip\(prepared.items.count == 1 ? "" : "s") to \(output.lastPathComponent)…")
+        try await ExportEngine.export(items: prepared.items, settings: prepared.settings,
+                                      audioCodec: prepared.audio.encoder, tracks: prepared.tracks,
+                                      to: output, progress: progress)
+        return Outcome(warnings: prepared.warnings)
+    }
+
+    /// Probes, indexes, materializes and plans the job — every decision an export makes
+    /// before its first encoder starts, and no tool run beyond the probe and the index
+    /// scan. Throws the same error classes `run` does, so a caller maps them to the same
+    /// exit codes.
+    static func prepare(job: StitchJob,
+                        log: @escaping (String) -> Void = { _ in }) async throws -> Prepared {
         let settings = try job.outputSettings()
 
         // 1. Probe + index each distinct source once, in first-appearance order.
@@ -156,11 +201,10 @@ enum StitchPipeline {
         var tracks = AudioSourceResolver.resolveOutputTracks(target: target, clips: clips)
         if settings.type == .audioOnly { tracks = Array(tracks.prefix(1)) }
 
-        log("Exporting \(items.count) clip\(items.count == 1 ? "" : "s") to \(output.lastPathComponent)…")
-        try await ExportEngine.export(items: items, settings: settings,
-                                      audioCodec: audio.encoder, tracks: tracks,
-                                      to: output, progress: progress)
-        return outcome
+        return Prepared(job: job, settings: settings, facts: facts, clips: clips,
+                        targetIndex: job.targetIndex!,   // validate() guaranteed exactly one
+                        items: items,
+                        audio: audio, tracks: tracks, warnings: outcome.warnings)
     }
 
     /// The output-file extension this job must be written under, or nil when the job

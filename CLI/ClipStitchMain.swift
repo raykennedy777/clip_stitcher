@@ -4,7 +4,8 @@ import Foundation
 /// ADR-0025): a Stitch Job JSON in, a frame-accurate stitched file out, no GUI and no
 /// user interaction. All human-readable output (stage lines, warnings, errors) goes to
 /// **stderr**; stdout stays silent so the exit code and the output file are the whole
-/// scriptable surface.
+/// scriptable surface. `--plan` is the one exception (issue #115): that flag is a query,
+/// its answer is a JSON document, and the document goes to stdout.
 ///
 /// Exit codes (sysexits-flavored, documented in docs/stitch-job.md):
 ///   0   success
@@ -16,6 +17,7 @@ import Foundation
 struct ClipStitchMain {
     static let usage = """
     usage: clipstitch [--verbose] <job.json> <output-file>
+           clipstitch [--verbose] --plan <job.json>
 
     Stitches the clips described by a Stitch Job JSON (see docs/stitch-job.md) into
     one frame-accurate output file, exactly as the Clip Stitcher app would: matching
@@ -24,9 +26,13 @@ struct ClipStitchMain {
     An existing file at <output-file> is overwritten. Requires ffmpeg and ffprobe
     (Homebrew or system install).
 
+    --plan writes no media. It probes, indexes and plans the job, prints that plan as
+    JSON to stdout, and exits — the one thing the CLI ever puts on stdout. Use it to
+    see each clip's treatment, copy/re-encode split and frame count before a render.
+
     An error prints a bounded excerpt of a long detail (a decoder's output can run to
     thousands of lines); --verbose prints all of it. The last stderr line of every run is
-    one verdict line: “Done: <path>” or “clipstitch: FAILED (…)”.
+    one verdict line: “Done: <path>”, “Planned: <path>” or “clipstitch: FAILED (…)”.
 
     exit codes: 0 success · 64 usage · 65 invalid job · 66 probe/index failure ·
     70 export failure
@@ -37,36 +43,47 @@ struct ClipStitchMain {
     nonisolated(unsafe) static var verbose = false
 
     static func main() async {
-        var arguments = Array(CommandLine.arguments.dropFirst())
-        if arguments.contains("--help") || arguments.contains("-h") {
+        let parsed: ClipStitchArguments.Parsed
+        do {
+            parsed = try ClipStitchArguments.parse(Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            let reason = (error as? ClipStitchArguments.UsageError)?.message ?? describe(error)
+            fail(.usage, "\(reason)\n\(usage)")
+        }
+        verbose = parsed.verbose
+        switch parsed.invocation {
+        case .help:
             print(usage)
             exit(0)
+        case .plan(let jobPath):
+            await plan(job: readJob(at: jobPath), path: jobPath)
+        case .stitch(let jobPath, let outputPath):
+            // Reclaim the work directories a previous hard kill abandoned (issue #109). The
+            // CLI leaks the same way the app does on ^C/SIGTERM, and an AFK render batch may
+            // never launch the app to sweep for it. Synchronous — the CLI is short-lived, so
+            // a detached task could be cut off by `exit` — and cheap: a directory listing,
+            // plus the unlinks for whatever it condemns. Logged, never printed: stderr stays
+            // the job's own output. A plan query never reaches it: a query unlinks nothing.
+            WorkDirectorySweeper.sweep()
+            await stitch(job: readJob(at: jobPath),
+                         output: URL(fileURLWithPath: (outputPath as NSString).expandingTildeInPath))
         }
-        verbose = arguments.contains("--verbose")
-        arguments.removeAll { $0 == "--verbose" }
-        guard arguments.count == 2 else {
-            fail(.usage, "expected a job file and an output file\n\(usage)")
-        }
-        // Reclaim the work directories a previous hard kill abandoned (issue #109). The CLI
-        // leaks the same way the app does on ^C/SIGTERM, and an AFK render batch may never
-        // launch the app to sweep for it. Synchronous — the CLI is short-lived, so a detached
-        // task could be cut off by `exit` — and cheap: a directory listing, plus the unlinks
-        // for whatever it condemns. Logged, never printed: stderr stays the job's own output.
-        WorkDirectorySweeper.sweep()
-        let jobPath = (arguments[0] as NSString).expandingTildeInPath
-        let outputPath = (arguments[1] as NSString).expandingTildeInPath
+    }
 
-        guard let data = FileManager.default.contents(atPath: jobPath) else {
-            fail(.invalidJob, "could not read job file: \(arguments[0])")
+    /// Reads and validates the job file, or exits with the invalid-job code.
+    static func readJob(at path: String) -> StitchJob {
+        guard let data = FileManager.default.contents(atPath: (path as NSString).expandingTildeInPath) else {
+            fail(.invalidJob, "could not read job file: \(path)")
         }
-        let job: StitchJob
         do {
-            job = try StitchJob.parse(data)
+            return try StitchJob.parse(data)
         } catch {
             fail(.invalidJob, describe(error))
         }
+    }
 
-        let output = URL(fileURLWithPath: outputPath)
+    /// The normal run: stitch the job into `output` and report the verdict on stderr.
+    static func stitch(job: StitchJob, output: URL) async -> Never {
         do {
             if let required = try StitchPipeline.requiredExtension(job: job),
                output.pathExtension.lowercased() != required {
@@ -75,24 +92,53 @@ struct ClipStitchMain {
         } catch {
             fail(.invalidJob, describe(error))
         }
-
         do {
             let reporter = ProgressReporter()
             let outcome = try await StitchPipeline.run(
-                job: job, output: output,
-                log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) },
+                job: job, output: output, log: logToStderr,
                 progress: { fraction in reporter.report(fraction) })
             for warning in outcome.warnings {
                 FileHandle.standardError.write(Data(("warning: " + warning + "\n").utf8))
             }
             FileHandle.standardError.write(Data("Done: \(output.path)\n".utf8))
             exit(0)
-        } catch let error as StitchJobError {
-            fail(.invalidJob, describe(error))
-        } catch let error as FFError {
-            fail(.probeFailure, describe(error))
         } catch {
-            fail(.exportFailure, describe(error), short: shortForm(error))
+            failRun(error)
+        }
+    }
+
+    /// Answers `--plan` (issue #115): probe, index and plan the job, then print the plan
+    /// as JSON on **stdout** and exit. This is the CLI's one deliberate stdout exception —
+    /// the flag is a query, and its answer is the output, so a caller reads it with no log
+    /// parsing. Stage lines and the verdict stay on stderr, so `--plan job.json 2>/dev/null`
+    /// is the JSON alone. No encoder runs and no file is written.
+    static func plan(job: StitchJob, path: String) async -> Never {
+        do {
+            let prepared = try await StitchPipeline.prepare(job: job, log: logToStderr)
+            let data = try PlanReport.make(prepared: prepared).jsonData()
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+            FileHandle.standardError.write(Data("Planned: \(path)\n".utf8))
+            exit(0)
+        } catch {
+            failRun(error)
+        }
+    }
+
+    /// The pipeline's stage lines, on stderr where all human-readable output goes.
+    static let logToStderr: (String) -> Void = { line in
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+
+    /// Maps a pipeline error onto its exit code. The classes are load-bearing
+    /// (`StitchPipeline`): a job-class error is the caller's job file, an `FFError` is a
+    /// source or a missing tool, anything else is planning or producing the output. A run
+    /// and a plan query share this map so one job's failure gets one code either way.
+    static func failRun(_ error: Error) -> Never {
+        switch error {
+        case let error as StitchJobError: fail(.invalidJob, describe(error))
+        case let error as FFError: fail(.probeFailure, describe(error))
+        default: fail(.exportFailure, describe(error), short: shortForm(error))
         }
     }
 

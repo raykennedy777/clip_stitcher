@@ -391,11 +391,18 @@ enum ExportPlanner {
             guard outEx > inStart else { return nil }
             return CopyShare(copiedSeconds: 0, totalSeconds: duration(of: inStart..<outEx, index: index))
         case .smartRender(let segments, _):
-            let copied = segments.filter { $0.kind == .copy }
-                .reduce(0.0) { $0 + duration(of: $1.range, index: index) }
-            let total = segments.reduce(0.0) { $0 + duration(of: $1.range, index: index) }
-            return CopyShare(copiedSeconds: copied, totalSeconds: total)
+            return copyShare(segments: segments, index: index)
         }
+    }
+
+    /// A segment plan's copy/re-encode split, duration-weighted through the frame index's
+    /// pts. The one place the split is computed: the Output view reaches it through
+    /// `copyShare(for:…)` above, the CLI's plan query through `PlanReport`, so the two can
+    /// never print a different fraction for one clip.
+    static func copyShare(segments: [PlannedSegment], index: FrameIndex) -> CopyShare {
+        CopyShare(copiedSeconds: segments.filter { $0.kind == .copy }
+                    .reduce(0.0) { $0 + duration(of: $1.range, index: index) },
+                  totalSeconds: segments.reduce(0.0) { $0 + duration(of: $1.range, index: index) })
     }
 
     /// A presentation-frame range's duration in seconds, read off the index pts (so
