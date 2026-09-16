@@ -151,4 +151,44 @@ struct MpegPsPtsRefillIntegrationTests {
         #expect(try await FrameIndexer.frameCount(url: piece)
             == plan.reduce(0) { $0 + $1.range.count })
     }
+
+    /// Issue #118: the same measurement, but through Clip Doctor's repair-only bounded-keyframe
+    /// copy (`copyStrategy: .boundedKeyframe`), which used to skip this refill entirely and hit
+    /// the Matroska "Can't write packet with unknown timestamp" refusal on its own copy span.
+    @Test func aBoundedKeyframeCopyPieceFromAnMpegPsSourceVerifiesIntoMkv() async throws {
+        let dir = try Self.scratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        guard let ffmpeg = try? FFTools.ffmpegURL(),
+              let src = try await Self.makeSource(in: dir) else { return }
+        #expect(try await Self.packetsWithoutPts(src) > 0)
+
+        let index = try await FrameIndexer.buildIndex(url: src)
+        let probe = try await MediaProbe.probe(url: src)
+        let counts = CopySafeBoundaryDetector.leadingPictureCounts(
+            keyframeFlags: index.keyframeFlags, dts: index.dts)
+        let plan = BoundaryReencodePlanner.plan(
+            leadingCounts: counts, frameCount: index.count,
+            inFrame: Int(Double(index.count) * 0.12),
+            outFrame: Int(Double(index.count) * 0.92))
+        #expect(plan.contains { $0.kind == .copy } && plan.contains { $0.kind == .reEncode },
+                "the fixture must plan a copy between re-encodes")
+
+        let work = dir.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        let piece = try await BoundaryReencodeEngine.produceVideoPiece(
+            ffmpeg, source: src, plan: plan, index: index,
+            encoder: BoundaryReencodeEngine.reencodeVideoArgs(
+                codec: "mpeg2video", profile: probe.video?.profile,
+                pixelFormat: probe.video?.pixelFormat, fieldOrder: probe.video?.fieldOrder,
+                bitrate: probe.video?.bitrate),
+            work: work, ext: "mkv", clipIndex: 0, codec: "mpeg2video",
+            containerStart: await MediaProbe.containerStartTime(url: src),
+            copyStrategy: .boundedKeyframe, reorderDepth: 1)
+
+        // The gate that refused it before, stated directly on the shipped piece.
+        #expect(try await Self.decodeComplaints(piece) == [])
+        #expect(try await Self.packetsWithoutPts(piece) == 0)
+        #expect(try await FrameIndexer.frameCount(url: piece)
+            == plan.reduce(0) { $0 + $1.range.count })
+    }
 }

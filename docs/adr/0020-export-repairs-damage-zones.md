@@ -48,6 +48,24 @@ end on the real 1844 capture across all nine documented zones (issue #47's run r
   reordered PTS of an anchor picture that lost one, which a DTS refill cannot; `setts`
   remains as the fallback that keeps the muxer fed when `+genpts` cannot derive a
   timestamp at all, so this guarantee is unchanged.
+
+  **Amended 2026-09-16 (issue #118).** Clip Doctor's bounded-keyframe copy
+  (`BoundaryReencodeEngine.boundedCopyArguments`) had no refill at all. It skipped both
+  `setts` and `+genpts`. An MPEG-PS source with an undamaged span still carries a few
+  no-PTS packets. A bounded copy into MKV hit the same muxer refusal as the segment-mux
+  path. The fix gives `boundedCopyArguments` the same two parameters
+  `ExportEngine.cutArguments` has. It places them the same way: the input flag before
+  `-i`, the bsf after `-c copy`. `produceVideoPiece` passes the same `bsf` and
+  `copyInputFlags` values it already computes for the segment-mux path.
+
+  De-risked in the shell on the real MPEG-PS capture, bounded to a 12-frame keyframe
+  span with a no-PTS packet inside it: no refill drops packets and errors at mux time
+  (12 frames in, 9 out); `setts` alone writes all 12 but decodes noisy (one duplicate
+  timestamp); `+genpts` alone and `+genpts` plus `setts` both write all 12 and decode
+  silent, with identical framecrc to each other. Repeated on a damaged span (three
+  zeroed byte ranges near a no-PTS packet): the same result, and `+genpts` derived a
+  forward, non-duplicate PTS for the recovered packet — it did not invent a timestamp
+  that goes backward or jumps. The seek landing does not move.
 - Repair spans widen until the next frame's dts clears the zone's max(pts, dts): the
   copy cut resuming after a repair is placed on its boundary keyframe's dts, and
   mis-framed in-zone garbage whose timestamps reach past that cut would be swept into
