@@ -43,7 +43,11 @@ end on the real 1844 capture across all nine documented zones (issue #47's run r
   whatever their codec: truncated packets choke the matroska muxer even from
   *discarded* segments (the segment muxer writes those too), so a clean kept window
   still failed on the 1844. Keyed on the clip having zones — clean clips keep
-  byte-identical commands.
+  byte-identical commands. **Amended 2026-09-16 (issue #116):** those runs also carry
+  `-fflags +genpts` on the input, under the same rule. The demuxer then derives the true
+  reordered PTS of an anchor picture that lost one, which a DTS refill cannot; `setts`
+  remains as the fallback that keeps the muxer fed when `+genpts` cannot derive a
+  timestamp at all, so this guarantee is unchanged.
 - Repair spans widen until the next frame's dts clears the zone's max(pts, dts): the
   copy cut resuming after a repair is placed on its boundary keyframe's dts, and
   mis-framed in-zone garbage whose timestamps reach past that cut would be swept into

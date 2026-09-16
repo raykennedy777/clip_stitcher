@@ -576,9 +576,15 @@ enum BoundaryReencodeEngine {
         // single container header can't decide how it decodes, plus — for mpeg2video→MKV
         // (issue #2) and any damaged *source*→MKV, whose truncated pictures choke the muxer
         // even from discarded segments (issue #47) — the missing-PTS refill.
+        let damagedSource = sourceDamaged || plan.contains { !$0.damage.isEmpty }
         let bsf = ExportEngine.copyPieceBitstreamFilter(
-            codec: codec, ext: ext,
-            damaged: sourceDamaged || plan.contains { !$0.damage.isEmpty })
+            codec: codec, ext: ext, damaged: damagedSource)
+        // The same refill's demuxer half (issue #116). An MPEG-PS anchor picture that lost
+        // its PTS gets its true reordered one from `+genpts`; the `setts` fallback above
+        // would put it `bf` frames early, on the previous anchor's PTS, and the finished
+        // piece would then fail the verify decode though its pictures are correct.
+        let copyInputFlags = ExportEngine.ptsRefillInputFlags(
+            codec: codec, ext: ext, damaged: damagedSource)
 
         // The export-wide MP4 timescale (issue #24) stamps every piece — copies
         // included — so cross-clip joins can't stretch or collapse. Without one
@@ -681,7 +687,7 @@ enum BoundaryReencodeEngine {
                     try await run(ffmpeg, ExportEngine.cutArguments(
                         source: source, plan: copyPlan, segmentPattern: pattern,
                         bitstreamFilter: bsf, trackTimescale: copyTimescale,
-                        headSeek: headSeek), onOutTime: onOutTime)
+                        headSeek: headSeek, inputFlags: copyInputFlags), onOutTime: onOutTime)
                     piece = work.appendingPathComponent(String(
                         format: "c\(clipIndex)_s\(s)_cp_%03d.\(ext)",
                         ExportEngine.wantedSegmentIndex(plan: copyPlan)))
@@ -695,7 +701,7 @@ enum BoundaryReencodeEngine {
                     piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_cp.\(ext)")
                     try await run(ffmpeg, ExportEngine.remuxArguments(
                         source: source, output: piece, bitstreamFilter: bsf,
-                        trackTimescale: copyTimescale),
+                        trackTimescale: copyTimescale, inputFlags: copyInputFlags),
                                   onOutTime: onOutTime)
                 }
             }
