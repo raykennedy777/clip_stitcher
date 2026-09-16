@@ -384,11 +384,23 @@ enum ConformEngine {
         // then repeats the last good frame across each dropped span.
         if let repair { filters.append(repair) }
 
-        // Frame-rate / scan tail. Interlacing a progressive source needs the field-rate
-        // (2× the target frame rate) feeding the interlace filter, which halves it back.
-        if tgtInterlaced && !srcInterlaced {
+        // Frame-rate / scan tail. Interlacing a progressive source has two shapes (issue #120):
+        //  - The source supplies the target's FIELD rate (≥ 2× its frame rate): feed the
+        //    field rate to `interlace`, which weaves two different instants into one frame
+        //    and halves the rate back. Its default vertical low-pass is what stops inter-line
+        //    twitter between those instants — keep it.
+        //  - Below that, `fps=<2×>` could only duplicate frames, so the weave would pair two
+        //    copies of one picture and the low-pass would only remove detail (measured −25%
+        //    on a real fill, −55% on synthetic detail). The pictures are left alone: `fps` to
+        //    the target frame rate, and `setparams` flags the frames interlaced in the
+        //    target's direction, which `+ildct+ilme` then codes.
+        if tgtInterlaced && !srcInterlaced && sourceSuppliesFieldRate(source, target) {
             filters.append("fps=\(fpsToken(target.frameRate, double: true))")
             filters.append("interlace=scan=\(topFieldFirst(target.fieldOrder) ? "tff" : "bff")")
+        } else if tgtInterlaced && !srcInterlaced {
+            filters.append("fps=\(fpsToken(target.frameRate, double: false))")
+            filters.append(BoundaryReencodeEngine.fieldOrderFilter(target.fieldOrder)
+                ?? BoundaryReencodeEngine.topFirstScanFilter)
         } else {
             filters.append("fps=\(fpsToken(target.frameRate, double: false))")
         }
@@ -410,7 +422,7 @@ enum ConformEngine {
         // the chain, so nothing above has set which field leads; the encoder used to pin it
         // with `-top`, which ffmpeg 9 removed as an encoding option. `setparams` sets it on
         // the frames instead, and goes last so no later filter can reset it. A **progressive**
-        // source is already served by the `interlace=scan=…` filter above. MPEG-2 and H.264
+        // source is already served by the tail above. MPEG-2 and H.264
         // only: HEVC is assumed never interlaced (ADR-0011, issue #119).
         if tgtInterlaced, srcInterlaced, BoundaryReencodeEngine.interlaceCapable(target.codec) {
             filters.append(BoundaryReencodeEngine.fieldOrderFilter(target.fieldOrder)
@@ -647,6 +659,16 @@ enum ConformEngine {
     }
 
     // MARK: - Field order / aspect / rate helpers
+
+    /// Whether a progressive source runs at or above the interlaced target's field rate
+    /// (2× its frame rate), so an `interlace` weave pairs two different instants (issue
+    /// #120). Unparseable rates say no: the picture-preserving tail is the safe default.
+    static func sourceSuppliesFieldRate(_ source: VideoProperties, _ target: VideoProperties) -> Bool {
+        guard let s = frameRateValue(source.frameRate), let t = frameRateValue(target.frameRate) else {
+            return false
+        }
+        return s >= 2 * t - 0.001
+    }
 
     /// Internal (not private): the preview's spatial conform chain shares this scan
     /// check so the two can't drift (ADR-0012).

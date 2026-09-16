@@ -133,24 +133,27 @@ struct FieldOrderReencodeIntegrationTests {
     }
 
     /// A progressive source conformed to an interlaced H.264 target (issue #119), in both
-    /// output containers and both directions. The coded frames carry the asked-for scan; the
-    /// stream-level tag does not — Matroska says `tb`/`bt`, MP4 says `tt` whichever field
-    /// leads — so the gate's measured probe, not the stream probe, is what the verify reads.
-    @Test(arguments: ["tt", "bb"], ["mkv", "mp4"])
-    func aConformedH264PieceIsCodedInTheAskedForScanDirection(asked: String, ext: String) async throws {
+    /// output containers, both directions, and both tails (issue #120): a 50 fps source into
+    /// a 25 fps target is weaved, into a 50 fps target it is only flagged. The coded frames
+    /// carry the asked-for scan; the stream-level tag does not — Matroska says `tb`/`bt`, MP4
+    /// says `tt` whichever field leads — so the gate's measured probe, not the stream probe,
+    /// is what the verify reads.
+    @Test(arguments: [("tt", "mkv", "25/1"), ("bb", "mkv", "25/1"), ("tt", "mp4", "25/1"), ("bb", "mp4", "25/1"),
+                      ("tt", "mkv", "50/1"), ("bb", "mp4", "50/1")])
+    func aConformedH264PieceIsCodedInTheAskedForScanDirection(asked: String, ext: String, rate: String) async throws {
         guard let ffmpeg = try? FFTools.ffmpegURL() else { return }
         let work = try Self.scratch()
         defer { try? FileManager.default.removeItem(at: work) }
 
         let src = work.appendingPathComponent("prog.mp4")
         let made = try await ProcessRunner.run(ffmpeg, [
-            "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=352x288:rate=25:duration=1",
+            "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=352x288:rate=50:duration=1",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "12", "-an", src.path,
         ])
         #expect(made.status == 0)
         guard let source = try await MediaProbe.probe(url: src).video else { return }
         var target = source
-        target.fieldOrder = asked; target.frameRate = "50/1"
+        target.fieldOrder = asked; target.frameRate = rate
         target.profile = "High"; target.level = "30"
 
         let piece = work.appendingPathComponent("conf_\(asked).\(ext)")
@@ -161,6 +164,8 @@ struct FieldOrderReencodeIntegrationTests {
 
         let coded = await MediaProbe.codedFieldOrder(url: piece)
         #expect(coded == asked)
+        // Both tails deliver the target's frame count: 1 s at the target rate.
+        #expect(try await FrameIndexer.frameCount(url: piece) == (rate == "25/1" ? 25 : 50))
         // The gate's rule: the measured scan satisfies the target however the target spells it.
         var probed = try await MediaProbe.probe(url: piece).video
         probed?.fieldOrder = coded

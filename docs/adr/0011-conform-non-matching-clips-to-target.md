@@ -171,3 +171,30 @@ neither flags nor scan filter, and the measured gate would refuse such a piece l
 **Not the stale-flag case.** The job that surfaced this had a target whose `tt` came from an
 H.264 stream in MPEG-TS that `idet` reads as progressive — the MPEG-TS `tt` trap above. The
 fix is not keyed on that; a target's probed scan is taken as the spec.
+
+## Amendment — 2026-09-16: weave only when the source supplies the field rate (issue #120)
+
+A progressive fill conformed to an interlaced target at the **same** frame rate came out 25%
+softer than its source (Laplacian std 23.72 → 17.80 on a real job). The tail was always
+`fps=<2× target>,interlace=scan=…`, and `interlace` low-passes vertically by default. That is
+right when an output frame's two fields are different instants — it stops inter-line twitter.
+At the target's own frame rate `fps=<2×>` can only duplicate, so the weave paired two copies of
+one picture and the low-pass only removed detail.
+
+**Rule.** `sourceSuppliesFieldRate`: the weave runs only when the source frame rate is at or
+above the target's field rate (2× its frame rate). Below that the tail is `fps=<target rate>`
+plus `setparams=field_mode=tff|bff` — the pictures are untouched, the frames are flagged
+interlaced in the target's direction, and `+ildct+ilme` codes them so.
+
+**Measured** (mandelbrot 720×576, libx264 CRF 18, Laplacian std over 40 frames; source 34.24):
+
+| case | weave, low-pass on | weave, `lowpass=0` | `fps` + `setparams` |
+|---|---|---|---|
+| 50p → 50i | 15.26 | 33.39 | **33.39** (chosen) |
+| 50p → 25i | **24.91** (chosen; `idet` 50/50 TFF) | 38.65 — combing energy | — |
+| 25p → 50i | 15.48 | — | **33.56** (chosen) |
+
+`lowpass=0` is **not** a blanket quality choice: on the 50p → 25i row it leaves the twitter
+the low-pass exists for. Frame counts are the target's in every case, and the coded scan is the
+asked direction (executed in `FieldOrderReencodeIntegrationTests`, both tails, `.mkv`/`.mp4`).
+

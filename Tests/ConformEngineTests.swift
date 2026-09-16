@@ -53,14 +53,15 @@ struct ConformEngineTests {
         #expect(tff[tff.firstIndex(of: "-vf")! + 1].hasSuffix(",setparams=field_mode=tff"))
     }
 
-    /// Progressive H.264 → interlaced H.264 (issue #119): the field-rate fps + `interlace`
-    /// tail sets the direction on the frames, and libx264 gets `+ildct+ilme`, without which
-    /// it codes the combed frames as progressive pictures whatever the chain did.
+    /// Progressive H.264 → interlaced H.264 (issue #119). A 25 fps source cannot supply a
+    /// 50 fps target's 100 Hz field rate, so the tail is `fps` to the target rate plus the
+    /// scan flag (issue #120) — no weave, no low-pass — and libx264 gets `+ildct+ilme`,
+    /// without which it codes the frames as progressive pictures whatever the chain did.
     @Test func conformsProgressiveH264ToInterlacedH264() {
         var tt = h264; tt.width = 720; tt.height = 576; tt.frameRate = "50/1"
         tt.fieldOrder = "tt"; tt.sampleAspectRatio = "16:15"
         #expect(ConformEngine.conformVideoArgs(source: h264, target: tt) == [
-            "-vf", "scale=720:576,setsar=16/15,format=yuv420p,fps=100,interlace=scan=tff,"
+            "-vf", "scale=720:576,setsar=16/15,format=yuv420p,fps=50,setparams=field_mode=tff,"
                 + "setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown",
             "-c:v", "libx264", "-profile:v", "high", "-level", "4.0", "-flags", "+ildct+ilme",
             "-x264-params", "b-pyramid=0",
@@ -69,6 +70,32 @@ struct ConformEngineTests {
         var tb = tt; tb.fieldOrder = "tb"
         #expect(ConformEngine.conformVideoArgs(source: h264, target: tb)
             == ConformEngine.conformVideoArgs(source: h264, target: tt))
+    }
+
+    /// The weave is kept only where its low-pass earns its place (issue #120): when the source
+    /// runs at or above the target's field rate, the two fields of an output frame are
+    /// different instants. At the target's own frame rate `fps=<2×>` would duplicate every
+    /// frame and the low-pass would remove a quarter of the vertical detail (measured), so
+    /// the pictures are left untouched and only flagged.
+    @Test func weavesOnlyWhenTheSourceSuppliesTheFieldRate() {
+        var target = h264; target.fieldOrder = "tt"; target.frameRate = "25/1"
+        func tail(_ sourceRate: String) -> String {
+            var src = h264; src.frameRate = sourceRate
+            let args = ConformEngine.conformVideoArgs(source: src, target: target)
+            return args[args.firstIndex(of: "-vf")! + 1]
+        }
+        #expect(tail("50/1").contains("fps=50,interlace=scan=tff"))            // 50p → 25i: weave
+        #expect(tail("60000/1001").contains("fps=50,interlace=scan=tff"))      // above: weave
+        #expect(tail("25/1").contains("fps=25,setparams=field_mode=tff"))      // same rate: flag
+        #expect(!tail("25/1").contains("interlace="))
+        #expect(tail("30000/1001").contains("fps=25,setparams=field_mode=tff")) // below field rate: flag
+        var bff = target; bff.fieldOrder = "bb"
+        var src = h264; src.frameRate = "25/1"
+        #expect(ConformEngine.conformVideoArgs(source: src, target: bff)
+            .contains { $0.contains("fps=25,setparams=field_mode=bff") })
+        // An interlaced source is neither weaved nor flagged here (the #117 tail handles it).
+        var isrc = h264; isrc.fieldOrder = "tt"
+        #expect(!ConformEngine.conformVideoArgs(source: isrc, target: target).contains { $0.contains("interlace=") })
     }
 
     /// Interlaced H.264 → interlaced H.264 in the other direction (issue #119): the source
