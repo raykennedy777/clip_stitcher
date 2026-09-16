@@ -146,3 +146,22 @@ are**:
 - **Damage-to-EOF degenerates to a full re-encode when the first damage is early** (the
   acceptance file's first zone is at 883 s of 17 265 s → ~95% re-encoded). That is accepted: the
   saving is real for a file damaged late, and there is no cheaper structurally-possible repair.
+
+## Amendment — 2026-09-16: the MBAFF tail's scan direction (issue #117)
+
+ffmpeg 9.0.1 removed `top` as an encoding option, so the MBAFF tail could no longer open its
+output. `mbaffRepairVideoArgs` now emits `setparams=field_mode=tff|bff` instead of `-top 1|0`,
+alongside the unchanged `-flags +ildct+ilme`. The measured-not-guessed rule of issue #60 is
+unchanged: `idet` still decides the direction when the probed `field_order` is indefinite, and
+an indefinite order still falls back to top-first — the tail is always field-coded, so it can
+never be left without a direction.
+
+The filter travels as a `-vf` pair inside the encoder argument array. The segment builder
+merges it onto the end of its own chain (`splitVideoFilter`); see ADR-0009's amendment for
+that convention and for the full de-risk table.
+
+De-risked on the real PAFF slice into `.ts`: both directions land at frame level
+(`interlaced_frame=1`, `top_field_first=1` for tff and `0` for bff), and the written piece
+decodes silently. Stream-level `field_order` cannot show this — MPEG-TS reports every
+interlaced H.264 stream as `tt`. ffmpeg 9's `-field_order` output option is accepted and does
+nothing; it must not be used.

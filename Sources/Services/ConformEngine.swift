@@ -35,9 +35,9 @@ enum ConformEngine {
     /// ffmpeg video filter-chain + encoder args that transform `source` → `target`. The
     /// chain runs deinterlace (if any) → scale → pad (only on a display-aspect mismatch) →
     /// setsar → format → color conversion toward a tagged target (issue #35) → damage-zone
-    /// select (issue #48) → fps/interlace; the encoder then pins the target codec, profile,
-    /// level, interlace flags, color range, and — for a fully color-tagged target — the
-    /// primaries/transfer/matrix VUI triple.
+    /// select (issue #48) → fps/interlace → scan direction (issue #117); the encoder then pins
+    /// the target codec, profile, level, interlace flags, color range, and — for a fully
+    /// color-tagged target — the primaries/transfer/matrix VUI triple.
     ///
     /// `damage`/`windowStart`/`windowEnd` repair a damaged clip (issue #48): each zone in
     /// the kept window becomes a `select` drop before the fps stage, whose fill then
@@ -397,6 +397,16 @@ enum ConformEngine {
         if targetIsUntagged(target) {
             filters.append("setparams=color_primaries=unknown:color_trc=unknown:colorspace=unknown:range=unknown")
         }
+
+        // Scan-direction tail (issue #117). An interlaced *source* keeps its frames through
+        // the chain, so nothing above has set which field leads; the encoder used to pin it
+        // with `-top`, which ffmpeg 9 removed as an encoding option. `setparams` sets it on
+        // the frames instead, and goes last so no later filter can reset it. A **progressive**
+        // source is already served by the `interlace=scan=…` filter above. This is the
+        // MPEG-2 path only — the same scope `-top` had (ADR-0011).
+        if tgtInterlaced, srcInterlaced, target.codec == "mpeg2video" {
+            filters.append("setparams=field_mode=\(topFieldFirst(target.fieldOrder) ? "tff" : "bff")")
+        }
         return filters
     }
 
@@ -570,7 +580,7 @@ enum ConformEngine {
             // MPEG-2 has no B-pyramid (its B-frames never reference other B-frames), so its
             // decode-order timestamps are already monotonic — no monotonic-DTS workaround needed.
             if isInterlaced(target.fieldOrder) {
-                args += ["-flags", "+ildct+ilme", "-top", topFieldFirst(target.fieldOrder) ? "1" : "0"]
+                args += ["-flags", "+ildct+ilme"]
             }
         default:   // h264
             if let crf { args += ["-crf", String(crf)] }

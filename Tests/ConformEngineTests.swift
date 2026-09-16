@@ -27,9 +27,30 @@ struct ConformEngineTests {
     @Test func conformsHevcToInterlacedMpeg2() {
         #expect(ConformEngine.conformVideoArgs(source: hevc, target: mpeg2) == [
             "-vf", "scale=720:576,setsar=64/45,format=yuv420p,fps=50,interlace=scan=tff",
-            "-c:v", "mpeg2video", "-profile:v", "main", "-flags", "+ildct+ilme", "-top", "1",
+            "-c:v", "mpeg2video", "-profile:v", "main", "-flags", "+ildct+ilme",
             "-color_range", "tv",
         ])
+    }
+
+    /// Interlaced MPEG-2 → interlaced MPEG-2 (issue #117). The source keeps its own frames
+    /// through the chain, so nothing else has said which field leads — the scan filter closes
+    /// the chain and sets the target's direction, which may differ from the source's. ffmpeg 9
+    /// removed the `-top` encoder flag that used to do this.
+    @Test func anInterlacedTargetGetsItsScanDirectionFromTheChainTail() {
+        let bff = VideoProperties(
+            codec: "mpeg2video", profile: "Main", level: nil, width: 720, height: 576,
+            frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: "bb",
+            sampleAspectRatio: "64:45", colorPrimaries: nil, colorTransfer: nil, colorRange: "tv")
+        let args = ConformEngine.conformVideoArgs(source: mpeg2, target: bff)
+        #expect(!args.contains("-top"))
+        #expect(args[args.firstIndex(of: "-vf")! + 1].hasSuffix(",setparams=field_mode=bff"))
+        #expect(args[args.firstIndex(of: "-flags")! + 1] == "+ildct+ilme")
+        // The source is already interlaced, so it is neither deinterlaced nor re-interlaced.
+        #expect(!args[args.firstIndex(of: "-vf")! + 1].contains("bwdif"))
+        #expect(!args[args.firstIndex(of: "-vf")! + 1].contains("interlace=scan"))
+
+        let tff = ConformEngine.conformVideoArgs(source: mpeg2, target: mpeg2)
+        #expect(tff[tff.firstIndex(of: "-vf")! + 1].hasSuffix(",setparams=field_mode=tff"))
     }
 
     /// MPEG-2 → H.264: interlaced → progressive deinterlaces with bwdif, and a 16:9 source

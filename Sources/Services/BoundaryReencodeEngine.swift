@@ -29,14 +29,12 @@ enum BoundaryReencodeEngine {
         if let p = EncoderSelection.encoderProfile(profile, codec: EncoderSelection.profileCodec(for: codec)) {
             args += ["-profile:v", p]
         }
-        if codec == "mpeg2video" {
-            switch fieldOrder {
-            case "tt", "tb": args += ["-flags", "+ildct+ilme", "-top", "1"]
-            case "bb", "bt": args += ["-flags", "+ildct+ilme", "-top", "0"]
-            default: break   // progressive / unknown — no interlace flags
-            }
+        var fieldFilter: [String] = []
+        if codec == "mpeg2video", let filter = fieldOrderFilter(fieldOrder) {
+            args += ["-flags", "+ildct+ilme"]
+            fieldFilter = ["-vf", filter]   // progressive / unknown sources get neither
         }
-        return args + rateControlArgs(codec: codec, bitrate: bitrate)
+        return args + rateControlArgs(codec: codec, bitrate: bitrate) + fieldFilter
     }
 
     /// The **near-lossless CRF every re-encoded piece is held to** (issue #110) — the same
@@ -93,8 +91,9 @@ enum BoundaryReencodeEngine {
     ///
     /// The recipe was de-risked end-to-end on a real PAFF slice (decodes `-xerror` to EOF
     /// clean, seam clean, `field_order` preserved, strict-DTS clean once muxed):
-    ///   - `+ildct+ilme` + `-top` (from `field_order`: `tt`/`tb` ⇒ top-field-first ⇒ 1,
-    ///     `bb`/`bt` ⇒ 0) keep the output interlaced TFF/BFF matching the source scan;
+    ///   - `+ildct+ilme` on the encoder plus the `fieldOrderFilter` scan filter (from
+    ///     `field_order`: `tt`/`tb` ⇒ top-field-first, `bb`/`bt` ⇒ bottom-field-first) keep the
+    ///     output interlaced TFF/BFF matching the source scan;
     ///   - **`-crf 18` is a fixed engine constant**, not a user control — visually lossless
     ///     (VMAF ≈ 99, ~1.33× source bitrate), well above the app's crf-23 default, the
     ///     quality a repair-only export owes a broadcast capture;
@@ -110,12 +109,58 @@ enum BoundaryReencodeEngine {
     /// `ExportEngine.parameterSetRepeatFilter`). Keeping it here too would emit a second
     /// `-bsf:v` that silently replaced the first rather than adding to it.
     static func mbaffRepairVideoArgs(fieldOrder: String?) -> [String] {
-        let top = (fieldOrder == "bb" || fieldOrder == "bt") ? "0" : "1"
+        // The tail is always field-coded, so an indefinite order falls back to top-first
+        // rather than to no field filter at all.
+        let filter = fieldOrderFilter(fieldOrder) ?? fieldOrderFilter("tt")!
         return [
-            "-c:v", "libx264", "-flags", "+ildct+ilme", "-top", top,
+            "-c:v", "libx264", "-flags", "+ildct+ilme",
             "-preset", "medium", "-crf", "18", "-forced-idr", "1",
             "-x264-params", "ref=5:keyint=25:scenecut=0:open_gop=0:b-pyramid=0:level=4.0",
+            "-vf", filter,
         ]
+    }
+
+    /// The filter that makes a re-encoded piece carry `fieldOrder`'s scan direction —
+    /// `tt`/`tb` ⇒ top-field-first, `bb`/`bt` ⇒ bottom-field-first, anything else nil.
+    /// It **forces** the direction, so a measured order (issue #60) still wins over what
+    /// the decoded frames happen to declare.
+    ///
+    /// ffmpeg 9 removed `-top` as an encoding option (issue #117), and its `-field_order`
+    /// output option is accepted but has no effect on the encode — the encoder reads the
+    /// scan direction off the frames only. So the direction has to be set in the filter
+    /// chain. `-flags +ildct+ilme` on the encoder is still what makes the piece interlaced;
+    /// this filter is only what decides which field leads. De-risked on real MPEG-2 and
+    /// PAFF H.264 in .mpg/.ts/.mkv/.mp4, both directions, at frame level (ADR-0009,
+    /// ADR-0022).
+    static func fieldOrderFilter(_ fieldOrder: String?) -> String? {
+        switch fieldOrder {
+        case "tt", "tb": return "setparams=field_mode=tff"
+        case "bb", "bt": return "setparams=field_mode=bff"
+        default: return nil
+        }
+    }
+
+    /// Splits a `-vf` requirement out of an encoder argument array.
+    ///
+    /// An `-vf` pair inside encoder args is a filter the encode needs, not a chain of its
+    /// own. ffmpeg keeps only the **last** `-vf` on an output. So any builder that has its
+    /// own filter chain must merge this fragment onto the end of that chain, never pass the
+    /// array through untouched — passing it through would silently drop the builder's own
+    /// `select`/`setpts` and encode the wrong frames. Absent `-vf`, both results are the
+    /// input unchanged.
+    static func splitVideoFilter(_ encoder: [String]) -> (filter: String?, args: [String]) {
+        guard let i = encoder.firstIndex(of: "-vf"), i + 1 < encoder.count else {
+            return (nil, encoder)
+        }
+        var args = encoder
+        let filter = args[i + 1]
+        args.removeSubrange(i...(i + 1))
+        return (filter, args)
+    }
+
+    /// `chain` with an encoder's own `-vf` requirement appended last (`splitVideoFilter`).
+    private static func merged(_ chain: String, _ filter: String?) -> String {
+        filter.map { "\(chain),\($0)" } ?? chain
     }
 
     /// ffmpeg args to re-encode the partial-GOP presentation range `[range.lowerBound,
@@ -150,9 +195,11 @@ enum BoundaryReencodeEngine {
         let seek = index.pts[anchor] - startOffset
         let relStart = range.lowerBound - anchor
         let relEnd = range.upperBound - 1 - anchor
+        let (fieldFilter, encoderArgs) = splitVideoFilter(encoder)
         var args = ["-v", "error", "-ss", ExportEngine.timeString(seek), "-i", source.path]
-        args += ["-vf", "select='between(n\\,\(relStart)\\,\(relEnd))',setpts=PTS-STARTPTS"]
-        args += encoder
+        args += ["-vf", merged("select='between(n\\,\(relStart)\\,\(relEnd))',setpts=PTS-STARTPTS",
+                               fieldFilter)]
+        args += encoderArgs
         args += ["-bsf:v", ExportEngine.parameterSetRepeatFilter]
         if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
             args += ["-video_track_timescale", String(trackTimescale)]
@@ -213,8 +260,10 @@ enum BoundaryReencodeEngine {
         var args = ["-v", "error", "-ss", ExportEngine.timeString(seek)]
         args += ["-t", ExportEngine.timeString(spanEnd - (index.pts[anchor] - containerStart) + 1.0)]
         args += ["-i", source.path]
-        args += ["-vf", "select='\(select)',setpts=PTS-STARTPTS,fps=\(ConformEngine.fpsToken(frameRate, double: false))"]
-        args += encoder
+        let (fieldFilter, encoderArgs) = splitVideoFilter(encoder)
+        args += ["-vf", merged("select='\(select)',setpts=PTS-STARTPTS,fps="
+                               + ConformEngine.fpsToken(frameRate, double: false), fieldFilter)]
+        args += encoderArgs
         args += ["-bsf:v", ExportEngine.parameterSetRepeatFilter]
         if let trackTimescale, output.pathExtension.lowercased() == "mp4" {
             args += ["-video_track_timescale", String(trackTimescale)]

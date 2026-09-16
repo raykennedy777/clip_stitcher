@@ -112,3 +112,44 @@ leading-picture test):
   structure (not just a boolean) so it need not be rebuilt; and the user-facing model does **not**
   restrict M2 cuts to clean points (M2 cuts anywhere — it only re-encodes more), so no UI/data
   assumption bakes in the CLI-only limitation.
+
+## Amendment — 2026-09-16: `-top` replaced by a scan filter (issue #117)
+
+ffmpeg 9.0.1 removed `top` as an encoding option. Every interlaced re-encode failed to open
+its output with *"Codec AVOption top (top field first) is not a encoding option"*. The
+requirement is unchanged: a re-encoded piece must carry the source's scan direction.
+
+**What replaced it.** `-flags +ildct+ilme` stays on the encoder — it is what makes the piece
+interlaced. The direction now comes from a filter, `setparams=field_mode=tff|bff`, appended
+**last** in the video filter chain. ffmpeg 9's encoders read the direction off the frames only.
+
+**House convention.** `reencodeVideoArgs` and `mbaffRepairVideoArgs` carry that filter as a
+`-vf` pair inside the encoder argument array. ffmpeg keeps only the **last** `-vf` on an
+output. So a builder with its own chain must call `BoundaryReencodeEngine.splitVideoFilter`
+and merge the fragment onto the end of that chain. A builder that passes the array through
+would drop its own `select` and encode the wrong frames.
+
+**De-risk table.** All runs used `-flags +ildct+ilme`. Sources: real interlaced MPEG-2
+MPEG-PS (`field_order=tt`) and a real PAFF H.264 slice. Result is the probed `field_order`,
+confirmed at frame level with `interlaced_frame`/`top_field_first`.
+
+| Candidate | mpeg2video | libx264 | Verdict |
+|---|---|---|---|
+| `-top 0\|1` (old) | fails to open output | fails to open output | removed in ffmpeg 9 |
+| `-flags +ildct+ilme` alone | source order kept (tt→tt) | source order kept (tt→tt) | passthrough only; cannot force |
+| `setparams=field_mode=tff\|bff` last | tff→tt, bff→bb | tff→tff, bff→bff | **chosen** |
+| `setfield=tff\|bff` last | tff→tt, bff→bb | same | equivalent; `setparams` already used elsewhere |
+| `-field_order tt\|bb` | accepted, **no effect** (bb→tt) | accepted, **no effect** | silent no-op — a trap |
+| `-x264-params tff=0` | n/a | output came out progressive | not pursued |
+
+Containers: .mpg, .ts, .mkv and .mp4, both directions. Chains de-risked in their real shapes —
+`select,setpts,setparams`, `select,setpts,fps,setparams`, and the conform tail
+`…,setparams=color…unknown,setparams=field_mode=bff` (the colour strip survives; two
+`setparams` do not clobber each other, because each option defaults to *auto*).
+
+**Probe trap.** Stream-level `field_order` is container-dependent. MPEG-2 in MKV or MP4 reports
+`tb` for top-first. H.264 in MPEG-TS reports `tt` whichever field leads. Frame-level
+`top_field_first` is the authoritative probe.
+
+`FieldOrderReencodeIntegrationTests` now **runs** the builders' output and reads the field
+order back, in both directions. The string assertions alone let this break reach `main`.

@@ -112,3 +112,23 @@ untagged-HD-10-bit→France on libx264, France→tagged-601 interlaced MPEG-2, F
 10-bit HEVC; a solid-color pixel proof that conversion shifts YUV bytes to the textbook
 601→709 values while RGB under each side's correct interpretation stays equal; and byte-stable
 skip paths. The tagged→untagged strip command is pinned byte-exact by the existing unit tests.
+
+## Amendment — 2026-09-16: the conform's scan direction (issue #117)
+
+ffmpeg 9.0.1 removed `top` as an encoding option, so an interlaced MPEG-2 conform could no
+longer open its output. The conform must **set** a target scan direction that may differ from
+the source's, so a source-flag passthrough cannot serve it.
+
+The direction now comes from `setparams=field_mode=tff|bff`, appended as the **last** filter in
+the chain — after the fps tail and after the untagged-target colour strip. `-flags +ildct+ilme`
+stays on the encoder. The scope is exactly what `-top` had: an interlaced MPEG-2 target from an
+interlaced source. A **progressive** source is already served by the `interlace=scan=tff|bff`
+filter, which sets the direction itself.
+
+Two `setparams` in one chain do not clobber each other — every option defaults to *auto*, so
+each stage sets only what it names. Shell-proven: the colour strip stays `unknown` while the
+field direction is forced to `bff`. See ADR-0009's amendment for the full de-risk table and the
+`-field_order` no-op trap.
+
+**Known gap, not introduced here.** An interlaced H.264 or HEVC conform target still gets no
+interlace flags and no scan filter. It never got `-top` either. Out of scope for #117.

@@ -25,11 +25,12 @@ struct BoundaryReencodeEngineTests {
 
     @Test func mpeg2ReencodesInterlacedTopFieldFirst() {
         // ffmpeg carries SAR through automatically, so no -aspect is needed; the
-        // interlace flags preserve field_order=tt (verified in the shell).
+        // interlace flags plus the scan filter preserve field_order=tt (verified in the shell).
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "tt", bitrate: 2_530_995)
-            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-flags", "+ildct+ilme", "-top", "1",
-                "-b:v", "3163744", "-maxrate", "4745616", "-bufsize", "6327488"])
+            == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-flags", "+ildct+ilme",
+                "-b:v", "3163744", "-maxrate", "4745616", "-bufsize", "6327488",
+                "-vf", "setparams=field_mode=tff"])
     }
 
     @Test func progressiveMpeg2HasNoInterlaceFlags() {
@@ -38,6 +39,52 @@ struct BoundaryReencodeEngineTests {
             bitrate: 2_530_995)
             == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p",
                 "-b:v", "3163744", "-maxrate", "4745616", "-bufsize", "6327488"])
+    }
+
+    // MARK: scan direction merged into the chain (issue #117)
+
+    /// The encoder array carries the scan filter as a `-vf` pair. ffmpeg keeps only the last
+    /// `-vf` on an output, so a segment builder must merge that fragment onto the end of its
+    /// own chain — passing the array through would drop the `select` and encode the wrong
+    /// frames. These pin one chain per command, with the scan filter last.
+    @Test func aSegmentBuilderMergesTheEncodersScanFilterIntoItsOwnChain() {
+        let index = FrameIndex(
+            pts: [0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let boundary = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 4..<8, index: index,
+            encoder: BoundaryReencodeEngine.reencodeVideoArgs(
+                codec: "mpeg2video", pixelFormat: "yuv420p", fieldOrder: "tt"),
+            output: out)
+        #expect(boundary.filter { $0 == "-vf" }.count == 1)
+        let boundaryChain = boundary[boundary.firstIndex(of: "-vf")! + 1]
+        #expect(boundaryChain.hasPrefix("select="))
+        #expect(boundaryChain.hasSuffix(",setparams=field_mode=tff"))
+
+        let repaired = BoundaryReencodeEngine.repairedSegmentArguments(
+            source: src, range: 4..<8, index: index, zones: [], containerStart: 0,
+            frameRate: "25/1",
+            encoder: BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "bb"),
+            output: out)
+        #expect(repaired.filter { $0 == "-vf" }.count == 1)
+        #expect(repaired[repaired.firstIndex(of: "-vf")! + 1]
+            .hasSuffix(",setparams=field_mode=bff"))
+    }
+
+    /// A progressive source carries no scan filter, so both chains stay exactly what they were.
+    @Test func aProgressiveEncoderLeavesTheChainUntouched() {
+        let index = FrameIndex(
+            pts: [0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28],
+            keyframeFlags: [true, false, false, false, true, false, false, false])
+        let encoder = BoundaryReencodeEngine.reencodeVideoArgs(
+            codec: "h264", pixelFormat: "yuv420p", fieldOrder: "progressive")
+        #expect(!encoder.contains("-vf"))
+        let (filter, args) = BoundaryReencodeEngine.splitVideoFilter(encoder)
+        #expect(filter == nil)
+        #expect(args == encoder)
+        let boundary = BoundaryReencodeEngine.reencodeSegmentArguments(
+            source: src, range: 4..<8, index: index, encoder: encoder, output: out)
+        #expect(!boundary[boundary.firstIndex(of: "-vf")! + 1].contains("setparams"))
     }
 
     // MARK: rate control (issue #110)
@@ -94,12 +141,12 @@ struct BoundaryReencodeEngineTests {
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "hevc", profile: "Main 10", pixelFormat: "yuv420p10le", fieldOrder: "unknown")
             == ["-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-profile:v", "main10", "-crf", "18"])
-        // The profile arg precedes the interlace flags for MPEG-2, and the rate control
-        // closes the array — the exact order de-risked in the shell.
+        // The profile arg precedes the interlace flags for MPEG-2, the rate control follows,
+        // and the scan filter closes the array — the exact order de-risked in the shell.
         #expect(BoundaryReencodeEngine.reencodeVideoArgs(
             codec: "mpeg2video", profile: "Main", pixelFormat: "yuv420p", fieldOrder: "tt")
             == ["-c:v", "mpeg2video", "-pix_fmt", "yuv420p", "-profile:v", "main",
-                "-flags", "+ildct+ilme", "-top", "1", "-q:v", "2"])
+                "-flags", "+ildct+ilme", "-q:v", "2", "-vf", "setparams=field_mode=tff"])
     }
 
     /// An unrecognised profile is omitted rather than guessed (a wrong token aborts the
@@ -605,12 +652,12 @@ struct BoundaryReencodeEngineTests {
 
     // MARK: - MBAFF field-coded tail encoder (issue #54)
 
-    /// `-top` follows the source scan order: top-field-first stays 1, bottom-field-first 0.
-    @Test func mbaffRepairArgsCarryTheInterlaceFlagsCrf18AndTopFromFieldOrder() {
+    /// The scan filter follows the source scan order: top-field-first stays tff, bottom-first bff.
+    @Test func mbaffRepairArgsCarryTheInterlaceFlagsCrf18AndScanFromFieldOrder() {
         let tff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt")
         #expect(tff.contains("libx264"))
         #expect(tff[tff.firstIndex(of: "-flags")! + 1] == "+ildct+ilme")
-        #expect(tff[tff.firstIndex(of: "-top")! + 1] == "1")
+        #expect(tff[tff.firstIndex(of: "-vf")! + 1] == "setparams=field_mode=tff")
         #expect(tff[tff.firstIndex(of: "-crf")! + 1] == "18")        // fixed, visually lossless
         #expect(tff[tff.firstIndex(of: "-forced-idr")! + 1] == "1")  // clean IDR entry seam
         let params = tff[tff.firstIndex(of: "-x264-params")! + 1]
@@ -621,6 +668,9 @@ struct BoundaryReencodeEngineTests {
         #expect(!tff.contains("-bsf:v"))
 
         let bff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "bb")
-        #expect(bff[bff.firstIndex(of: "-top")! + 1] == "0")
+        #expect(bff[bff.firstIndex(of: "-vf")! + 1] == "setparams=field_mode=bff")
+        // An indefinite order can't leave the always-field-coded tail without a direction.
+        let unknown = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: nil)
+        #expect(unknown[unknown.firstIndex(of: "-vf")! + 1] == "setparams=field_mode=tff")
     }
 }

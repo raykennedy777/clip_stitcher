@@ -241,6 +241,17 @@ by 2×. Clip Doctor *can* repair a field-coded H.264 source (issue #54), via dam
 independent of the copy-cut route.
 _Avoid_: interlaced (ambiguous — MBAFF is also interlaced), PAFF without the plain-language gloss
 
+**Scan direction**:
+Which field of an interlaced frame is shown first — top-field-first or bottom-field-first. A
+re-encoded piece must carry the source's direction, or the fields play in the wrong order,
+which shows as judder on motion. The engine sets it with a `setparams=field_mode=tff|bff` filter
+placed last in the filter chain; `-flags +ildct+ilme` on the encoder is a separate thing, and
+only says the piece is interlaced. ffmpeg 9 removed the old `-top` encoder flag and its
+`-field_order` output option does nothing, so the filter is the only way (issue #117,
+ADR-0009). The conform **sets** a direction the target asks for; every other re-encode
+**keeps** the source's, measured with `idet` when the probed value is indefinite.
+_Avoid_: field order for the flag itself (that is ffprobe's `field_order` value), `-top`
+
 **Copy-cut route**:
 The field-coded (H.264) cut/join path (issue #96, ADR-0024): every in point, out point, and
 split point snaps to a copy-safe boundary so the resulting export plan is pure stream copy with

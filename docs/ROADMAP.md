@@ -72,8 +72,9 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
 ## Standing risks — test early
 
 - ~~**Interlaced MPEG-2.**~~ *Retired:* the MPEG-2 re-encode preserves field order
-  (`-flags +ildct+ilme -top 1`), verified in the shell (ADR-0009). The real open-GOP risk is the
-  leading-picture seam, which is codec-orthogonal — handled by copying only between
+  (`-flags +ildct+ilme` + a `setparams=field_mode=tff` scan filter), verified in the shell
+  (ADR-0009). The real open-GOP risk is the leading-picture seam, which is
+  codec-orthogonal — handled by copying only between
   leading-picture-free keyframes.
 - **Audio alignment at cuts.** Expect to handle A/V offset at join boundaries (audio gap
   correction).
