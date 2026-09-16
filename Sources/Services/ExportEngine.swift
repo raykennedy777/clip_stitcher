@@ -162,16 +162,59 @@ enum ExportEngine {
         case external(URL, stream: Int)
     }
 
+    /// Input flag that gives a stream-copied MPEG-**PS** piece the *right* missing PTS
+    /// (issue #116). An MPEG-PS PES packet carries one timestamp. When the muxer packs two
+    /// access units into one PES, the second loses its PTS — and that second one is an
+    /// **anchor** (I or P) picture, whose PTS leads its DTS by the reorder delay. Refilling
+    /// it from its own DTS therefore lands it `bf` frames early, on the previous anchor's
+    /// PTS. Matroska writes the duplicate, the decode of the finished piece emits two frames
+    /// on one timestamp, and `-f null -` prints "non monotonically increasing dts to muxer".
+    /// The piece is correct; only its timestamps are wrong, so `requireSilentDecode`
+    /// (ADR-0030) refused a good piece. Measured on both a synthetic `.mpg` and a real
+    /// MPEG-PS capture: 6 missing-PTS packets, 6 error lines, 0 with this flag.
+    ///
+    /// `+genpts` makes the **demuxer** derive the missing PTS by reordering the DTS it has
+    /// already read, so the anchor gets its true presentation time and the piece decodes
+    /// silently. It fills only packets that have no PTS — on a fully-stamped source it is
+    /// the identity (verified: MPEG-2, H.264 and HEVC `.ts`→`.mkv` copies come out with
+    /// byte-identical packet timestamps and identical framecrc). It does not move the
+    /// `-ss` landing of ADR-0027 (verified: same packet, same crc), and the copied payload
+    /// stays bit-exact.
+    ///
+    /// Scoped exactly like `ptsRefillBitstreamFilter`, and used **with** it, not instead of
+    /// it: `setts` stays as the fallback that keeps the muxer fed when `+genpts` cannot
+    /// derive a timestamp at all, which is the damaged-source guarantee of issue #47.
+    /// Where `+genpts` has already filled a packet, `setts` is the identity.
+    ///
+    /// Issue #2 tried `+genpts` and rejected it. That was a different failure — the
+    /// *mux-time* "Can't write packet with unknown timestamp" on the old cut/concat shape —
+    /// and a different ffmpeg. On ffmpeg 9 the refill is still needed (without any refill
+    /// the MKV mux still drops the packet and the piece comes out short), and `+genpts`
+    /// now satisfies it.
+    static func ptsRefillInputFlags(codec: String?, ext: String, damaged: Bool = false) -> [String] {
+        guard codec == "mpeg2video" || damaged, ext.lowercased() == "mkv" else { return [] }
+        return ["-fflags", "+genpts"]
+    }
+
     /// Output bitstream filter that makes matroska accept stream-copied MPEG-2 (issue #2).
     /// Real MPEG-PS broadcast captures carry occasional video packets with **no PTS at
     /// all** (the second frame of each duplicated-timestamp anomaly — the broadcast fixture has
     /// them; even a plain whole-file remux failed with "Can't write packet with unknown
     /// timestamp"). TS and MP4 tolerate a missing PTS; matroska refuses the packet. The
-    /// `setts` filter refills exactly those packets' PTS from their DTS — the same refill
-    /// `FrameIndexer.parseIndex` applies when numbering frames (ADR-0006), so the muxed
-    /// timestamps agree with the app's frame index and the verify gate's source pattern.
-    /// All other packets pass through untouched, so on a fully-stamped source it is the
-    /// identity. Scoped to mpeg2video→MKV — plus any **damaged** clip→MKV (issue #47):
+    /// `setts` filter refills those packets' PTS from their DTS — the same refill
+    /// `FrameIndexer.parseIndex` applies when numbering frames (ADR-0006). All other packets
+    /// pass through untouched, so on a fully-stamped source it is the identity.
+    ///
+    /// It is now the **fallback**, not the first refill. `ptsRefillInputFlags` runs `+genpts`
+    /// on the demuxer ahead of it and gives an anchor picture its true reordered PTS, which a
+    /// DTS refill cannot (issue #116). `setts` keeps the muxer fed for any packet `+genpts`
+    /// still cannot resolve — the damaged-source guarantee below. So the muxed timestamps no
+    /// longer always match the source frame index at those packets. That is deliberate: the
+    /// index's own DTS refill displaces the frame by up to the reorder depth, which
+    /// `timestampDefect` already tolerates inside its ±3-interval match radius, and the cut
+    /// point itself is taken from the DTS (`FrameIndex.segmentTime`), never the PTS.
+    ///
+    /// Scoped to mpeg2video→MKV — plus any **damaged** clip→MKV (issue #47):
     /// a damaged source carries no-PTS packets whatever its codec (the 1844 capture's
     /// truncated pictures), and they kill the MKV copy cut even when the kept window is
     /// clean, because the segment muxer writes the *discarded* segments too. Validated
@@ -448,8 +491,9 @@ enum ExportEngine {
     /// open-GOP HEVC into `.mkv`, `.mp4` and `.ts`.
     static func cutArguments(source: URL, plan: SegmentPlan, segmentPattern: String,
                              bitstreamFilter: [String] = [], trackTimescale: Int? = nil,
-                             headSeek: CopyHeadSeek? = nil) -> [String] {
+                             headSeek: CopyHeadSeek? = nil, inputFlags: [String] = []) -> [String] {
         var args = ["-v", "error"]
+        args += inputFlags
         if let headSeek { args += ["-ss", Self.timeString(headSeek.seek)] }
         args += ["-i", source.path, "-map", "0:v:0", "-c", "copy"]
         args += bitstreamFilter
@@ -473,8 +517,9 @@ enum ExportEngine {
     /// ffmpeg args to copy a whole clip's **video** to a single file (no cut). Used when
     /// the plan trims neither end.
     static func remuxArguments(source: URL, output: URL, bitstreamFilter: [String] = [],
-                               trackTimescale: Int? = nil) -> [String] {
-        var args = ["-v", "error", "-i", source.path, "-map", "0:v:0", "-c", "copy"]
+                               trackTimescale: Int? = nil, inputFlags: [String] = []) -> [String] {
+        var args = ["-v", "error"] + inputFlags
+        args += ["-i", source.path, "-map", "0:v:0", "-c", "copy"]
         args += bitstreamFilter
         if let trackTimescale { args += ["-video_track_timescale", String(trackTimescale)] }
         args.append(output.path)

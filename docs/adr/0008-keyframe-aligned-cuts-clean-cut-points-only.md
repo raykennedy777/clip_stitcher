@@ -45,6 +45,18 @@ on its own.
     fully-stamped sources. Every other codec×container command is byte-identical to its
     validated shape. De-risked on the real broadcast capture end-to-end (cut, re-encode, concat,
     chained remux, audio mux — frame-exact, clean decode, verify gates pass).
+  - **Amended 2026-09-16 (issue #116):** the same runs also carry `-fflags +genpts` on the
+    **input**, and the `setts` filter above is now the fallback behind it. An MPEG-PS PES packet
+    carries one timestamp, so the second access unit packed into one PES loses its PTS — and
+    that one is an **anchor** (I or P) picture, whose PTS leads its DTS by the reorder delay.
+    Refilling it from its own DTS put it `bf` frames early, on the previous anchor's PTS, and
+    the finished MKV piece then failed the verify decode ("non monotonically increasing dts to
+    muxer") although its pictures were correct. `+genpts` makes the demuxer derive the true
+    reordered PTS instead. It fills only packets that have no PTS, so a fully-stamped source is
+    unaffected: MPEG-2, H.264 and HEVC `.ts`→`.mkv` copies come out with identical packet
+    timestamps and identical framecrc, and the `-ss` landing of ADR-0027 does not move.
+    `setts` stays in the chain for any packet `+genpts` still cannot resolve, which is the
+    damaged-source guarantee of ADR-0020.
   where each `segment_time` is the **midpoint between the target cut-point's DTS (decode time) and
   the DTS of the packet decoded immediately before it**. The segment muxer splits at the first
   keyframe whose **decode** time is `>=` the requested time, so the value must be derived from DTS,

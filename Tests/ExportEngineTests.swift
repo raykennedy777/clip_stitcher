@@ -88,6 +88,56 @@ struct ExportEngineTests {
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "ts", damaged: true).isEmpty)
     }
 
+    /// An MPEG-PS PES packet carries one timestamp, so the second access unit packed into
+    /// one PES loses its PTS — and that one is an anchor picture, whose PTS leads its DTS by
+    /// the reorder delay. The `setts` fallback would put it `bf` frames early, on the
+    /// previous anchor's PTS, and the finished MKV piece then failed the verify decode with
+    /// "non monotonically increasing dts to muxer" though its pictures were correct
+    /// (issue #116). `+genpts` makes the demuxer derive the true reordered PTS instead.
+    @Test func mpeg2IntoMkvAlsoGetsTheDemuxerPtsRefill() {
+        #expect(ExportEngine.ptsRefillInputFlags(codec: "mpeg2video", ext: "mkv")
+            == ["-fflags", "+genpts"])
+        // Same scope as the bitstream half, so the two always travel together.
+        #expect(ExportEngine.ptsRefillInputFlags(codec: "h264", ext: "mkv", damaged: true)
+            == ["-fflags", "+genpts"])
+        #expect(ExportEngine.ptsRefillInputFlags(codec: "hevc", ext: "mkv", damaged: true)
+            == ["-fflags", "+genpts"])
+        for codec in ["hevc", "h264", "mpeg2video", nil] {
+            for ext in ["mkv", "mp4", "ts"] {
+                for damaged in [false, true] {
+                    let flags = ExportEngine.ptsRefillInputFlags(
+                        codec: codec, ext: ext, damaged: damaged)
+                    let bsf = ExportEngine.ptsRefillBitstreamFilter(
+                        codec: codec, ext: ext, damaged: damaged)
+                    #expect(flags.isEmpty == bsf.isEmpty)
+                }
+            }
+        }
+    }
+
+    /// The flag is an *input* option, so it has to reach the command line before `-i` —
+    /// after it, ffmpeg would read it as an output option and the demuxer would never see it.
+    @Test func theDemuxerPtsRefillReachesTheCommandBeforeTheInput() {
+        let flags = ExportEngine.ptsRefillInputFlags(codec: "mpeg2video", ext: "mkv")
+        let plan = SegmentPlan(inFrame: 10, outFrame: 20, inSegmentTime: 1.0, outSegmentTime: 2.0)
+        let cut = ExportEngine.cutArguments(
+            source: src, plan: plan, segmentPattern: "/tmp/p_%03d.mkv",
+            headSeek: ExportEngine.CopyHeadSeek(seek: 5.0, origin: 4.8), inputFlags: flags)
+        #expect(cut.firstIndex(of: "-fflags")! < cut.firstIndex(of: "-i")!)
+        #expect(cut[cut.firstIndex(of: "-fflags")! + 1] == "+genpts")
+        // The seek still precedes the input too (issue #108), and nothing else moved.
+        #expect(cut.firstIndex(of: "-ss")! < cut.firstIndex(of: "-i")!)
+
+        let remux = ExportEngine.remuxArguments(
+            source: src, output: URL(fileURLWithPath: "/tmp/o.mkv"), inputFlags: flags)
+        #expect(remux.firstIndex(of: "-fflags")! < remux.firstIndex(of: "-i")!)
+
+        // No flags means the validated command shapes are byte-identical to before.
+        #expect(ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
+            == ExportEngine.cutArguments(source: src, plan: plan,
+                                         segmentPattern: "/tmp/p_%03d.ts", inputFlags: []))
+    }
+
     @Test func everyOtherCodecContainerComboKeepsItsValidatedCommandShape() {
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "ts").isEmpty)
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mp4").isEmpty)

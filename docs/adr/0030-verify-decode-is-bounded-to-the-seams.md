@@ -221,3 +221,40 @@ The rule is never the other way round: a window is not made to pass by relaxing
   `-f null -` decode, so `requireSilentDecode` refuses a correct piece. It reproduces on a
   bare `ffmpeg -i src.mpg -c copy -bsf:v setts=… out.mkv` — the join is not involved — and it
   is why this de-risk uses an MPEG-2 `.ts` source. Filed as issue #116; #114 does not touch it.
+
+  **Resolved 2026-09-16 (issue #116).** The mechanism is the refill, not the gate. An
+  MPEG-PS PES packet carries one timestamp. When the muxer packs two access units into one
+  PES, the second loses its PTS — and that second one is an **anchor** (I or P) picture,
+  whose PTS leads its DTS by the reorder delay. The `setts` refill of ADR-0008 filled it
+  from its own DTS, which placed it `bf` frames early, on the previous anchor's PTS.
+  Matroska wrote the duplicate and the decode emitted two frames on one timestamp.
+  Measured: 6 missing-PTS packets in a synthetic 180 s `.mpg` and 6 in a 60 s window of a
+  real MPEG-PS capture, and 6 error lines in each.
+
+  The recipe is `-fflags +genpts` on the **input** of the copy cut and the whole-clip
+  remux, under the same scope as the `setts` refill (`ExportEngine.ptsRefillInputFlags`).
+  The demuxer then derives the true reordered PTS. `setts` stays behind it as the fallback
+  for a packet `+genpts` cannot resolve — the damaged-source guarantee of ADR-0020 — and is
+  the identity wherever `+genpts` has already filled the packet.
+
+  | copy → `.mkv` | no refill | `setts` only | `+genpts` only | both (shipped) |
+  |---|---|---|---|---|
+  | synthetic 180 s `.mpg` | mux drops 6 packets (4500 → 337) | noisy, 6 lines | silent | **silent** |
+  | real MPEG-PS capture, 60 s | mux drops 6 packets (1503 → 537) | noisy, 6 lines | silent | **silent** |
+  | the same cut through the segment muxer, with and without a head seek | — | noisy, 4 lines | — | **silent** |
+  | mpeg2 `.ts` | — | silent † | — | **silent** ‡ |
+  | h264 `.ts` | — | silent † | — | **silent** ‡ |
+  | hevc `.ts` | — | silent † | — | **silent** ‡ |
+
+  † the chain that actually ships for that source, which is `setts` for mpeg2 and
+  `mp4toannexb` for H.264/HEVC. ‡ that same chain plus `+genpts`. A clean H.264 or HEVC
+  source is outside the refill's scope and does not ship the flag; the row measures that
+  it would be harmless if the scope ever widened.
+
+  Every measured cell keeps the source's packet count and leaves no frame without a PTS.
+  The last three rows are the regression check: their sources are fully stamped, so
+  `+genpts` is the identity there — the copies come out with identical packet timestamps
+  and identical framecrc with and without it. The copied payload is
+  bit-exact in every cell, and the `-ss` landing of ADR-0027 does not move (same packet,
+  same crc, measured at three asks on the real capture). The gate itself is unchanged —
+  `requireSilentDecode` was right and the piece's timestamps were wrong.
