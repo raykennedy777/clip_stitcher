@@ -14,6 +14,11 @@ enum BoundaryReencodeEngine {
     /// interlaced MPEG-2, the field flags that preserve `field_order`. SAR is carried
     /// through by ffmpeg automatically, so no `-aspect` is needed (verified).
     ///
+    /// An interlaced MPEG-2 source also gets a `-vf` pair with its scan-direction filter
+    /// (issue #117, ADR-0009). That pair is a requirement, not a chain of its own. ffmpeg
+    /// keeps only the last `-vf`, so every caller with its own filter chain must run the
+    /// result through `splitVideoFilter` and append the filter to that chain.
+    ///
     /// In practice the pixel format already pins the profile for the common cases
     /// (yuv420p10le ⇒ libx265 main10, yuv420p ⇒ libx264 high / mpeg2 main — all verified
     /// against the real footage). `-profile:v` is added for robustness so an *unusual*
@@ -111,7 +116,7 @@ enum BoundaryReencodeEngine {
     static func mbaffRepairVideoArgs(fieldOrder: String?) -> [String] {
         // The tail is always field-coded, so an indefinite order falls back to top-first
         // rather than to no field filter at all.
-        let filter = fieldOrderFilter(fieldOrder) ?? fieldOrderFilter("tt")!
+        let filter = fieldOrderFilter(fieldOrder) ?? topFirstScanFilter
         return [
             "-c:v", "libx264", "-flags", "+ildct+ilme",
             "-preset", "medium", "-crf", "18", "-forced-idr", "1",
@@ -140,7 +145,12 @@ enum BoundaryReencodeEngine {
         }
     }
 
-    /// Splits a `-vf` requirement out of an encoder argument array.
+    /// The top-field-first scan filter, for a path that must set a direction when the probed
+    /// `field_order` is indefinite (`fieldOrderFilter` returns nil). Top-first is the
+    /// fallback `-top 1` used to give those paths (ADR-0022).
+    static let topFirstScanFilter = "setparams=field_mode=tff"
+
+    /// Splits a `-vf` requirement out of an encoder argument array (issue #117, ADR-0009).
     ///
     /// An `-vf` pair inside encoder args is a filter the encode needs, not a chain of its
     /// own. ffmpeg keeps only the **last** `-vf` on an output. So any builder that has its

@@ -81,7 +81,7 @@ enum ClipDoctorEngine {
     enum DoctorError: LocalizedError {
         case destinationExists(URL)
         case destinationIsSource
-        /// A field-coded source whose scan order is neither labelled nor measurable (issue
+        /// A field-coded source whose scan direction is neither labelled nor measurable (issue
         /// #60): repairing it would risk re-encoding the damage-to-EOF tail with the wrong
         /// field polarity (combing on motion), which the auto-verify can't catch — so refuse.
         case fieldOrderUndetermined
@@ -98,7 +98,7 @@ enum ClipDoctorEngine {
                 return "The repaired file would overwrite the source; refusing."
             case .fieldOrderUndetermined:
                 return "This clip’s field order couldn’t be determined, so it can’t be safely repaired — "
-                    + "repairing it could reverse the fields. It needs a known top- or bottom-field-first scan order."
+                    + "repairing it could reverse the fields. It needs a known top- or bottom-field-first scan direction."
             case .unsupportedFieldCodedCodec(let codec):
                 let named = codec.map { "\(displayCodecName($0)) " } ?? ""
                 return "Field-coded \(named)clips can’t be repaired yet — Clip Doctor’s field-coded repair "
@@ -187,10 +187,10 @@ enum ClipDoctorEngine {
 
     // MARK: - Field order detection (#60)
 
-    /// Whether a probed `field_order` is a definite scan order the repair can trust without
+    /// Whether a probed `field_order` is a definite scan direction the repair can trust without
     /// measuring (issue #60): ffprobe's four interlaced labels. `nil`, `"unknown"`,
     /// `"progressive"` (a field-coded source mislabelled), or any unrecognised token is **not**
-    /// definite — the MBAFF tail's scan order must be *measured* with `idet` rather than defaulting
+    /// definite — the MBAFF tail's scan direction must be *measured* with `idet` rather than defaulting
     /// to top-first, which would field-reverse a bottom-first source's whole damage-to-EOF tail.
     static func isDefiniteFieldOrder(_ fieldOrder: String?) -> Bool {
         switch fieldOrder {
@@ -232,10 +232,10 @@ enum ClipDoctorEngine {
         return IdetTally(tff: tff, bff: bff, progressive: prog, undetermined: und)
     }
 
-    /// The scan order an `idet` tally implies, or `nil` when the measurement is inconclusive
+    /// The scan direction an `idet` tally implies, or `nil` when the measurement is inconclusive
     /// (issue #60). Decisive only when the interlaced frames clearly dominate the sample **and**
     /// one polarity clearly dominates the interlaced frames (≥ 90 %) — otherwise refuse rather
-    /// than guess a scan order that could field-reverse the whole tail. Returns `"tt"` (TFF) or
+    /// than guess a scan direction that could field-reverse the whole tail. Returns `"tt"` (TFF) or
     /// `"bb"` (BFF), the two orders the MBAFF scan filter distinguishes.
     static func fieldOrderFromIdet(_ tally: IdetTally) -> String? {
         let interlaced = tally.tff + tally.bff
@@ -469,7 +469,7 @@ enum ClipDoctorEngine {
         let plan: [PlannedSegment]
         let encoder: [String]
         if fieldCoded {
-            // The MBAFF tail's scan filter follows the source scan order. Trust a definite probed
+            // The MBAFF tail's scan filter follows the source scan direction. Trust a definite probed
             // `field_order`; otherwise measure it with `idet` rather than assume top-first
             // (issue #60) — and refuse if even that is inconclusive, since a wrong polarity
             // field-reverses the whole tail and the auto-verify can't catch it.
@@ -617,7 +617,7 @@ enum ClipDoctorEngine {
         }
     }
 
-    /// Resolves the source's scan order for the MBAFF tail's scan filter (issue #60). A
+    /// Resolves the source's scan direction for the MBAFF tail's scan filter (issue #60). A
     /// definite probed `field_order` (`tt`/`tb`/`bb`/`bt`) is trusted as-is — the fast path, no
     /// extra decode, the case the real labelled captures take. Otherwise the order is *measured*
     /// with a short `idet` pass rather than silently defaulting to top-first, which would

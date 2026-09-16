@@ -192,8 +192,14 @@ enum ExportEngine {
     /// the MKV mux still drops the packet and the piece comes out short), and `+genpts`
     /// now satisfies it.
     static func ptsRefillInputFlags(codec: String?, ext: String, damaged: Bool = false) -> [String] {
-        guard codec == "mpeg2video" || damaged, ext.lowercased() == "mkv" else { return [] }
-        return ["-fflags", "+genpts"]
+        needsPtsRefill(codec: codec, ext: ext, damaged: damaged) ? ["-fflags", "+genpts"] : []
+    }
+
+    /// The one scope both halves of the PTS refill share (issues #2, #47, #116): an MPEG-2
+    /// stream, or any damaged stream, copied into Matroska. TS and MP4 tolerate a packet
+    /// with no PTS, so they get neither half.
+    static func needsPtsRefill(codec: String?, ext: String, damaged: Bool) -> Bool {
+        (codec == "mpeg2video" || damaged) && ext.lowercased() == "mkv"
     }
 
     /// Output bitstream filter that makes matroska accept stream-copied MPEG-2 (issue #2).
@@ -221,8 +227,7 @@ enum ExportEngine {
     /// on the real capture in the shell (refill → exit 0; without → "Can't write packet
     /// with unknown timestamp"). Every clean clip's command stays byte-identical.
     static func ptsRefillBitstreamFilter(codec: String?, ext: String, damaged: Bool = false) -> [String] {
-        guard codec == "mpeg2video" || damaged, ext.lowercased() == "mkv" else { return [] }
-        return ["-bsf:v", ptsRefillFilter]
+        needsPtsRefill(codec: codec, ext: ext, damaged: damaged) ? ["-bsf:v", ptsRefillFilter] : []
     }
 
     /// The `setts` refill from `ptsRefillBitstreamFilter`, as a bare filter so it can be

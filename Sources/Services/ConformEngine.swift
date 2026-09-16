@@ -405,7 +405,8 @@ enum ConformEngine {
         // source is already served by the `interlace=scan=…` filter above. This is the
         // MPEG-2 path only — the same scope `-top` had (ADR-0011).
         if tgtInterlaced, srcInterlaced, target.codec == "mpeg2video" {
-            filters.append("setparams=field_mode=\(topFieldFirst(target.fieldOrder) ? "tff" : "bff")")
+            filters.append(BoundaryReencodeEngine.fieldOrderFilter(target.fieldOrder)
+                ?? BoundaryReencodeEngine.topFirstScanFilter)
         }
         return filters
     }

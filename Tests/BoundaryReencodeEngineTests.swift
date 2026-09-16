@@ -694,7 +694,7 @@ struct BoundaryReencodeEngineTests {
 
     // MARK: - MBAFF field-coded tail encoder (issue #54)
 
-    /// The scan filter follows the source scan order: top-field-first stays tff, bottom-first bff.
+    /// The scan filter follows the source scan direction: top-field-first stays tff, bottom-first bff.
     @Test func mbaffRepairArgsCarryTheInterlaceFlagsCrf18AndScanFromFieldOrder() {
         let tff = BoundaryReencodeEngine.mbaffRepairVideoArgs(fieldOrder: "tt")
         #expect(tff.contains("libx264"))
