@@ -22,9 +22,27 @@ struct PlanReport: Codable, Equatable {
     /// The target clip's index in `clips` — the clip whose spec the others conform to.
     var target: Int
     var clips: [ClipPlan]
+    /// The job's output frames by how each one is produced. The three counts sum to the
+    /// clips' `expectedFrames`.
+    var totals: Totals
     var audio: Audio
     /// The same notices the export prints to stderr, in the same order.
     var warnings: [String]
+
+    // MARK: - Totals
+
+    /// Where a job's output frames come from — the split that sets a render's wall time,
+    /// because only the two encoded kinds run an encoder. Counted in output frames, the
+    /// unit of `ClipPlan.expectedFrames`: a repaired segment counts its slot budget, and a
+    /// field-coded source counts frames, not fields.
+    struct Totals: Codable, Equatable {
+        /// Frames stream-copied from a source.
+        var copiedFrames: Int
+        /// Frames a smart-rendered clip re-encodes at its boundaries, repairs included.
+        var reEncodedFrames: Int
+        /// Frames a conformed clip re-encodes to the target's spec.
+        var conformedFrames: Int
+    }
 
     // MARK: - Output
 
@@ -221,6 +239,7 @@ struct PlanReport: Codable, Equatable {
                            conformCrf: settings.conformCrf),
             target: prepared.targetIndex,
             clips: clips,
+            totals: totals(prepared: prepared),
             audio: audio,
             warnings: prepared.warnings)
     }
@@ -343,23 +362,56 @@ struct PlanReport: Codable, Equatable {
     /// On an audio-only output the file has no video; the count still measures the kept
     /// video range, which is the span each audio leg is rebuilt over (ADR-0014).
     static func expectedFrames(item: ExportItem, kept: Range<Int>, index: FrameIndex) -> Int {
+        let split = frameSplit(item: item, kept: kept, index: index)
+        return split.copiedFrames + split.reEncodedFrames + split.conformedFrames
+    }
+
+    /// One clip's `expectedFrames`, split by how each frame is produced. The arithmetic
+    /// is `expectedFrames`' own (see there), so the split always sums to it.
+    static func frameSplit(item: ExportItem, kept: Range<Int>, index: FrameIndex) -> Totals {
         if let conform = item.conform {
             let window = conform.trimEnd.map { $0 - (item.audioStart ?? 0) }
                 ?? item.audioDuration
                 ?? ExportPlanner.duration(of: kept, index: index)
-            return ConformEngine.expectedFrameCount(
+            let frames = ConformEngine.expectedFrameCount(
                 windowDuration: window,
                 targetFrameRate: conform.targetVideo.frameRate) ?? kept.count
+            return Totals(copiedFrames: 0, reEncodedFrames: 0, conformedFrames: frames)
         }
-        let frames = item.segments.reduce(0) { total, segment in
-            guard !segment.damage.isEmpty, let rate = item.frameRate else {
-                return total + segment.range.count
+        var copied = 0, reEncoded = 0
+        for segment in item.segments {
+            let frames: Int
+            if !segment.damage.isEmpty, let rate = item.frameRate {
+                frames = BoundaryReencodeEngine.repairedSegmentExpectation(
+                    range: segment.range, index: index, zones: segment.damage,
+                    containerStart: item.containerStart, frameRate: rate).frames
+            } else {
+                frames = segment.range.count
             }
-            return total + BoundaryReencodeEngine.repairedSegmentExpectation(
-                range: segment.range, index: index, zones: segment.damage,
-                containerStart: item.containerStart, frameRate: rate).frames
+            if segment.kind == .copy { copied += frames } else { reEncoded += frames }
         }
-        return item.fieldCoded ? frames / 2 : frames
+        guard item.fieldCoded else {
+            return Totals(copiedFrames: copied, reEncodedFrames: reEncoded, conformedFrames: 0)
+        }
+        // Halve the clip's sum, not each part, so the split still sums to the count.
+        let frames = (copied + reEncoded) / 2
+        return Totals(copiedFrames: frames - reEncoded / 2, reEncodedFrames: reEncoded / 2,
+                      conformedFrames: 0)
+    }
+
+    /// The job-wide split: every clip's `frameSplit`, summed.
+    static func totals(prepared: StitchPipeline.Prepared) -> Totals {
+        prepared.items.indices.reduce(Totals(copiedFrames: 0, reEncodedFrames: 0, conformedFrames: 0)) { sum, i in
+            let clip = prepared.clips[i]
+            let index = prepared.facts(forClip: i).index
+            let inFrame = clip.inPoint ?? 0
+            let endFrame = clip.outPoint.map { $0 + 1 } ?? index.count
+            let split = frameSplit(item: prepared.items[i],
+                                   kept: inFrame..<max(inFrame, endFrame), index: index)
+            return Totals(copiedFrames: sum.copiedFrames + split.copiedFrames,
+                          reEncodedFrames: sum.reEncodedFrames + split.reEncodedFrames,
+                          conformedFrames: sum.conformedFrames + split.conformedFrames)
+        }
     }
 
     /// A source rate as ffmpeg spells one, to the nearest kbit — `384000` becomes `"384k"`,

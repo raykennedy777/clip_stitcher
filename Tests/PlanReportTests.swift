@@ -219,6 +219,39 @@ struct PlanReportTests {
         #expect(PlanReport.expectedFrames(item: item, kept: 0..<40, index: Self.index) == 20)
     }
 
+    // MARK: - Totals
+
+    /// The job's frames, split by how each one is produced: the target re-encodes its two
+    /// boundary GOPs (5 + 5) and copies its middle 30, and the fill conforms all 60. The
+    /// three counts sum to the clips' `expectedFrames` — one unit, no second formula.
+    @Test func totalsSplitTheOutputFramesByHowTheyAreProduced() {
+        let report = canonicalReport()
+        #expect(report.totals == PlanReport.Totals(copiedFrames: 30, reEncodedFrames: 10,
+                                                   conformedFrames: 60))
+        let t = report.totals
+        #expect(t.copiedFrames + t.reEncodedFrames + t.conformedFrames
+                == report.clips.reduce(0) { $0 + $1.expectedFrames })
+    }
+
+    /// A field-coded clip's split is in frames, like its `expectedFrames`.
+    @Test func aFieldCodedSplitCountsFrames() {
+        let item = ExportItem(source: URL(fileURLWithPath: "/media/target.mkv"),
+                              codec: "h264",
+                              segments: [PlannedSegment(kind: .copy, range: 0..<41)],
+                              index: Self.index, frameRate: "25/1", fieldCoded: true)
+        let split = PlanReport.frameSplit(item: item, kept: 0..<41, index: Self.index)
+        #expect(split == PlanReport.Totals(copiedFrames: 20, reEncodedFrames: 0, conformedFrames: 0))
+        #expect(PlanReport.expectedFrames(item: item, kept: 0..<41, index: Self.index) == 20)
+    }
+
+    @Test func totalsAreWrittenInTheEncodedDocument() throws {
+        let json = try String(data: canonicalReport().jsonData(), encoding: .utf8) ?? ""
+        #expect(json.contains("\"totals\""))
+        #expect(json.contains("\"copiedFrames\" : 30"))
+        #expect(json.contains("\"reEncodedFrames\" : 10"))
+        #expect(json.contains("\"conformedFrames\" : 60"))
+    }
+
     // MARK: - Output and audio
 
     /// A video-only output writes no audio at all, so the report carries no tracks for it —

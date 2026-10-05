@@ -579,7 +579,9 @@ enum BoundaryReencodeEngine {
         trackTimescale: Int? = nil, containerStart: Double = 0, frameRate: String? = nil,
         sourceDamaged: Bool = false, copyStrategy: CopyStrategy = .segmentMux,
         fieldCoded: Bool = false, reorderDepth: Int? = nil,
-        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in },
+        log: (String) -> Void = { _ in },
+        pieceCache: PieceCache? = nil
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
         // Match the re-encoded pieces' reorder depth to the join they land in (ADR-0026):
@@ -643,6 +645,11 @@ enum BoundaryReencodeEngine {
         }
 
         var pieces: [URL] = []
+        // Re-encoded pieces this clip made fresh, stored in the piece cache only once the
+        // clip's verify gate has passed them.
+        var pendingStores: [(key: String, piece: URL)] = []
+        // Keys this clip took from the piece cache, evicted if the clip's gate refuses them.
+        var hitKeys: [String] = []
         for (s, segment) in plan.enumerated() {
             // A segment-muxer copy's plan and head seek are settled before the run, because
             // the progress bar's expectation depends on them: the seek is what decides how
@@ -683,22 +690,26 @@ enum BoundaryReencodeEngine {
                     segmentFrames: segmentFrames, completedSegments: s,
                     currentRunFraction: ExportProgress.runFraction(outTime: t, expectedSeconds: expected)))
             }
+            let segmentClock = StageClock()
             let piece: URL
+            var cached = false
             switch segment.kind {
             case .reEncode where !segment.damage.isEmpty:
                 piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_rep.\(ext)")
-                try await run(ffmpeg, repairedSegmentArguments(
+                cached = try await runCached(ffmpeg, repairedSegmentArguments(
                     source: source, range: segment.range, index: index,
                     zones: segment.damage, containerStart: containerStart,
                     frameRate: repairRate, encoder: encoder, output: piece,
                     trackTimescale: pieceTimescale),
-                    onOutTime: onOutTime)
+                    source: source, piece: piece, segment: segment, cache: pieceCache,
+                    pendingStores: &pendingStores, hitKeys: &hitKeys, onOutTime: onOutTime)
             case .reEncode:
                 piece = work.appendingPathComponent("c\(clipIndex)_s\(s)_re.\(ext)")
-                try await run(ffmpeg, reencodeSegmentArguments(
+                cached = try await runCached(ffmpeg, reencodeSegmentArguments(
                     source: source, range: segment.range, index: index,
                     encoder: encoder, output: piece, trackTimescale: pieceTimescale),
-                    onOutTime: onOutTime)
+                    source: source, piece: piece, segment: segment, cache: pieceCache,
+                    pendingStores: &pendingStores, hitKeys: &hitKeys, onOutTime: onOutTime)
             case .copy where copyStrategy == .boundedKeyframe:
                 // Whole-file repair (#52): seek straight to the span and copy only it.
                 // The span is keyframe-bounded by construction, so segment 000 is exactly
@@ -741,6 +752,8 @@ enum BoundaryReencodeEngine {
             guard FileManager.default.fileExists(atPath: piece.path) else {
                 throw ExportError.missingSegment
             }
+            log(segmentTimingLine(clipIndex: clipIndex, segment: s, planned: segment,
+                                  seconds: segmentClock.seconds, cached: cached))
             pieces.append(piece)
             onProgress(ExportProgress.withinClip(
                 segmentFrames: segmentFrames, completedSegments: s + 1, currentRunFraction: 0))
@@ -762,9 +775,12 @@ enum BoundaryReencodeEngine {
             let durations = fieldCoded ? [] : segmentSpans(plan, index: index)
             try ExportEngine.concatListContents(pieces: pieces, durations: durations)
                 .write(to: listFile, atomically: true, encoding: .utf8)
+            let concatClock = StageClock()
             try await run(ffmpeg, ExportEngine.concatArguments(listFile: listFile, output: joined))
+            log("clip \(clipIndex) concat: \(concatClock.label)")
             result = joined
         }
+        let verifyClock = StageClock()
         // A field-coded (PAFF) damage-to-EOF piece (issue #54) can't go through the
         // standard gate: its frame count mixes the PAFF copy head (2 field packets per
         // displayed frame) with the MBAFF tail (1 packet per frame), and the head's 0.02 s
@@ -775,8 +791,15 @@ enum BoundaryReencodeEngine {
         let location = VerificationLocation(
             clipIndex: clipIndex, displayName: displayName,
             piece: result.lastPathComponent, plan: plan)
+        // A cached piece the gate refuses is evicted, so the next render encodes it afresh.
+        func evictHits() { for key in hitKeys { pieceCache?.evict(key, ext: ext) } }
         if fieldCoded {
-            try await verifyFieldCodedPiece(ffmpeg, result, at: location)
+            do { try await verifyFieldCodedPiece(ffmpeg, result, at: location) } catch {
+                evictHits()
+                throw error
+            }
+            log("clip \(clipIndex) verify: \(verifyClock.label)")
+            for entry in pendingStores { pieceCache?.store(entry.key, from: entry.piece) }
             return result
         }
         // Per-segment expected output counts: a copy or plain re-encode produces
@@ -795,11 +818,58 @@ enum BoundaryReencodeEngine {
                 shortfallAllowance += expectation.shortfallAllowance
             }
         }
-        try await verifyPiece(ffmpeg, result, expectedCounts: outputCounts,
-                              shortfallAllowance: shortfallAllowance,
-                              sourceDamaged: sourceDamaged,
-                              plan: plan, sourcePts: index.pts, at: location)
+        do {
+            try await verifyPiece(ffmpeg, result, expectedCounts: outputCounts,
+                                  shortfallAllowance: shortfallAllowance,
+                                  sourceDamaged: sourceDamaged,
+                                  plan: plan, sourcePts: index.pts, at: location)
+        } catch {
+            evictHits()
+            throw error
+        }
+        log("clip \(clipIndex) verify: \(verifyClock.label)")
+        for entry in pendingStores { pieceCache?.store(entry.key, from: entry.piece) }
         return result
+    }
+
+    /// Runs one re-encode, or takes its piece from `cache` when an earlier render ran the
+    /// same encode (`PieceCache`). True on a hit. A fresh piece's key goes on
+    /// `pendingStores`; the caller stores it once the clip's verify gate has passed.
+    private static func runCached(
+        _ ffmpeg: URL, _ args: [String], source: URL, piece: URL, segment: PlannedSegment,
+        cache: PieceCache?, pendingStores: inout [(key: String, piece: URL)],
+        hitKeys: inout [String],
+        onOutTime: @escaping @Sendable (Double) -> Void
+    ) async throws -> Bool {
+        let key = await cache?.key(source: source, arguments: args, output: piece,
+                                   segment: segment, ffmpeg: ffmpeg)
+        if let cache, let key, cache.fetch(key, to: piece) {
+            hitKeys.append(key)
+            return true
+        }
+        try await run(ffmpeg, args, onOutTime: onOutTime)
+        if let key { pendingStores.append((key, piece)) }
+        return false
+    }
+
+    /// One segment run's stage-timing line (R5), for example
+    /// `clip 3 s0 reEncode [1234,14682): 291.20 s, 13448 frames, 46.2 fps`. The frame count
+    /// is the planned range; a repaired segment is named as such, because its output count
+    /// is its slot budget, not that range.
+    static func segmentTimingLine(clipIndex: Int, segment s: Int, planned: PlannedSegment,
+                                  seconds: Double, cached: Bool = false) -> String {
+        let kind = planned.kind == .copy ? "copy"
+            : planned.damage.isEmpty ? "reEncode" : "reEncode (repair)"
+        let frames = planned.range.count
+        var line = "clip \(clipIndex) s\(s) \(kind) [\(planned.range.lowerBound),\(planned.range.upperBound)): "
+            + "\(StageClock.label(seconds)), \(StageClock.count(frames, "frame"))"
+        if cached {
+            line += ", piece cache hit"
+        } else if planned.kind == .reEncode,
+                  let fps = StageClock.fpsLabel(frames: frames, seconds: seconds) {
+            line += ", \(fps)"
+        }
+        return line
     }
 
     /// The video frame count a produced piece must have: the planned segments tile the kept

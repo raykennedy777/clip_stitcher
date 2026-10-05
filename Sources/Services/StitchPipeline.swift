@@ -70,12 +70,20 @@ enum StitchPipeline {
     @discardableResult
     static func run(job: StitchJob, output: URL,
                     log: @escaping (String) -> Void = { _ in },
-                    progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> Outcome {
-        let prepared = try await prepare(job: job, log: log)
+                    progress: @escaping @Sendable (Double) -> Void = { _ in },
+                    indexCache: IndexCache? = nil,
+                    pieceCache: PieceCache? = nil) async throws -> Outcome {
+        let clock = StageClock()
+        let prepared = try await prepare(job: job, log: log, indexCache: indexCache)
         log("Exporting \(prepared.items.count) clip\(prepared.items.count == 1 ? "" : "s") to \(output.lastPathComponent)…")
         try await ExportEngine.export(items: prepared.items, settings: prepared.settings,
                                       audioCodec: prepared.audio.encoder, tracks: prepared.tracks,
-                                      to: output, progress: progress)
+                                      to: output, progress: progress, log: log,
+                                      pieceCache: pieceCache)
+        if let pieceCache {
+            log("Piece cache: \(pieceCache.hits) hits, \(pieceCache.misses) misses")
+        }
+        log("Total: \(StageClock.clockLabel(clock.seconds))")
         return Outcome(warnings: prepared.warnings)
     }
 
@@ -83,8 +91,10 @@ enum StitchPipeline {
     /// before its first encoder starts, and no tool run beyond the probe and the index
     /// scan. Throws the same error classes `run` does, so a caller maps them to the same
     /// exit codes.
+    /// `indexCache`, when given, serves and stores each source's import-time facts.
     static func prepare(job: StitchJob,
-                        log: @escaping (String) -> Void = { _ in }) async throws -> Prepared {
+                        log: @escaping (String) -> Void = { _ in },
+                        indexCache: IndexCache? = nil) async throws -> Prepared {
         let settings = try job.outputSettings()
 
         // 1. Probe + index each distinct source once, in first-appearance order.
@@ -95,31 +105,8 @@ enum StitchPipeline {
             guard FileManager.default.fileExists(atPath: path) else {
                 throw StitchJobError.missingSource(jobClip.path)
             }
-            let url = URL(fileURLWithPath: path)
-            log("Probing \(url.lastPathComponent)…")
-            let probe = try await MediaProbe.probe(url: url)
-            guard probe.video != nil else {
-                // The GUI refuses audio-only sources at import (issue #83); the CLI
-                // classifies the same fact as a probe-stage failure — the file was
-                // readable but isn't usable video.
-                throw FFError.probeFailed("“\(url.lastPathComponent)” has no video track.")
-            }
-            log("Indexing \(url.lastPathComponent)…")
-            let scan = try await FrameIndexer.scanAllStreams(url: url)
-            // Same import-time verdicts as the GUI: the field-coded check needs the
-            // index's measured cadence (issue #46), and damage detection feeds the
-            // planner's repaired segments (issues #45/#47) — both degrade safely on
-            // clean sources.
-            let fieldCoded = FieldCodingDetector.isFieldCoded(
-                packetPts: scan.index.pts,
-                frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
-            let damageZones = await DamageDetector.detectZones(
-                url: url, scan: scan, containerStart: probe.containerStart)
-            if !damageZones.isEmpty {
-                log("Found \(damageZones.count) damage zone\(damageZones.count == 1 ? "" : "s") in \(url.lastPathComponent).")
-            }
-            facts[path] = SourceFacts(url: url, probe: probe, index: scan.index,
-                                      fieldCoded: fieldCoded, damageZones: damageZones)
+            facts[path] = try await sourceFacts(url: URL(fileURLWithPath: path),
+                                                cache: indexCache, log: log)
         }
 
         // 2. Materialize the model clips, refusing job/source mismatches the pure
@@ -148,6 +135,7 @@ enum StitchPipeline {
 
         // 3. Plan every clip — the same pure planner call the document makes, with the
         //    same warnings surfaced (they go to stderr instead of a Done panel).
+        let planClock = StageClock()
         var outcome = Outcome()
         var items: [ExportItem] = []
         for (i, clip) in clips.enumerated() {
@@ -178,6 +166,7 @@ enum StitchPipeline {
             }
             items.append(item)
         }
+        log("Planned \(StageClock.count(items.count, "clip")): \(planClock.label)")
         if let note = ExportPlanner.reorderDepthWarning(items: items, settings: settings) {
             outcome.warnings.append(note)
         }
@@ -205,6 +194,72 @@ enum StitchPipeline {
                         targetIndex: job.targetIndex!,   // validate() guaranteed exactly one
                         items: items,
                         audio: audio, tracks: tracks, warnings: outcome.warnings)
+    }
+
+    /// Probes, indexes and damage-scans one source — or, on an index-cache hit, reads what
+    /// an earlier run learned about the same bytes (`IndexCache`). Either way the facts are
+    /// the same values, so everything planned from them is the same.
+    static func sourceFacts(url: URL, cache: IndexCache?,
+                            log: @escaping (String) -> Void) async throws -> SourceFacts {
+        let identity = cache == nil ? nil : try? SourceIdentity.of(url)
+        if let cache, let identity {
+            let lookup = StageClock()
+            if let hit = await cache.load(identity) {
+                log("Index cache hit \(url.lastPathComponent): \(lookup.label), "
+                    + "\(StageClock.count(hit.pts.count, "video frame")), \(StageClock.count(hit.damageZones.count, "zone"))")
+                logDamageZones(hit.damageZones, url: url, log: log)
+                return SourceFacts(url: url, probe: hit.probe, index: hit.index,
+                                   fieldCoded: hit.fieldCoded, damageZones: hit.damageZones)
+            }
+            log("Index cache miss \(url.lastPathComponent)")
+        }
+        log("Probing \(url.lastPathComponent)…")
+        let probeClock = StageClock()
+        let probe = try await MediaProbe.probe(url: url)
+        log("Probed \(url.lastPathComponent): \(probeClock.label)")
+        guard probe.video != nil else {
+            // The GUI refuses audio-only sources at import (issue #83); the CLI
+            // classifies the same fact as a probe-stage failure — the file was
+            // readable but isn't usable video.
+            throw FFError.probeFailed("“\(url.lastPathComponent)” has no video track.")
+        }
+        log("Indexing \(url.lastPathComponent)…")
+        let indexClock = StageClock()
+        let scan = try await FrameIndexer.scanAllStreams(url: url)
+        let packets = scan.streams.reduce(0) { $0 + $1.packets.count }
+        log("Indexed \(url.lastPathComponent): \(indexClock.label), "
+            + "\(StageClock.count(packets, "packet")), \(StageClock.count(scan.index.count, "video frame"))")
+        // Same import-time verdicts as the GUI: the field-coded check needs the
+        // index's measured cadence (issue #46), and damage detection feeds the
+        // planner's repaired segments (issues #45/#47) — both degrade safely on
+        // clean sources.
+        let fieldCoded = FieldCodingDetector.isFieldCoded(
+            packetPts: scan.index.pts,
+            frameRates: [probe.video?.frameRate, probe.videoCodecFrameRate])
+        let damageClock = StageClock()
+        var candidates = 0
+        let damageZones = await DamageDetector.detectZones(
+            url: url, scan: scan, containerStart: probe.containerStart,
+            onCandidates: { candidates = $0 })
+        log("Damage scan \(url.lastPathComponent): \(damageClock.label), "
+            + "\(StageClock.count(candidates, "candidate")), \(StageClock.count(damageZones.count, "zone"))")
+        logDamageZones(damageZones, url: url, log: log)
+        // Store only when the file did not change under the scan: the identity measured
+        // before it must still hold after it, or the entry would describe other bytes.
+        if let cache, let identity, (try? SourceIdentity.of(url)) == identity {
+            await cache.store(IndexCache.Facts(probe: probe, pts: scan.index.pts, dts: scan.index.dts,
+                                               keyframeFlags: scan.index.keyframeFlags,
+                                               fieldCoded: fieldCoded, damageZones: damageZones),
+                              for: identity)
+        }
+        return SourceFacts(url: url, probe: probe, index: scan.index,
+                           fieldCoded: fieldCoded, damageZones: damageZones)
+    }
+
+    private static func logDamageZones(_ zones: [DamageZone], url: URL, log: (String) -> Void) {
+        if !zones.isEmpty {
+            log("Found \(zones.count) damage zone\(zones.count == 1 ? "" : "s") in \(url.lastPathComponent).")
+        }
     }
 
     /// The output-file extension this job must be written under, or nil when the job

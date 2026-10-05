@@ -191,7 +191,9 @@ enum ConformEngine {
         _ ffmpeg: URL, source: URL, conform: VideoConform,
         start: Double?, end: Double?, work: URL, ext: String, clipIndex: Int,
         displayName: String = "", trackTimescale: Int? = nil, reorderDepth: Int = 1,
-        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in },
+        log: (String) -> Void = { _ in },
+        pieceCache: PieceCache? = nil
     ) async throws -> URL {
         let piece = work.appendingPathComponent("c\(clipIndex)_conform.\(ext)")
         // The kept window's duration — an open end reads to the source's end, so it is
@@ -219,28 +221,60 @@ enum ConformEngine {
                                     trackTimescale: ext.lowercased() == "mp4" ? trackTimescale : nil,
                                     damage: conform.damage, crf: conform.crf,
                                     reorderDepth: reorderDepth)
-        let parser = ProgressParser()
-        let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
-            if let t = parser.feed(chunk) {
-                onProgress(ExportProgress.runFraction(outTime: t, expectedSeconds: windowDuration))
+        let encodeClock = StageClock()
+        // A piece-cache hit (`PieceCache`) skips the encode, never the verify below.
+        let cacheKey = await pieceCache?.key(source: source, arguments: args, output: piece,
+                                             segment: nil, ffmpeg: ffmpeg)
+        let cached = pieceCache.map { cache in cacheKey.map { cache.fetch($0, to: piece) } ?? false } ?? false
+        if !cached {
+            let parser = ProgressParser()
+            let result = try await ProcessRunner.run(ffmpeg, ExportProgress.progressArguments(args)) { chunk in
+                if let t = parser.feed(chunk) {
+                    onProgress(ExportProgress.runFraction(outTime: t, expectedSeconds: windowDuration))
+                }
             }
-        }
-        guard result.status == 0 else {
-            throw ExportError.conformFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
+            guard result.status == 0 else {
+                throw ExportError.conformFailed(String(data: result.stderr, encoding: .utf8) ?? "exit \(result.status)")
+            }
         }
         guard FileManager.default.fileExists(atPath: piece.path) else { throw ExportError.missingSegment }
         let expected = windowDuration.flatMap {
             expectedFrameCount(windowDuration: $0, targetFrameRate: conform.targetVideo.frameRate)
         }
-        try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected,
-                                  shortfallAllowance: eofShortfallAllowance(
-                                      trimEnd: trimEnd, fileEnd: windowEnd,
-                                      targetFrameRate: conform.targetVideo.frameRate),
-                                  requireSilentDecode: conform.damage.isEmpty,
-                                  at: VerificationLocation(
-                                      clipIndex: clipIndex, displayName: displayName,
-                                      piece: piece.lastPathComponent, conformed: true))
+        log(conformTimingLine(clipIndex: clipIndex, frames: expected, seconds: encodeClock.seconds,
+                              cached: cached))
+        let verifyClock = StageClock()
+        do {
+            try await verifyConformed(ffmpeg, piece, target: conform.targetVideo, expectedFrames: expected,
+                                      shortfallAllowance: eofShortfallAllowance(
+                                          trimEnd: trimEnd, fileEnd: windowEnd,
+                                          targetFrameRate: conform.targetVideo.frameRate),
+                                      requireSilentDecode: conform.damage.isEmpty,
+                                      at: VerificationLocation(
+                                          clipIndex: clipIndex, displayName: displayName,
+                                          piece: piece.lastPathComponent, conformed: true))
+        } catch {
+            // A cached piece the gate refuses is evicted, so the next render encodes it afresh.
+            if cached, let pieceCache, let cacheKey { pieceCache.evict(cacheKey, ext: ext) }
+            throw error
+        }
+        log("clip \(clipIndex) verify: \(verifyClock.label)")
+        if !cached, let pieceCache, let cacheKey { pieceCache.store(cacheKey, from: piece) }
         return piece
+    }
+
+    /// The conform run's stage-timing line (R5), for example
+    /// `clip 1 conform: 54.60 s, 2500 frames, 45.8 fps`. The count is the piece's expected
+    /// output frames at the target rate — the number its verify gate checks.
+    static func conformTimingLine(clipIndex: Int, frames: Int?, seconds: Double,
+                                  cached: Bool = false) -> String {
+        var line = "clip \(clipIndex) conform: \(StageClock.label(seconds))"
+        if let frames {
+            line += ", \(StageClock.count(frames, "frame"))"
+            if !cached, let fps = StageClock.fpsLabel(frames: frames, seconds: seconds) { line += ", \(fps)" }
+        }
+        if cached { line += ", piece cache hit" }
+        return line
     }
 
     /// The frame count a conformed piece should have for a kept window of `windowDuration`

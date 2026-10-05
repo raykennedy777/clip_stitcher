@@ -9,8 +9,8 @@ CLI runs the exact planning and export engine the GUI runs (ADR-0025) — a job 
 project the way a script would write one.
 
 ```
-clipstitch [--verbose] <job.json> <output-file>
-clipstitch [--verbose] --plan <job.json>
+clipstitch [--verbose] [--index-cache <dir>] [--piece-cache <dir>] <job.json> <output-file>
+clipstitch [--verbose] [--index-cache <dir>] [--piece-cache <dir>] --plan <job.json>
 ```
 
 The CLI is headless and non-interactive: sources are plain file paths (no
@@ -158,6 +158,7 @@ The same exit codes as a run: `64` usage, `65` invalid job, `66` probe/index fai
       "expectedFrames": 6534
     }
   ],
+  "totals": { "copiedFrames": 42108, "reEncodedFrames": 13448, "conformedFrames": 6534 },
   "audio": {
     "codec": { "in": ["ac3", "ac3"], "out": "ac3", "fellBack": false },
     "bitrate": { "in": ["384k", null], "out": "192k" },
@@ -181,6 +182,7 @@ written as `null`, never omitted, so a reader can index it without checking the 
 | `clips[].reason` | Why a conformed clip doesn't match — one entry per strict-compare property (ADR-0005). `null` on a smart-rendered clip. `Scan type` compares the scan **direction**: a `tt` clip matches a `tb` target, and the values keep ffprobe's spelling. |
 | `clips[].copiedFraction` | How much of the kept range is stream-copied, 0–1, weighted by duration. |
 | `clips[].expectedFrames` | How many video frames this clip contributes to the output. The per-clip counts sum to the output's frame count. A conformed clip counts at the **target's** frame rate, which is the rate it is re-encoded to. |
+| `totals` | The job's output frames by how each one is produced: `copiedFrames` (stream-copied), `reEncodedFrames` (boundary re-encodes and repairs of smart-rendered clips) and `conformedFrames` (conformed clips). Same unit as `expectedFrames`, so the three sum to the clips' `expectedFrames`. Only the two encoded counts run an encoder, so they set most of a render's wall time. |
 | `audio.codec`, `audio.bitrate` | Per output track what the **target clip's** source carries (`in`), beside what every track encodes to (`out`). |
 | `warnings` | The same notices the export prints to stderr, in the same order. |
 
@@ -221,6 +223,60 @@ Warnings (repair reports, conform color assumptions, codec fallbacks — the sam
 notices the app shows after an export) go to stderr prefixed `warning:` and do not
 affect the exit code. Progress prints to stderr as `progress: N%` lines in 10 %
 steps.
+
+## Caches
+
+Two opt-in caches cut the cost of a run that repeats work (ADR-0031). Without the
+options nothing is read or written, and the run executes the same commands as before.
+Give each one a stable directory and pass the same options to every plan and render
+of a job.
+
+- `--index-cache <dir>` stores each source's probe, frame index, field-coded verdict
+  and damage zones. A later run on the same source reads them back instead of the
+  packet scan (about 1.5 s per GB) and the damage confirm decodes (about 3 s per
+  candidate). The stage line reads `Index cache hit <name>: …` or
+  `Index cache miss <name>`.
+- `--piece-cache <dir>` stores every re-encoded piece: boundary re-encodes, repaired
+  segments and conforms. A later render that would run the same encode copies the
+  piece instead and verifies it like a fresh one. The segment or conform line ends
+  `piece cache hit`, and a render prints `Piece cache: N hits, M misses` before its
+  total. `--plan` accepts the option and ignores it.
+
+A cache entry misses when the source's identity changes (real path, size, mtime,
+inode, or a hash of its first and last 64 KiB), or when ffmpeg or ffprobe changes. An
+index-cache entry also misses after any rebuild of clipstitch. A piece-cache entry
+misses when any ffmpeg argument of its encode changes — encoder, CRF, reorder depth,
+seek, frame range, timescale pin. A moved mark re-encodes only the pieces it moves; a
+change that alters the whole join's reorder depth or MP4 timescale re-keys every
+piece. Neither directory is pruned: delete it to reclaim the space.
+
+## Stage timing
+
+Every stage prints its elapsed time and counters on stderr, so a slow run's log says
+which stage held it. The clip number is the 0-based index in `clips[]`. A run prints
+these lines in this order (a plan query stops after `Planned`):
+
+```
+Probed main.mkv: 0.02 s
+Indexed main.mkv: 9.81 s, 653120 packets, 353108 video frames
+Damage scan main.mkv: 2.90 s, 1 candidate, 0 zones
+Planned 17 clips: 0.01 s
+clip 3 s0 reEncode [1234,14682): 291.20 s, 13448 frames, 46.2 fps
+clip 3 s1 copy [14682,56790): 12.00 s, 42108 frames
+clip 3 concat: 0.40 s
+clip 3 verify: 3.10 s
+clip 3 done (4/17): 306.70 s
+clip 4 conform: 54.60 s, 2500 frames, 45.8 fps
+clip 4 verify: 1.20 s
+Joined 17 pieces: 10.20 s
+Muxed audio: 11.00 s
+Verified audio: 0.10 s
+Total: 00:13:20.5
+```
+
+A re-encode's frame count is its planned range, and `fps` is that count over the run's
+wall time. A repaired segment shows as `reEncode (repair)`. A conform's count is its
+expected output frames at the target rate.
 
 ## The verdict line
 

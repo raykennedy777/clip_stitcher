@@ -23,7 +23,17 @@ enum ClipStitchArguments {
         /// `--verbose`: print an error's whole detail instead of the bounded excerpt
         /// (issue #113). Accepted in every mode; stderr only.
         var verbose: Bool = false
+        /// `--index-cache <dir>`: keep each source's probe, frame index and damage zones in
+        /// `dir` between runs (`IndexCache`). Accepted in every mode.
+        var indexCache: String? = nil
+        /// `--piece-cache <dir>`: reuse the re-encoded pieces of an earlier render from
+        /// `dir` (`PieceCache`). Accepted by `--plan` too, which renders nothing and so
+        /// ignores it — one flag set can drive a plan and its render.
+        var pieceCache: String? = nil
     }
+
+    /// The options that take a value, as the next argument.
+    static let valueOptions: Set<String> = ["--index-cache", "--piece-cache"]
 
     /// A usage error (exit 64). `message` is the reason alone — the caller appends the
     /// usage text.
@@ -39,10 +49,20 @@ enum ClipStitchArguments {
         let verbose = arguments.contains("--verbose")
         let plan = arguments.contains("--plan")
         var positional: [String] = []
-        for argument in arguments {
+        var values: [String: String] = [:]
+        var rest = arguments[...]
+        while let argument = rest.popFirst() {
             switch argument {
             case "--verbose", "--plan":
                 continue
+            case _ where valueOptions.contains(argument):
+                guard let value = rest.popFirst(), !value.hasPrefix("--"), !value.isEmpty else {
+                    throw UsageError(message: "\(argument) expects a directory")
+                }
+                guard values[argument] == nil else {
+                    throw UsageError(message: "\(argument) is given twice")
+                }
+                values[argument] = value
             default:
                 guard !argument.hasPrefix("--") else {
                     throw UsageError(message: "unknown option “\(argument)”")
@@ -50,18 +70,21 @@ enum ClipStitchArguments {
                 positional.append(argument)
             }
         }
+        let indexCache = values["--index-cache"], pieceCache = values["--piece-cache"]
         if plan {
             // A plan query writes no media, so an output file is not merely unused —
             // it would mean the caller expected a render.
             guard positional.count == 1 else {
                 return try refusePlanArguments(positional)
             }
-            return Parsed(invocation: .plan(job: positional[0]), verbose: verbose)
+            return Parsed(invocation: .plan(job: positional[0]), verbose: verbose,
+                          indexCache: indexCache, pieceCache: pieceCache)
         }
         guard positional.count == 2 else {
             throw UsageError(message: "expected a job file and an output file")
         }
-        return Parsed(invocation: .stitch(job: positional[0], output: positional[1]), verbose: verbose)
+        return Parsed(invocation: .stitch(job: positional[0], output: positional[1]), verbose: verbose,
+                      indexCache: indexCache, pieceCache: pieceCache)
     }
 
     private static func refusePlanArguments(_ positional: [String]) throws -> Parsed {

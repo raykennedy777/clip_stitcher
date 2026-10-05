@@ -202,6 +202,226 @@ struct StitchPipelineIntegrationTests {
         let written = Int((String(data: count.stdout, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines))
         #expect(written == report.clips.reduce(0) { $0 + $1.expectedFrames })
+        let t = report.totals
+        #expect(written == t.copiedFrames + t.reEncodedFrames + t.conformedFrames)
+    }
+
+    /// The index cache's plan-level promise (R2 of the 2026 R16 review): a plan made from
+    /// cached facts is byte-for-byte the plan a fresh scan makes, the second run reads every
+    /// source from the cache, and a changed source is scanned again.
+    @Test func aCachedPlanEqualsAnUncachedPlan() async throws {
+        let dir = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        guard let sources = try await Self.makeSources(in: dir) else { return }
+        let hevc = try await Self.makeHevcSource(in: dir)
+        let hevcClip = hevc.map { ",\n            { \"path\": \"\($0.path)\" }" } ?? ""
+        let job = try StitchJob.parse(Data("""
+        {
+          "version": 1,
+          "clips": [
+            { "path": "\(sources.target.path)", "inFrame": 5, "outFrame": 44,
+              "audioTracks": [0], "target": true },
+            { "path": "\(sources.fill.path)", "audioTracks": [1] }\(hevcClip)
+          ],
+          "output": { "container": "mkv" }
+        }
+        """.utf8))
+        let cache = IndexCache(directory: dir.appendingPathComponent("index-cache"))
+
+        let uncached = try await StitchPipeline.prepare(job: job)
+        let coldLog = LineSink(), warmLog = LineSink()
+        let cold = try await StitchPipeline.prepare(job: job, log: { coldLog.append($0) },
+                                                    indexCache: cache)
+        let warm = try await StitchPipeline.prepare(job: job, log: { warmLog.append($0) },
+                                                    indexCache: cache)
+        let sourceCount = hevc == nil ? 2 : 3
+        #expect(coldLog.lines.filter { $0.hasPrefix("Index cache miss") }.count == sourceCount)
+        #expect(warmLog.lines.filter { $0.hasPrefix("Index cache hit") }.count == sourceCount)
+        #expect(!warmLog.lines.contains { $0.hasPrefix("Indexing") })
+
+        let reference = try PlanReport.make(prepared: uncached).jsonData()
+        #expect(try PlanReport.make(prepared: cold).jsonData() == reference)
+        #expect(try PlanReport.make(prepared: warm).jsonData() == reference)
+        for (path, fresh) in uncached.facts {
+            let hit = try #require(warm.facts[path])
+            #expect(hit.probe == fresh.probe)
+            #expect(hit.index.pts.map(\.bitPattern) == fresh.index.pts.map(\.bitPattern))
+            #expect(hit.index.dts.map(\.bitPattern) == fresh.index.dts.map(\.bitPattern))
+            #expect(hit.index.keyframeFlags == fresh.index.keyframeFlags)
+            #expect(hit.fieldCoded == fresh.fieldCoded)
+            #expect(hit.damageZones == fresh.damageZones)
+        }
+
+        // A source rewritten in place is scanned again; the others still hit.
+        let ffmpeg = try FFTools.ffmpegURL()
+        let rewritten = dir.appendingPathComponent("fill-rewritten.mkv")
+        _ = try await ProcessRunner.run(ffmpeg, [
+            "-v", "error", "-i", sources.fill.path, "-map", "0", "-c", "copy",
+            "-metadata", "title=rewritten", "-y", rewritten.path])
+        try FileManager.default.removeItem(at: sources.fill)
+        try FileManager.default.moveItem(at: rewritten, to: sources.fill)
+        let afterLog = LineSink()
+        _ = try await StitchPipeline.prepare(job: job, log: { afterLog.append($0) },
+                                             indexCache: cache)
+        #expect(afterLog.lines.contains("Index cache miss fill.mkv"))
+        #expect(afterLog.lines.contains { $0.hasPrefix("Index cache hit target.mkv") })
+    }
+
+    /// Every stream's packets as the container carries them: a framemd5 of the stream-copied
+    /// packets, plus each packet's stream, pts, dts, size and flags. Whole-file bytes differ
+    /// between two Matroska writes of the same streams (a random SegmentUID and DateUTC),
+    /// so identity is compared at this level.
+    private static func streamFingerprint(_ file: URL) async throws -> (md5: String, packets: String) {
+        let ffmpeg = try FFTools.ffmpegURL(), ffprobe = try FFTools.ffprobeURL()
+        let md5 = try await ProcessRunner.run(ffmpeg, [
+            "-v", "error", "-i", file.path, "-map", "0", "-c", "copy", "-f", "framemd5", "-"])
+        let packets = try await ProcessRunner.run(ffprobe, [
+            "-v", "error", "-show_entries", "packet=stream_index,pts_time,dts_time,size,flags",
+            "-of", "csv=p=0", file.path])
+        return (String(data: md5.stdout, encoding: .utf8) ?? "",
+                String(data: packets.stdout, encoding: .utf8) ?? "")
+    }
+
+    private static func job(_ sources: (target: URL, fill: URL), extra: String = "") throws -> StitchJob {
+        try StitchJob.parse(Data("""
+        {
+          "version": 1,
+          "clips": [
+            { "path": "\(sources.target.path)", "inFrame": 5, "outFrame": 44,
+              "audioTracks": [0], "target": true },
+            { "path": "\(sources.fill.path)", "audioTracks": [1] }\(extra)
+          ],
+          "output": { "container": "mkv" }
+        }
+        """.utf8))
+    }
+
+    /// The piece cache's identity promise (R1 of the 2026 R16 review): a render that takes
+    /// every re-encoded piece from the cache writes the same streams, packet for packet, as
+    /// the render that made them — and that render writes what an uncached render writes.
+    @Test func aWarmRenderIsStreamIdenticalToAColdOne() async throws {
+        let dir = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        guard let sources = try await Self.makeSources(in: dir) else { return }
+        let hevc = try await Self.makeHevcSource(in: dir)
+        let job = try Self.job(sources, extra: hevc.map { ",\n    { \"path\": \"\($0.path)\" }" } ?? "")
+        let cacheDir = dir.appendingPathComponent("pieces")
+
+        let uncached = dir.appendingPathComponent("uncached.mkv")
+        let cold = dir.appendingPathComponent("cold.mkv")
+        let warm = dir.appendingPathComponent("warm.mkv")
+        _ = try await StitchPipeline.run(job: job, output: uncached)
+        let coldLog = LineSink(), warmLog = LineSink()
+        _ = try await StitchPipeline.run(job: job, output: cold, log: { coldLog.append($0) },
+                                         pieceCache: PieceCache(directory: cacheDir))
+        _ = try await StitchPipeline.run(job: job, output: warm, log: { warmLog.append($0) },
+                                         pieceCache: PieceCache(directory: cacheDir))
+
+        // Target head + tail, and one conform per fill.
+        let encodes = 2 + (hevc == nil ? 1 : 2)
+        #expect(coldLog.lines.contains("Piece cache: 0 hits, \(encodes) misses"))
+        #expect(warmLog.lines.contains("Piece cache: \(encodes) hits, 0 misses"))
+        let warmEncodes = warmLog.lines.filter { $0.contains(" reEncode [") || $0.contains(" conform: ") }
+        #expect(warmEncodes.count == encodes)
+        #expect(warmEncodes.allSatisfy { $0.hasSuffix("piece cache hit") })
+        // A hit is verified like a fresh piece.
+        #expect(warmLog.lines.filter { $0.contains(" verify: ") }.count == (hevc == nil ? 2 : 3))
+
+        let reference = try await Self.streamFingerprint(uncached)
+        #expect(!reference.md5.isEmpty && !reference.packets.isEmpty)
+        let coldPrint = try await Self.streamFingerprint(cold)
+        let warmPrint = try await Self.streamFingerprint(warm)
+        #expect(coldPrint.md5 == reference.md5)
+        #expect(coldPrint.packets == reference.packets)
+        #expect(warmPrint.md5 == coldPrint.md5)
+        #expect(warmPrint.packets == coldPrint.packets)
+    }
+
+    /// The piece cache's incremental promise: moving one clip's in point re-encodes only the
+    /// piece that edge touches. The other clip's two edges, the conform and the moved clip's
+    /// own unchanged tail all come from the cache.
+    @Test func movingOneMarkReEncodesOnlyThePieceItTouches() async throws {
+        let dir = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        guard let sources = try await Self.makeSources(in: dir) else { return }
+        let cacheDir = dir.appendingPathComponent("pieces")
+        // Keyframes every 12 frames: clip 2 [3, 30] plans reEncode [3,12) · copy [12,24) ·
+        // reEncode [24,31); moving its in point to 7 changes only the head.
+        func third(_ inFrame: Int) -> String {
+            ",\n    { \"path\": \"\(sources.target.path)\", \"inFrame\": \(inFrame), \"outFrame\": 30, \"audioTracks\": [0] }"
+        }
+        _ = try await StitchPipeline.run(job: try Self.job(sources, extra: third(3)),
+                                         output: dir.appendingPathComponent("cold.mkv"),
+                                         pieceCache: PieceCache(directory: cacheDir))
+        let log = LineSink()
+        let warm = dir.appendingPathComponent("warm.mkv")
+        _ = try await StitchPipeline.run(job: try Self.job(sources, extra: third(7)),
+                                         output: warm, log: { log.append($0) },
+                                         pieceCache: PieceCache(directory: cacheDir))
+        let lines = log.lines
+        func line(_ prefix: String) -> String? { lines.first { $0.hasPrefix(prefix) } }
+        #expect(line("clip 0 s0 reEncode [5,")?.hasSuffix("piece cache hit") == true)
+        #expect(line("clip 0 s2 reEncode [")?.hasSuffix("piece cache hit") == true)
+        #expect(line("clip 1 conform: ")?.hasSuffix("piece cache hit") == true)
+        #expect(line("clip 2 s0 reEncode [7,12)")?.hasSuffix("piece cache hit") == false)
+        #expect(line("clip 2 s2 reEncode [24,31)")?.hasSuffix("piece cache hit") == true)
+        #expect(lines.contains("Piece cache: 4 hits, 1 misses"))
+
+        // And the edited render is the render an uncached run of the edited job writes.
+        let uncached = dir.appendingPathComponent("uncached.mkv")
+        _ = try await StitchPipeline.run(job: try Self.job(sources, extra: third(7)), output: uncached)
+        let a = try await Self.streamFingerprint(warm), b = try await Self.streamFingerprint(uncached)
+        #expect(a.md5 == b.md5)
+        #expect(a.packets == b.packets)
+    }
+
+    /// Collects the pipeline's stage lines, which arrive on whatever task logs them.
+    final class LineSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String] = []
+        func append(_ line: String) { lock.lock(); stored.append(line); lock.unlock() }
+        var lines: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    }
+
+    /// Every stage of a render names its elapsed time (R5 of the 2026 R16 review), so a
+    /// slow run's log says which stage held it: the probe, the index scan with its packet
+    /// count, the damage scan with its candidates, the plan, each segment run and verify,
+    /// the conform, the join, the audio mux and its verify, and the run's total.
+    @Test func everyStageLogsItsElapsedTime() async throws {
+        let dir = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        guard let sources = try await Self.makeSources(in: dir) else { return }
+        let job = try StitchJob.parse(Data("""
+        {
+          "version": 1,
+          "clips": [
+            { "path": "\(sources.target.path)", "inFrame": 5, "outFrame": 44,
+              "audioTracks": [0], "target": true },
+            { "path": "\(sources.fill.path)", "audioTracks": [1] }
+          ],
+          "output": { "container": "mkv" }
+        }
+        """.utf8))
+        let sink = LineSink()
+        _ = try await StitchPipeline.run(job: job, output: dir.appendingPathComponent("out.mkv"),
+                                         log: { sink.append($0) })
+        let lines = sink.lines
+        func has(_ prefix: String, _ needle: String = " s") -> Bool {
+            lines.contains { $0.hasPrefix(prefix) && $0.contains(needle) }
+        }
+        #expect(has("Probed target.mkv: "))
+        #expect(has("Indexed target.mkv: ", " packets, 50 video frames"))
+        #expect(has("Damage scan target.mkv: ", " candidate"))
+        #expect(has("Planned 2 clips: "))
+        #expect(has("clip 0 s0 reEncode [5,", " fps"))
+        #expect(has("clip 0 s1 copy ["))
+        #expect(has("clip 0 verify: "))
+        #expect(has("clip 1 conform: ", "25 frames"))
+        #expect(has("clip 1 verify: "))
+        #expect(has("Joined 2 pieces: "))
+        #expect(has("Muxed audio: "))
+        #expect(has("Verified audio: "))
+        #expect(lines.last?.hasPrefix("Total: 00:00:") == true)
     }
 
     @Test func jobSourceMismatchesAreRefusedAsInvalidJob() async throws {

@@ -177,6 +177,28 @@ import-time scans every run pays anyway and writes no media, so a caller can rea
 would do instead of rendering to find out. The CLI's one deliberate use of stdout.
 _Avoid_: dry run, preview, --dry-run
 
+**Source identity**:
+What a source file *is* for a cache key (`SourceIdentity`): its real path, size, mtime to
+the nanosecond, inode, and a SHA-256 of its first and last 64 KiB. A source replaced or
+rewritten in place gets a new identity, so every cache keyed on it misses. It cannot see a
+change confined to the middle of a file that also keeps the size and the mtime.
+_Avoid_: file hash, fingerprint (a fingerprint here is a tool build's `-version` hash)
+
+**Index cache**:
+`clipstitch --index-cache <dir>` (ADR-0031): each source's probe result, Frame index,
+field-coded verdict and Damage zones, stored after a scan and read back by a later run on
+the same Source identity, ff-tool builds and clipstitch build. Opt-in. A hit gives exactly
+the stored values, so a plan from it equals a plan from a fresh scan.
+_Avoid_: scan cache, probe cache
+
+**Piece cache**:
+`clipstitch --piece-cache <dir>` (ADR-0031): every re-encoded piece — boundary re-encode,
+Repaired segment, Conform — stored after its verify gate passes, keyed on the Source
+identity, the ffmpeg build, the planned segment and the exact ffmpeg arguments with the
+output path replaced. A later render that would run the same encode copies the piece
+instead, then verifies it like a fresh one. Copy pieces are not cached. Opt-in.
+_Avoid_: render cache, reuse
+
 **Frame index**:
 The per-clip map of frame number → timestamp + keyframe flag, built on import. The basis of
 frame accuracy on variable-frame-rate content.

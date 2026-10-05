@@ -346,15 +346,21 @@ enum DamageDetector {
     /// cluster with a seek-anchored windowed decode, and run the last-GOP EOF check.
     /// Returned zones are in source seconds from the container start (`DamageZone`),
     /// sorted. Detection failures degrade to "no zones found", never a failed import.
+    /// `onCandidates` receives the number of clusters that each cost a confirm decode —
+    /// the counter the CLI's damage-scan timing line reports (the decodes, not the zones,
+    /// are what the stage spends its time on).
     static func detectZones(url: URL, scan: FrameIndexer.AllStreamsScan,
-                            containerStart: Double) async -> [DamageZone] {
+                            containerStart: Double,
+                            onCandidates: (Int) -> Void = { _ in }) async -> [DamageZone] {
         let index = scan.index
         guard index.count > minIntervals,
               let interval = medianInterval(index.pts),
               let ffmpeg = try? FFTools.ffmpegURL() else { return [] }
 
         var zones: [DamageZone] = []
-        for candidate in clusterCandidates(anomalies(streams: scan.streams)) {
+        let candidates = clusterCandidates(anomalies(streams: scan.streams))
+        onCandidates(candidates.count)
+        for candidate in candidates {
             // Seek two keyframes back from the cluster: one GOP of margin plus one
             // more because MPEG-PS time-seek is byte-estimated and lands late even on
             // clean data (issue #43 de-risk) — `t` in the decode stays anchored to the

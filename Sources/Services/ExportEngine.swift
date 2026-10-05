@@ -1303,7 +1303,9 @@ enum ExportEngine {
         audioCodec: String = AudioCodecPolicy.fallbackAudioCodec,
         tracks: [AudioCodecPolicy.OutputAudioTrack] = [AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2)],
         to destination: URL,
-        progress: @escaping @Sendable (Double) -> Void = { _ in }
+        progress: @escaping @Sendable (Double) -> Void = { _ in },
+        log: @escaping (String) -> Void = { _ in },
+        pieceCache: PieceCache? = nil
     ) async throws {
         guard !items.isEmpty else { throw ExportError.noClips }
         let wantsVideo = settings.type != .audioOnly
@@ -1400,13 +1402,14 @@ enum ExportEngine {
                 }
                 let depth = pieceReorderDepth(
                     item: item, joinDepth: joinDepth ?? joinReorderDepth(items: [item]))
+                let clipClock = StageClock()
                 if let conform = item.conform {
                     videoPieces.append(try await ConformEngine.produceConformedPiece(
                         ffmpeg, source: item.source, conform: conform,
                         start: item.audioStart, end: item.audioEnd, work: work,
                         ext: pieceExts[i], clipIndex: i, displayName: item.displayName,
                         trackTimescale: exportTimescale, reorderDepth: depth,
-                        onProgress: withinClip))
+                        onProgress: withinClip, log: log, pieceCache: pieceCache))
                 } else {
                     // The planner already guarantees a field-coded item's plan is
                     // copy-only (`fieldCodedPlanNotCopyOnly`), so `item.fieldCoded` is
@@ -1419,8 +1422,9 @@ enum ExportEngine {
                         containerStart: item.containerStart, frameRate: item.frameRate,
                         sourceDamaged: item.sourceDamaged,
                         fieldCoded: item.fieldCoded, reorderDepth: depth,
-                        onProgress: withinClip))
+                        onProgress: withinClip, log: log, pieceCache: pieceCache))
                 }
+                log("clip \(i) done (\(i + 1)/\(items.count)): \(clipClock.label)")
                 progress(0.7 * Double(i + 1) / Double(items.count))
             }
         }
@@ -1448,23 +1452,29 @@ enum ExportEngine {
                                                         name: "joined_video")
                 } else {
                     let joined = work.appendingPathComponent("joined_video.\(ext)")
+                    let joinClock = StageClock()
                     try await concatVideo(ffmpeg, pieces: videoPieces, items: items, to: joined, work: work)
+                    log("Joined \(StageClock.count(videoPieces.count, "piece")): \(joinClock.label)")
                     videoInput = joined
                 }
             }
             currentOutput = destination
             if wantsAudio {
+                let muxClock = StageClock()
                 try await runFFmpeg(ffmpeg, audioMuxArguments(videoInput: videoInput, items: items, tracks: tracks, audioCodec: audioCodec, output: destination),
                                     failure: ExportError.concatFailed) { t in
                     progress(ExportProgress.muxFraction(
                         withinMux: ExportProgress.runFraction(outTime: t, expectedSeconds: totalSpan)))
                 }
+                log("Muxed audio: \(muxClock.label)")
+                let audioVerifyClock = StageClock()
                 // Nothing above this line has looked at the file that was written (issue
                 // #112): the video pieces were verified before the mux, and a rebuilt audio
                 // track that collapsed or came out short exits 0 with an empty stderr. The
                 // join's expected extent is the same `totalSpan` the mux fraction just used.
                 try await verifyWrittenAudio(destination, expectedTracks: tracks.count,
                                              expectedExtent: totalSpan)
+                log("Verified audio: \(audioVerifyClock.label)")
             } else {
                 try placeFile(videoInput!, at: destination)
             }

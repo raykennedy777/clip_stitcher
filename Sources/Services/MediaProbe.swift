@@ -9,7 +9,7 @@ import Foundation
 /// ffprobe output, including the known quirks: ffprobe's CSV writer emits a trailing
 /// comma on MPEG-2 streams, and reports "N/A" for values a demuxer doesn't carry.
 enum MediaProbe {
-    struct Result: Sendable {
+    struct Result: Codable, Equatable, Sendable {
         var video: VideoProperties?
         /// The first audio stream — the legacy single-track field (kept filled so
         /// existing call sites and old saves keep working; ADR-0014).

@@ -16,8 +16,8 @@ import Foundation
 @main
 struct ClipStitchMain {
     static let usage = """
-    usage: clipstitch [--verbose] <job.json> <output-file>
-           clipstitch [--verbose] --plan <job.json>
+    usage: clipstitch [--verbose] [--index-cache <dir>] [--piece-cache <dir>] <job.json> <output-file>
+           clipstitch [--verbose] [--index-cache <dir>] --plan <job.json>
 
     Stitches the clips described by a Stitch Job JSON (see docs/stitch-job.md) into
     one frame-accurate output file, exactly as the Clip Stitcher app would: matching
@@ -29,6 +29,16 @@ struct ClipStitchMain {
     --plan writes no media. It probes, indexes and plans the job, prints that plan as
     JSON to stdout, and exits — the one thing the CLI ever puts on stdout. Use it to
     see each clip's treatment, copy/re-encode split and frame count before a render.
+
+    --index-cache <dir> keeps each source's probe, frame index and damage zones in
+    <dir>, keyed on the file's identity (path, size, mtime, inode, head/tail hash) and
+    the ff-tool and clipstitch builds. A later run on the same source reads them back
+    instead of scanning it again. --piece-cache <dir> keeps every re-encoded boundary
+    and conformed piece, keyed on its source identity and exact ffmpeg arguments, and
+    reuses it in a later render; a reused piece is verified like a fresh one. --plan
+    ignores --piece-cache. Without these options nothing is cached.
+
+    Every stage prints its elapsed time on stderr; the run ends with “Total: hh:mm:ss.s”.
 
     An error prints a bounded excerpt of a long detail (a decoder's output can run to
     thousands of lines); --verbose prints all of it. The last stderr line of every run is
@@ -42,6 +52,16 @@ struct ClipStitchMain {
     /// stderr only — stdout stays silent whatever the flag.
     nonisolated(unsafe) static var verbose = false
 
+    /// `--index-cache <dir>`, or nil when the run caches no source facts.
+    nonisolated(unsafe) static var indexCache: IndexCache?
+
+    /// `--piece-cache <dir>`, or nil when the render reuses no pieces.
+    nonisolated(unsafe) static var pieceCache: PieceCache?
+
+    static func directoryURL(_ path: String) -> URL {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
     static func main() async {
         let parsed: ClipStitchArguments.Parsed
         do {
@@ -51,6 +71,8 @@ struct ClipStitchMain {
             fail(.usage, "\(reason)\n\(usage)")
         }
         verbose = parsed.verbose
+        indexCache = parsed.indexCache.map { IndexCache(directory: directoryURL($0)) }
+        pieceCache = parsed.pieceCache.map { PieceCache(directory: directoryURL($0)) }
         switch parsed.invocation {
         case .help:
             print(usage)
@@ -96,7 +118,8 @@ struct ClipStitchMain {
             let reporter = ProgressReporter()
             let outcome = try await StitchPipeline.run(
                 job: job, output: output, log: logToStderr,
-                progress: { fraction in reporter.report(fraction) })
+                progress: { fraction in reporter.report(fraction) },
+                indexCache: indexCache, pieceCache: pieceCache)
             for warning in outcome.warnings {
                 FileHandle.standardError.write(Data(("warning: " + warning + "\n").utf8))
             }
@@ -114,10 +137,13 @@ struct ClipStitchMain {
     /// is the JSON alone. No encoder runs and no file is written.
     static func plan(job: StitchJob, path: String) async -> Never {
         do {
-            let prepared = try await StitchPipeline.prepare(job: job, log: logToStderr)
+            let clock = StageClock()
+            let prepared = try await StitchPipeline.prepare(job: job, log: logToStderr,
+                                                            indexCache: indexCache)
             let data = try PlanReport.make(prepared: prepared).jsonData()
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data("\n".utf8))
+            logToStderr("Total: \(StageClock.clockLabel(clock.seconds))")
             FileHandle.standardError.write(Data("Planned: \(path)\n".utf8))
             exit(0)
         } catch {
