@@ -81,3 +81,11 @@ reasoning behind these choices and `CONTEXT.md` for vocabulary.
 - **Notarization with bundled binaries.** Confirm the signing/notarization flow early so it
   doesn't surprise at ship time (ADR-0002).
 - **Frame-index cost** on multi-hour files. Keep the import pass async + cached (ADR-0006).
+
+## Housekeeping (shipped)
+
+- **Stale work-dir sweep (#109, `a69f8b7`):** `WorkDirectorySweeper` keeps
+  dirs whose `.clipstitcher-owner.json` PID is live, deletes dead PIDs, and
+  applies a 24 h age gate to unclaimed dirs. Runs at app launch and
+  `clipstitch` startup. Clip Doctor's `clipstitcher-doctor-*` dirs are
+  deliberately out of scope — a known remaining leak if ever wanted.

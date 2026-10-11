@@ -62,3 +62,28 @@ xcodebuild -project ClipStitcher.xcodeproj -scheme ClipStitcher -destination 'pl
 - ⚠️ **xcodebuild hang trap:** ffmpeg-spawning integration tests *pass the suite then hang at
   0% CPU instead of exiting*. Run `xcodebuild` in the background to a log file and kill it once
   `Test Suite '…' passed/failed` appears. The unit-only suite exits cleanly.
+
+## More hard-won traps (from agent memory, 2026-08-01)
+
+- **`astats` inside the graph lies about output.** An
+  `-af "...,astats" -f null -` tap can report a differently-normalized rematrix
+  (FC at 0.293 vs 0.707) because the measurement filter participates in
+  swresample's negotiation. When measuring audio filter behavior, encode to a
+  file (or pipe raw PCM) with the exact production command shape, then measure
+  the artifact in a second ffmpeg run.
+- **Keyframe fetch with `-skip_frame nokey`:** one process must fetch ONE
+  keyframe (`-frames:v 1`); streaming several emits them out of presentation
+  order on open-GOP HEVC and silently drops some. Even single-frame fetches
+  MISS ~2/3 of this file's CRAs — read back the emitted pts via showinfo and
+  fall back to a plain accurate seek for dropped ones. `KeyframePrefetcher`
+  embodies all of this; reuse it.
+- **TCC hang masquerades as the xcodebuild hang.** A test host that reads
+  media from `~/Desktop` (or any TCC-protected folder) hangs forever at 0% CPU
+  on a headless consent prompt. Copy fixtures to `/tmp` before running tests
+  against them.
+- **Self-signed dev cert vs `xcodebuild test`:** the "VidConform Dev" manual
+  signing (kept stable so TCC remembers the grant across rebuilds) breaks
+  tests under hardened runtime / debug-dylib split. Fixed in `project.yml`
+  (Debug: `ENABLE_HARDENED_RUNTIME=NO`, `ENABLE_DEBUG_DYLIB=NO`) — keep that
+  block; if it is ever reverted, pass both flags on the command line. Swift
+  Testing selectors match at **suite** level, not function level.
