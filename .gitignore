@@ -51,5 +51,9 @@ scratch_screenshots/
 # Local signing override (see Config/Local.xcconfig.example)
 Config/Local.xcconfig
 
-# Claude Code transient state
-.claude/scheduled_tasks.lock
+# Agent tooling — local to whoever is working on the repo, not part of the project.
+# `.claude/skills/*` are symlinks into `.agents/skills/`, and skills-lock.json pins what
+# is installed there; all of it is managed by the skills installer, not by hand.
+.agents/
+.claude/
+skills-lock.json
