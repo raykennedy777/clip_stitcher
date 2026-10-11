@@ -113,6 +113,7 @@ final class KeyframePrefetcher {
         guard frame >= 0, frame < pts.count else { return nil }
         let process = Process()
         process.executableURL = ffmpeg
+        process.standardInput = FileHandle.nullDevice   // no SIGTTIN stop (see ProcessRunner)
         var arguments = ["-hide_banner", "-loglevel", "info", "-nostats"]
         if skipNonKey {
             arguments += ["-skip_frame", "nokey"]

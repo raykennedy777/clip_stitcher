@@ -149,6 +149,7 @@ final class FrameStreamDecoder {
         stopSync()
         let process = Process()
         process.executableURL = ffmpeg
+        process.standardInput = FileHandle.nullDevice   // no SIGTTIN stop (see ProcessRunner)
         var arguments = ["-hide_banner", "-loglevel", "error"]
         if useHardware { arguments += ["-hwaccel", "videotoolbox"] }
         arguments += [

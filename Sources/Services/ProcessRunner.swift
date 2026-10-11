@@ -104,6 +104,9 @@ enum ProcessRunner {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        // stdin is /dev/null: ffmpeg reads stdin for its interactive keys, and a read from a
+        // background process group (a detached tmux chain) gets SIGTTIN and stops the child.
+        process.standardInput = FileHandle.nullDevice
 
         let errPipe: Pipe?
         let errHandle: FileHandle?

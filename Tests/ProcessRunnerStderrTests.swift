@@ -183,3 +183,36 @@ struct ProcessRunnerIOModeTests {
         await #expect(throws: CancellationError.self) { try await run.value }
     }
 }
+
+/// Pins `ProcessRunner`'s stdin: a subprocess must read `/dev/null`, never the parent's stdin.
+/// ffmpeg reads stdin for its interactive keys unless it gets `-nostdin`. When clipstitch ran
+/// from a detached tmux shell chain, its ffmpeg child read the terminal from a background
+/// process group, got SIGTTIN and stopped (state T, 0 % CPU) for 38 min (R17 Sunday render).
+/// This test puts an open pipe on fd 0 and runs `/bin/cat`: an inherited stdin makes cat block
+/// on the pipe, and only `/dev/null` gives it EOF at once.
+@Suite(.serialized)
+struct ProcessRunnerStdinTests {
+    @Test func aSubprocessReadsNullNotTheParentsStdin() async throws {
+        let pipe = Pipe()   // the write end stays open, so a reader of the pipe never sees EOF
+        let savedStdin = dup(0)
+        #expect(savedStdin >= 0)
+        dup2(pipe.fileHandleForReading.fileDescriptor, 0)
+        defer {
+            dup2(savedStdin, 0)
+            close(savedStdin)
+            withExtendedLifetime(pipe) {}
+        }
+
+        let run = Task<ProcessResult, Error> {
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/cat"), [])
+        }
+        // With an inherited stdin, cat blocks for ever. Cancel it after 3 s, so that a
+        // regression fails (the run throws) and does not hang the suite.
+        let timeout = Task { try? await Task.sleep(nanoseconds: 3_000_000_000); run.cancel() }
+        let result = try await run.value
+        timeout.cancel()
+
+        #expect(result.status == 0)
+        #expect(result.stdout.isEmpty)
+    }
+}

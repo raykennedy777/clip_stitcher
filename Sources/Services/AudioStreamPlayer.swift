@@ -102,6 +102,7 @@ final class AudioStreamPlayer {
 
         let process = Process()
         process.executableURL = ffmpeg
+        process.standardInput = FileHandle.nullDevice   // no SIGTTIN stop (see ProcessRunner)
         process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
