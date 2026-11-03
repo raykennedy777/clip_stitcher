@@ -171,6 +171,38 @@ struct ExportEngineTests {
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: nil, ext: "ts").isEmpty)
     }
 
+    /// A source that repeats its own parameter sets in-band gets no repeat: `hevc_mp4toannexb`
+    /// would put a stale header SPS in front of the source's own at every IRAP, and the
+    /// decoder would clear its references at every CRA (the 1080p50 x265 MotoGP capture:
+    /// 28 error lines in 60 s with the filter, 0 without). The refill rule is unchanged.
+    @Test func aSourceWithInBandParameterSetsCopiesWithoutTheRepeat() {
+        #expect(ExportEngine.copyPieceBitstreamFilter(
+            codec: "hevc", ext: "mkv", inBandParameterSets: true).isEmpty)
+        #expect(ExportEngine.copyPieceBitstreamFilter(
+            codec: "h264", ext: "mp4", inBandParameterSets: true).isEmpty)
+        #expect(ExportEngine.copyPieceBitstreamFilter(
+            codec: "mpeg2video", ext: "mkv", inBandParameterSets: true)
+            == ["-bsf:v", ExportEngine.ptsRefillFilter])
+    }
+
+    /// The probe traces exactly one copied packet, and only an SPS *after* the `Packet:` line
+    /// counts — the header's own sets are printed above it under "Extradata".
+    @Test func theInBandProbeCountsOnlyAnSpsInsideThePacket() {
+        let src = URL(fileURLWithPath: "/m/a.mkv")
+        let args = ExportEngine.inBandParameterSetProbeArguments(source: src, seek: 12.5, codec: "hevc")
+        #expect(args?.contains("trace_headers") == true)
+        #expect(args.map { Array($0.suffix(5)) } == ["-frames:v", "1", "-f", "null", "-"])
+        #expect(ExportEngine.inBandParameterSetProbeArguments(
+            source: src, seek: 0, codec: "mpeg2video") == nil)
+
+        let header = "Extradata\nVideo Parameter Set\nSequence Parameter Set\nPicture Parameter Set\n"
+        #expect(!ExportEngine.tracesInBandParameterSets(
+            header + "Packet: 900 bytes, key frame\nSlice Segment Header\n"))
+        #expect(ExportEngine.tracesInBandParameterSets(
+            header + "Packet: 900 bytes, key frame\nVideo Parameter Set\nSequence Parameter Set\n"))
+        #expect(!ExportEngine.tracesInBandParameterSets(header))
+    }
+
     /// ffmpeg takes **one** `-bsf:v` per stream and a second occurrence replaces the first
     /// rather than adding to it, so whatever a copy piece needs has to arrive as a single
     /// comma-separated chain. No combination reaches for both filters today — the two rules

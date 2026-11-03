@@ -269,10 +269,22 @@ enum ExportEngine {
     /// wrote — the re-encoded control capture in the issue-#113 report) then decodes against
     /// a foreign SPS/PPS exactly like an un-filtered re-encode does. Measured on that
     /// capture: 601 decode-error lines behind a re-encoded first piece, 0 with this filter.
-    /// A broadcast capture already repeats its parameter sets in-band and only gains
-    /// duplicates, which decoders ignore; a source that is already Annex-B (`.ts`) passes
-    /// through untouched (verified, exit 0). The filter inserts NAL units and rewrites NAL
-    /// framing only — the coded pictures are bit-identical, so the copy stays lossless.
+    /// A source that is already Annex-B (`.ts`) passes through untouched (verified, exit 0).
+    /// The filter inserts NAL units and rewrites NAL framing only — the coded pictures are
+    /// bit-identical, so the copy stays lossless.
+    ///
+    /// A source that **already repeats its parameter sets in-band** must not get this
+    /// filter (`copyPieceBitstreamFilter`'s `inBandParameterSets`). `hevc_mp4toannexb`
+    /// inserts the *header's* sets in front of the source's own at every IRAP, and the
+    /// header can be stale: the 1080p50 x265 MotoGP capture's hvcC SPS matches its in-band
+    /// SPS at 0 s but not at 1367 s (`long_term_ref_pics_present_flag` and four more
+    /// fields). The decoder then sees a different SPS at every CRA, clears its references,
+    /// and every RASL picture after it fails ("Could not find ref with POC"). Measured:
+    /// 28 error lines in 60 s with the filter, 0 without, in `.mkv` and `.mp4`; a synthetic
+    /// two-encode HEVC splice gave 36 and 0. Such a source needs no filter — its in-band
+    /// sets already make the copy independent of the join's header. `h264_mp4toannexb`
+    /// does not insert ahead of a keyframe that carries sets (measured clean either way),
+    /// so the rule is codec-wide for one reason only: the copy does not need it.
     ///
     /// `nil` for a codec with no such filter: MPEG-2 needs none (its sequence header is
     /// repeated per GOP in the elementary stream by construction).
@@ -294,15 +306,44 @@ enum ExportEngine {
     /// of the parameter-set repeat: it is one source's own pieces, so the container header a
     /// copy is decoded against is either that source's or a repair re-encode's (which carries
     /// its parameter sets in-band), never a foreign clip's.
-    static func copyPieceBitstreamFilter(codec: String?, ext: String, damaged: Bool = false) -> [String] {
+    ///
+    /// `inBandParameterSets` — the source repeats its own parameter sets at its keyframes
+    /// (`inBandParameterSetProbeArguments`) — drops the parameter-set repeat; see
+    /// `parameterSetRepeatFilter(forCopyOf:)` for why it would do harm there.
+    static func copyPieceBitstreamFilter(codec: String?, ext: String, damaged: Bool = false,
+                                         inBandParameterSets: Bool = false) -> [String] {
         var chain: [String] = []
-        if !damaged, let repeatFilter = parameterSetRepeatFilter(forCopyOf: codec) {
+        if !damaged, !inBandParameterSets, let repeatFilter = parameterSetRepeatFilter(forCopyOf: codec) {
             chain.append(repeatFilter)
         }
         if !ptsRefillBitstreamFilter(codec: codec, ext: ext, damaged: damaged).isEmpty {
             chain.append(ptsRefillFilter)
         }
         return chain.isEmpty ? [] : ["-bsf:v", chain.joined(separator: ",")]
+    }
+
+    /// ffmpeg args that trace the parameter sets of **one** copied packet at `seek` — the
+    /// copy start's keyframe — so `tracesInBandParameterSets` can tell whether the source
+    /// repeats its sets in-band. `nil` for a codec `parameterSetRepeatFilter(forCopyOf:)`
+    /// never filters. `trace_headers` passes every packet, so `-frames:v 1` stops after
+    /// one; a `filter_units` pass list would drop a packet without sets and read to EOF.
+    /// The trace is long (≈ 90 KB for one 1080p keyframe): write stderr to a file.
+    static func inBandParameterSetProbeArguments(source: URL, seek: Double, codec: String?) -> [String]? {
+        guard parameterSetRepeatFilter(forCopyOf: codec) != nil else { return nil }
+        return ["-hide_banner", "-v", "info",
+                "-ss", timeString(seek), "-i", source.path,
+                "-map", "0:v:0", "-c", "copy", "-bsf:v", "trace_headers",
+                "-frames:v", "1", "-f", "null", "-"]
+    }
+
+    /// Whether a `inBandParameterSetProbeArguments` trace shows an SPS **inside the packet**.
+    /// `trace_headers` prints the container header's sets first (under "Extradata"), then a
+    /// `Packet:` line, then that packet's own NAL units — so only an SPS after the first
+    /// `Packet:` line is in-band. Both the HEVC and the H.264 trace name it
+    /// "Sequence Parameter Set".
+    static func tracesInBandParameterSets(_ trace: String) -> Bool {
+        guard let packet = trace.range(of: "Packet:") else { return false }
+        return trace[packet.upperBound...].contains("Sequence Parameter Set")
     }
 
     /// Whether the plan trims either end. When neither end is cut the clip is copied

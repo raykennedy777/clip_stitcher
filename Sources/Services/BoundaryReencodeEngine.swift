@@ -536,6 +536,24 @@ enum BoundaryReencodeEngine {
         return ExportEngine.CopyHeadSeek(seek: seek, origin: origin)
     }
 
+    /// Whether the source repeats its parameter sets in-band at the keyframe a copy starts
+    /// on (`ExportEngine.inBandParameterSetProbeArguments`). A copy of such a source needs
+    /// no parameter-set repeat, and gets wrong pictures from one when the container header
+    /// is stale (`ExportEngine.parameterSetRepeatFilter(forCopyOf:)`). `false` whenever
+    /// the probe cannot answer, which keeps the repeat — the issue-#113 behaviour.
+    static func sourceCarriesInBandParameterSets(
+        _ ffmpeg: URL, source: URL, copyStart: Double, codec: String?, traceOutput: URL
+    ) async -> Bool {
+        guard let args = ExportEngine.inBandParameterSetProbeArguments(
+            source: source, seek: max(0, copyStart), codec: codec) else { return false }
+        defer { try? FileManager.default.removeItem(at: traceOutput) }
+        guard let result = try? await ProcessRunner.run(ffmpeg, args, stderrTo: traceOutput),
+              result.status == 0,
+              let trace = try? String(contentsOf: traceOutput, encoding: .utf8)
+        else { return false }
+        return ExportEngine.tracesInBandParameterSets(trace)
+    }
+
     /// Maps a copy segment `[copyRange.lowerBound, copyRange.upperBound)` onto a
     /// `SegmentPlan` so its validated segment-muxer cut/remux can stream-copy the span
     /// bit-exact. A bound that is a clip boundary (frame 0 / no out-cut keyframe) gets no
@@ -609,10 +627,21 @@ enum BoundaryReencodeEngine {
         // Every copy piece carries its own parameter sets in-band (issue #113) so the join's
         // single container header can't decide how it decodes, plus — for mpeg2video→MKV
         // (issue #2) and any damaged *source*→MKV, whose truncated pictures choke the muxer
-        // even from discarded segments (issue #47) — the missing-PTS refill.
+        // even from discarded segments (issue #47) — the missing-PTS refill. A source that
+        // already repeats its sets in-band is left as it is: the repeat would put a stale
+        // header SPS in front of the source's own at every IRAP.
         let damagedSource = sourceDamaged || plan.contains { !$0.damage.isEmpty }
+        var inBandParameterSets = false
+        if !damagedSource, let firstCopy = plan.first(where: { $0.kind == .copy }),
+           firstCopy.range.lowerBound < index.pts.count {
+            inBandParameterSets = await sourceCarriesInBandParameterSets(
+                ffmpeg, source: source,
+                copyStart: index.pts[firstCopy.range.lowerBound] - containerStart, codec: codec,
+                traceOutput: work.appendingPathComponent("c\(clipIndex)_pstrace.txt"))
+        }
         let bsf = ExportEngine.copyPieceBitstreamFilter(
-            codec: codec, ext: ext, damaged: damagedSource)
+            codec: codec, ext: ext, damaged: damagedSource,
+            inBandParameterSets: inBandParameterSets)
         // The same refill's demuxer half (issue #116). An MPEG-PS anchor picture that lost
         // its PTS gets its true reordered one from `+genpts`; the `setts` fallback above
         // would put it `bf` frames early, on the previous anchor's PTS, and the finished
