@@ -199,7 +199,11 @@ struct ExportEngineTests {
         #expect(!ExportEngine.tracesInBandParameterSets(
             header + "Packet: 900 bytes, key frame\nSlice Segment Header\n"))
         #expect(ExportEngine.tracesInBandParameterSets(
-            header + "Packet: 900 bytes, key frame\nVideo Parameter Set\nSequence Parameter Set\n"))
+            header + "Packet: 900 bytes, key frame\nVideo Parameter Set\nSequence Parameter Set\n"
+                + "Picture Parameter Set\n"))
+        // An in-band SPS whose PPS lives only in the header still needs the repeat.
+        #expect(!ExportEngine.tracesInBandParameterSets(
+            header + "Packet: 900 bytes, key frame\nSequence Parameter Set\nSlice Header\n"))
         #expect(!ExportEngine.tracesInBandParameterSets(header))
     }
 

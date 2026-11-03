@@ -536,8 +536,10 @@ enum BoundaryReencodeEngine {
         return ExportEngine.CopyHeadSeek(seek: seek, origin: origin)
     }
 
-    /// Whether the source repeats its parameter sets in-band at the keyframe a copy starts
-    /// on (`ExportEngine.inBandParameterSetProbeArguments`). A copy of such a source needs
+    /// Whether the source repeats its parameter sets in-band at a keyframe at or just before
+    /// a copy's start (`ExportEngine.inBandParameterSetProbeArguments`). The seek is asked,
+    /// not measured: on Matroska it lands one keyframe early (ADR-0030 step 4), which is
+    /// close enough for a fact that holds per stretch of source. A copy of such a source needs
     /// no parameter-set repeat, and gets wrong pictures from one when the container header
     /// is stale (`ExportEngine.parameterSetRepeatFilter(forCopyOf:)`). `false` whenever
     /// the probe cannot answer, which keeps the repeat — the issue-#113 behaviour.
@@ -629,19 +631,23 @@ enum BoundaryReencodeEngine {
         // (issue #2) and any damaged *source*→MKV, whose truncated pictures choke the muxer
         // even from discarded segments (issue #47) — the missing-PTS refill. A source that
         // already repeats its sets in-band is left as it is: the repeat would put a stale
-        // header SPS in front of the source's own at every IRAP.
+        // header SPS in front of the source's own at every IRAP. Each copy segment is probed
+        // at its own start: a source can carry its sets in-band at one keyframe and not at
+        // another (an encoder that writes them only into the first packet).
         let damagedSource = sourceDamaged || plan.contains { !$0.damage.isEmpty }
-        var inBandParameterSets = false
-        if !damagedSource, let firstCopy = plan.first(where: { $0.kind == .copy }),
-           firstCopy.range.lowerBound < index.pts.count {
-            inBandParameterSets = await sourceCarriesInBandParameterSets(
-                ffmpeg, source: source,
-                copyStart: index.pts[firstCopy.range.lowerBound] - containerStart, codec: codec,
-                traceOutput: work.appendingPathComponent("c\(clipIndex)_pstrace.txt"))
+        var copyFilters: [Int: [String]] = [:]
+        for (s, segment) in plan.enumerated() where segment.kind == .copy {
+            var inBandParameterSets = false
+            if !damagedSource, segment.range.lowerBound < index.pts.count {
+                inBandParameterSets = await sourceCarriesInBandParameterSets(
+                    ffmpeg, source: source,
+                    copyStart: index.pts[segment.range.lowerBound] - containerStart, codec: codec,
+                    traceOutput: work.appendingPathComponent("c\(clipIndex)_s\(s)_pstrace.txt"))
+            }
+            copyFilters[s] = ExportEngine.copyPieceBitstreamFilter(
+                codec: codec, ext: ext, damaged: damagedSource,
+                inBandParameterSets: inBandParameterSets)
         }
-        let bsf = ExportEngine.copyPieceBitstreamFilter(
-            codec: codec, ext: ext, damaged: damagedSource,
-            inBandParameterSets: inBandParameterSets)
         // The same refill's demuxer half (issue #116). An MPEG-PS anchor picture that lost
         // its PTS gets its true reordered one from `+genpts`; the `setts` fallback above
         // would put it `bf` frames early, on the previous anchor's PTS, and the finished
@@ -680,6 +686,7 @@ enum BoundaryReencodeEngine {
         // Keys this clip took from the piece cache, evicted if the clip's gate refuses them.
         var hitKeys: [String] = []
         for (s, segment) in plan.enumerated() {
+            let bsf = copyFilters[s] ?? []
             // A segment-muxer copy's plan and head seek are settled before the run, because
             // the progress bar's expectation depends on them: the seek is what decides how
             // much of the source this run reads at all (issue #108).

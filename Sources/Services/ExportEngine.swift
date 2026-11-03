@@ -322,8 +322,8 @@ enum ExportEngine {
         return chain.isEmpty ? [] : ["-bsf:v", chain.joined(separator: ",")]
     }
 
-    /// ffmpeg args that trace the parameter sets of **one** copied packet at `seek` — the
-    /// copy start's keyframe — so `tracesInBandParameterSets` can tell whether the source
+    /// ffmpeg args that trace the parameter sets of **one** copied packet at `seek` — a
+    /// keyframe at or just before the copy start — so `tracesInBandParameterSets` can tell whether the source
     /// repeats its sets in-band. `nil` for a codec `parameterSetRepeatFilter(forCopyOf:)`
     /// never filters. `trace_headers` passes every packet, so `-frames:v 1` stops after
     /// one; a `filter_units` pass list would drop a packet without sets and read to EOF.
@@ -336,14 +336,16 @@ enum ExportEngine {
                 "-frames:v", "1", "-f", "null", "-"]
     }
 
-    /// Whether a `inBandParameterSetProbeArguments` trace shows an SPS **inside the packet**.
-    /// `trace_headers` prints the container header's sets first (under "Extradata"), then a
-    /// `Packet:` line, then that packet's own NAL units — so only an SPS after the first
-    /// `Packet:` line is in-band. Both the HEVC and the H.264 trace name it
-    /// "Sequence Parameter Set".
+    /// Whether an `inBandParameterSetProbeArguments` trace shows an SPS **and** a PPS
+    /// **inside the packet**. `trace_headers` prints the container header's sets first
+    /// (under "Extradata"), then a `Packet:` line, then that packet's own NAL units — so only
+    /// sets after the first `Packet:` line are in-band. Both are required: a packet with an
+    /// in-band SPS but its PPS only in the header still needs the repeat. The HEVC and the
+    /// H.264 trace use the same two names.
     static func tracesInBandParameterSets(_ trace: String) -> Bool {
         guard let packet = trace.range(of: "Packet:") else { return false }
-        return trace[packet.upperBound...].contains("Sequence Parameter Set")
+        let inPacket = trace[packet.upperBound...]
+        return inPacket.contains("Sequence Parameter Set") && inPacket.contains("Picture Parameter Set")
     }
 
     /// Whether the plan trims either end. When neither end is cut the clip is copied
