@@ -9,11 +9,10 @@ import Foundation
 struct FrameIndex {
     /// Presentation timestamp (seconds) of each frame, ascending.
     let pts: [Double]
-    /// Decode timestamp (seconds) of each frame, parallel to `pts`. The segment muxer
-    /// cuts on *decode* time, which differs from presentation time when B-frames are
-    /// present, so the cut time (`segmentTime(forCutAt:)`) is derived from this, not
-    /// from `pts` (ADR-0008). Defaults to `pts` for B-frame-free data, where the two
-    /// orders coincide.
+    /// Decode timestamp (seconds) of each frame, parallel to `pts`. The cut time
+    /// (`segmentTime(forCutAt:)`) starts from a DTS midpoint (ADR-0008), which differs
+    /// from a PTS midpoint when B-frames are present. Defaults to `pts` for
+    /// B-frame-free data, where the two orders coincide.
     let dts: [Double]
     /// Whether each frame is a keyframe (seek anchor).
     let keyframeFlags: [Bool]
@@ -77,13 +76,18 @@ struct FrameIndex {
     }
 
     /// The `-segment_times` value that makes the ffmpeg segment muxer cut exactly at
-    /// frame `n`. The muxer cuts at the first keyframe whose **decode** time is `>=` the
-    /// requested time, so the value is the midpoint between frame `n`'s DTS and the DTS
-    /// of the packet decoded immediately before it (the largest DTS below `n`'s). The
-    /// midpoint sits safely under `n`'s DTS, dodging a float `>=` edge that would
-    /// otherwise bump the cut to the next keyframe (ADR-0008). When B-frames reorder the
-    /// stream this differs from a PTS midpoint, which can fall *after* the keyframe's DTS
-    /// and skip it.
+    /// frame `n`. The value is the midpoint between frame `n`'s DTS and the DTS of the
+    /// packet decoded immediately before it (the largest DTS below `n`'s). The midpoint
+    /// sits safely under `n`'s DTS, dodging a float `>=` edge that would otherwise bump
+    /// the cut to the next keyframe (ADR-0008).
+    ///
+    /// The muxer splits at the first keyframe, in decode order, whose **presentation**
+    /// time is `>=` the requested time. So the midpoint is right only while every keyframe
+    /// decoded before `n` presents below it. A keyframe decoded just before `n` — two
+    /// I-frames back to back, or an I-frame and one B-frame — presents above it, and the
+    /// muxer then splits one keyframe early: the copy loses that keyframe and every
+    /// picture decoded between the two. In that case the value moves up to the midpoint
+    /// between that keyframe's PTS and `n`'s PTS. A safe midpoint stays as it is.
     ///
     /// The segment muxer measures `-segment_times` *relative to the stream's start_time*
     /// (the first presentation PTS), so that offset is subtracted: a source starting at,
@@ -101,10 +105,21 @@ struct FrameIndex {
         let startOffset = pts.first ?? 0
         let cut = dts[n]
         var predecessor: Double? = nil
-        for d in dts where d < cut {
-            if predecessor == nil || d > predecessor! { predecessor = d }
+        // The latest presentation time of a keyframe decoded before `n`: the muxer splits
+        // there if the cut time is at or below it.
+        var earlierKeyframePts: Double? = nil
+        for i in dts.indices where dts[i] < cut {
+            if predecessor == nil || dts[i] > predecessor! { predecessor = dts[i] }
+            if i < keyframeFlags.count, keyframeFlags[i],
+               earlierKeyframePts == nil || pts[i] > earlierKeyframePts! {
+                earlierKeyframePts = pts[i]
+            }
         }
         guard let prev = predecessor else { return cut / 2 - startOffset }
-        return (prev + cut) / 2 - startOffset
+        var time = (prev + cut) / 2
+        if let k = earlierKeyframePts, k >= time, k < pts[n] {
+            time = (k + pts[n]) / 2
+        }
+        return time - startOffset
     }
 }

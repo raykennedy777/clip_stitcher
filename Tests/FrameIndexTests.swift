@@ -131,3 +131,64 @@ struct SegmentTimeStartOffsetTests {
         #expect(index.segmentTime(forCutAt: 0) <= relativeDTS + 1e-9)
     }
 }
+
+/// The segment muxer splits at the first keyframe whose **presentation** time reaches the
+/// cut time — not its decode time. The DTS midpoint is safe only while every keyframe that
+/// decodes before the cut keyframe also presents before that midpoint. Back-to-back
+/// keyframes break it: the earlier keyframe decodes just under the midpoint but presents
+/// just over it, the muxer splits there, and the copy loses that frame (and any picture
+/// decoded between the two). Measured on a real broadcast MPEG-2 `.ts` (interlaced 576i25,
+/// out point on an I-frame directly followed by an I-frame): the piece came out one frame
+/// short in MKV and TS, and the verify gate refused the export.
+struct SegmentTimeBackToBackKeyframeTests {
+    /// The muxer's rule, as a check on a cut time: every keyframe decoded before `n`
+    /// presents before the cut, and `n` presents at or after it.
+    static func splitsExactlyAt(_ n: Int, _ index: FrameIndex) -> Bool {
+        let cut = index.segmentTime(forCutAt: n) + (index.pts.first ?? 0)
+        let earlier = index.keyframeFlags.indices.filter {
+            index.keyframeFlags[$0] && index.dts[$0] < index.dts[n]
+        }
+        return index.pts[n] >= cut && earlier.allSatisfy { index.pts[$0] < cut }
+    }
+
+    /// I directly followed by I in decode order — the real source's shape (closed GOPs,
+    /// two B-frames). The keyframe before the cut presents at 0.12, over the 0.10 DTS
+    /// midpoint.
+    ///   pres frame: 0     1     2     3(K)  4(K)  5     6     7
+    ///   pts:        0.00  0.04  0.08  0.12  0.16  0.20  0.24  0.28
+    ///   dts:        0.00  0.04  -0.04 0.08  0.12  0.20  0.24  0.16
+    @Test func aCutAfterAnAdjacentIFrameSplitsAtTheCutKeyframe() {
+        let index = FrameIndex(
+            pts: [0.00, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28],
+            dts: [0.00, 0.04, -0.04, 0.08, 0.12, 0.20, 0.24, 0.16],
+            keyframeFlags: [false, false, false, true, true, false, false, false])
+        #expect(Self.splitsExactlyAt(4, index))
+        #expect(abs(index.segmentTime(forCutAt: 4) - 0.14) < 1e-9)
+    }
+
+    /// I, then one B-frame, then I in decode order — the open-GOP MPEG-PS shape. The B
+    /// decodes between the keyframes, so the DTS midpoint (0.02) is under the earlier
+    /// keyframe's presentation time (0.04).
+    ///   pres frame: 0     1(K)  2(K)  3     4     5
+    ///   pts:        0.00  0.04  0.08  0.12  0.16  0.20
+    ///   dts:        0.00  -0.04 0.04  0.12  0.16  0.08
+    @Test func aCutAfterAKeyframeAndOneBFrameSplitsAtTheCutKeyframe() {
+        let index = FrameIndex(
+            pts: [0.00, 0.04, 0.08, 0.12, 0.16, 0.20],
+            dts: [0.00, -0.04, 0.04, 0.12, 0.16, 0.08],
+            keyframeFlags: [false, true, true, false, false, false])
+        #expect(Self.splitsExactlyAt(2, index))
+        #expect(abs(index.segmentTime(forCutAt: 2) - 0.06) < 1e-9)
+    }
+
+    /// Where the DTS midpoint is already safe it stays the cut time: the B-frame and
+    /// start-offset cases above keep their exact values.
+    @Test func aSafeDTSMidpointIsUnchanged() {
+        let index = FrameIndex(
+            pts: [0.00, 0.04, 0.08, 0.12, 0.16, 0.20],
+            dts: [0.00, 0.02, 0.04, 0.06, 0.08, 0.10],
+            keyframeFlags: [true, false, false, true, false, false])
+        #expect(Self.splitsExactlyAt(3, index))
+        #expect(abs(index.segmentTime(forCutAt: 3) - 0.05) < 1e-9)
+    }
+}

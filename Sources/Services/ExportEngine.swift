@@ -517,8 +517,8 @@ enum ExportEngine {
     }
 
     /// ffmpeg args to cut one clip's **video** into segments at its clean cut points.
-    /// Cuts are placed by **decode** time (ADR-0008): the muxer splits at the first
-    /// keyframe whose DTS reaches the segment time. With explicit `-segment_times` the
+    /// The muxer splits at the first keyframe whose **PTS** reaches the segment time; the
+    /// segment times come from `FrameIndex.segmentTime(forCutAt:)` (ADR-0008). With explicit `-segment_times` the
     /// muxer splits *only* there, so internal keyframes are carried through untouched.
     /// Assumes `needsCut(plan)`.
     ///

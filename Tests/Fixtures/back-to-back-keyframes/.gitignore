@@ -1,0 +1,4 @@
+# Sources for the back-to-back keyframe out-cut suite. Synthesised from ffmpeg's own
+# `testsrc2` on first run (ADR-0023); generated artefacts, so cached, never committed.
+*
+!.gitignore

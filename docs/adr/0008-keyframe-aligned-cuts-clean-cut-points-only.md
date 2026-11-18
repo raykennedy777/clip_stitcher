@@ -69,6 +69,19 @@ on its own.
     midpoint cuts frame-exact across all three formats. The frame index therefore carries DTS
     alongside PTS, and `FrameIndex.segmentTime(forCutAt:)` computes the DTS midpoint. (With no
     B-frames the two coincide.)
+  - **Amended 2026-11-18 (back-to-back keyframes):** the statement above about the muxer's rule
+    is wrong. The segment muxer splits at the first keyframe, in decode order, whose **PTS**
+    reaches the segment time. The DTS midpoint is correct only while every keyframe decoded
+    before the cut keyframe presents below it. A keyframe decoded directly before the cut
+    keyframe (I then I, or I, one B, then I) presents above it, and the muxer splits there:
+    the copy loses that keyframe and every picture decoded between the two. Measured on a
+    real interlaced MPEG-2 `.ts` (out point on an I-frame directly followed by an I-frame):
+    the copy came out 190436 frames for a planned 190437, in MKV and TS, and the verify gate
+    refused the export. `segmentTime(forCutAt:)` now keeps the DTS midpoint where it is safe,
+    and otherwise uses the midpoint between that earlier keyframe's PTS and the cut
+    keyframe's PTS. De-risked in the shell on synthesised MPEG-2 (`.ts`, `.mpg`), H.264 and
+    HEVC sources into `.mkv`, `.mp4` and `.ts`: the old time failed all 12, the new time
+    passed all 12.
 - **Clean-cut-point detection is codec-specific** (no decode needed; read the bitstream headers via
   the `trace_headers` bitstream filter, correlating keyframe NAL/picture units 1:1 with keyframe
   packets in decode order):

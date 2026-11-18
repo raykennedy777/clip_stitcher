@@ -35,8 +35,8 @@ enum FrameIndexer {
     /// Builds the full per-frame index in presentation order (ADR-0006): every
     /// frame's PTS and DTS plus a keyframe flag, sorted by PTS (packets arrive in
     /// decode order, which differs from presentation order when B-frames are present).
-    /// DTS is carried because the segment-muxer cut is computed from decode time, not
-    /// presentation time (ADR-0008).
+    /// DTS is carried because the segment-muxer cut time starts from a DTS midpoint
+    /// (ADR-0008).
     ///
     /// The packet dump can be large on long clips, so it streams to a temp file
     /// rather than through a pipe.
