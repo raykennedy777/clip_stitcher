@@ -84,3 +84,11 @@ depth the right thing to declare, because that piece is then what the join latch
   disagreement between pieces. The integration regression tests assert on the **final** file's
   timestamps for both directions: a shallow join (conform + a fully re-encoded clip) and a deep
   one (an interior cut on a B-pyramid source).
+- **Flag merging (`EncoderSelection.withEncoderParams`):** ffmpeg honours only the **last**
+  `-x264-params` / `-x265-params` flag on an output, so reorder-depth entries must be merged
+  with `:` into any existing flag (preserving Clip Doctor's MBAFF params or x265 `level-idc`)
+  rather than appended as a second flag.
+- **Synthetic B-pyramid test fixtures (`ReorderDepthIntegrationTests`):** Synthetic `lavfi`
+  x264 fixtures must pin `-x264-params b-pyramid=normal:b-adapt=0:scenecut=0` (with fixed
+  `-bf`), because x264's adaptive B-frame decision otherwise emits shallow cadences declaring
+  `has_b_frames=2` without real pyramids, causing regression tests to false-pass.

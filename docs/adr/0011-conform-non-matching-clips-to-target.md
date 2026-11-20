@@ -198,3 +198,22 @@ interlaced in the target's direction, and `+ildct+ilme` codes them so.
 the low-pass exists for. Frame counts are the target's in every case, and the coded scan is the
 asked direction (executed in `FieldOrderReencodeIntegrationTests`, both tails, `.mkv`/`.mp4`).
 
+## Additional implementation invariants
+
+- **Optional `conformCrf` (issue #105):** `OutputSettings.conformCrf` (0–51, currently exposed
+  through the CLI Stitch Job schema) passes `-crf` to libx264/libx265 conforms; `nil` keeps
+  encoder defaults byte-identically, and MPEG-2 targets ignore it.
+- **Display-space scale/pad math:** Fitted even storage dimensions are computed explicitly in
+  display space through target SAR rather than relying on `scale`'s
+  `force_original_aspect_ratio`, which operates in storage pixels and mis-fits anamorphic
+  sources.
+- **Color filter aliases & untagged-target gate:** `ConformEngine` maps ffprobe color tokens
+  onto `colorspace` filter aliases (`iec61966-2-1`→`srgb`, `iec61966-2-4`→`xvycc`,
+  `bt2020nc`→`bt2020ncl`) and passes unknown tokens through to fail loudly. Because libx264 in
+  Matroska still stamps limited `color_range=tv` even after an untagged-target `setparams`
+  strip, `MatchEvaluator.conformedVideoMatches` deliberately ignores color attributes that an
+  untagged target leaves `nil` while enforcing every attribute a tagged target specifies.
+- **Export-wide MP4 timescale & in-band parameter sets:** Conformed MP4 pieces carry the
+  export-wide `-video_track_timescale` (ADR-0009, issue #24), and all conformed pieces carry
+  `-bsf:v dump_extra` (ADR-0032, issue #113).
+

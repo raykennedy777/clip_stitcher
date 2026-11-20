@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Lint code comments (ratchet)
+        run: |
+          python3 scripts/test_lint_comments.py
+          python3 scripts/lint-comments.py
+
       - name: Install XcodeGen and FFmpeg
         run: brew install xcodegen ffmpeg
 

@@ -87,3 +87,10 @@ the audio process under the same no-orphans rule as the video decoder.
   restart-on-seek machinery above is retained for what still needs it (mid-play
   monitor-track switches); it just stops being invoked for user seeks. This also
   retires the mid-play-seek branch of the play-session end rule.
+- **Reader-thread hygiene & `containerStart` clamping (issues #85, #86):** Blocking PCM pipe
+  reads run on a private `DispatchQueue` (never main thread or Swift concurrency pool), and
+  `stop()` terminates ffmpeg rather than closing the `FileHandle` cross-thread while `read()`
+  is blocked — letting EOF wake the reader so it closes its own handle. `MediaProbe.probe`
+  piggybacks `format.start_time` onto its existing `-show_format` JSON pass (avoiding a second
+  ffprobe at import), and `MediaProbe.parseStartTime` clamps negative start times to `0` at the
+  single choke point so `pts - containerStart` can never over-seek forward.

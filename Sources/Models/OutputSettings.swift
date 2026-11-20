@@ -1,9 +1,8 @@
 import Foundation
 
-/// How the output is assembled.
 enum OutputMode: String, Codable, CaseIterable, Identifiable {
-    case connect      // Connect all clips into one file
-    case separate     // Export each clip as its own file
+    case connect
+    case separate
 
     var id: String { rawValue }
     var title: String {
@@ -14,7 +13,6 @@ enum OutputMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// Which streams to include in the output.
 enum OutputType: String, Codable, CaseIterable, Identifiable {
     case videoAndAudio
     case videoOnly
@@ -30,7 +28,6 @@ enum OutputType: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// Output container format.
 enum Container: String, Codable, CaseIterable, Identifiable {
     case ts
     case mkv
@@ -47,11 +44,9 @@ enum Container: String, Codable, CaseIterable, Identifiable {
     var fileExtension: String { rawValue }
 }
 
-/// How separate mode renders each clip (ADR-0018). A sub-setting of `.separate` —
-/// connect mode always conforms, because joining requires uniform properties.
 enum SeparateRendering: String, Codable, CaseIterable, Identifiable {
-    case conformToTarget   // today's verdict: matching clips smart-render, others conform
-    case cutOnly           // every clip smart-renders against itself; the target plays no role
+    case conformToTarget
+    case cutOnly
 
     var id: String { rawValue }
     var title: String {
@@ -65,23 +60,12 @@ enum SeparateRendering: String, Codable, CaseIterable, Identifiable {
 struct OutputSettings: Codable, Equatable {
     var mode: OutputMode = .connect
     var type: OutputType = .videoAndAudio
-    /// MKV by default, unconditionally (issue #10): the only supported container that
-    /// round-trips audio track titles (ADR-0014), and it now carries all three codecs by
-    /// stream-copy — MPEG-2's missing-PTS packets are refilled on the way in (issue #2).
     var container: Container = .mkv
     var rendering: SeparateRendering = .conformToTarget
-    /// The CRF a **conform** re-encode runs at (issue #105 follow-up) — nil (the
-    /// default, and every save made before the field) keeps the encoder's own default
-    /// (libx264 23, libx265 28), byte-identical to before. Applies to the x264/x265
-    /// conform encoders only; an MPEG-2 target has no CRF and ignores it. Set today by
-    /// the Stitch Job contract (`output.conformCrf`) so a scripted fill conform can
-    /// match its surrounding footage's quality class; the GUI doesn't expose it yet.
     var conformCrf: Int? = nil
 
     init() {}
 
-    /// Saves made before a field existed decode to its default instead of failing
-    /// the whole project file (`rendering` arrived with ADR-0018).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         mode = try c.decodeIfPresent(OutputMode.self, forKey: .mode) ?? .connect

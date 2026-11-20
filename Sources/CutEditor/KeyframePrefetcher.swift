@@ -1,17 +1,5 @@
 import AppKit
 
-/// Warms the cut editor's keyframe cache (issue #34). A keyframe step restarts the
-/// live decoder, whose accurate seek decodes-and-discards the GOP's non-key frames
-/// before the keyframe comes out — a fixed ~0.3 s on 1080p50 HEVC (measured; process
-/// spawn, demux seek, and image conversion were all ≤ 2 ms). `-skip_frame nokey`
-/// skips that warm-up entirely — the decoder touches only keyframes — so a short-lived
-/// one-shot process yields the exact sought keyframe in tens of milliseconds.
-///
-/// One process per keyframe, deliberately: streaming several keyframes from one
-/// `nokey` process emits them out of presentation order and drops some on the
-/// open-GOP HEVC fixture (measured), which would break the frame↔image mapping.
-/// Software decode, also deliberately: a lone intra frame decodes faster than a
-/// VideoToolbox session warms up (50 vs 80 ms measured).
 final class KeyframePrefetcher {
     private let url: URL
     private let pts: [Double]
@@ -34,10 +22,6 @@ final class KeyframePrefetcher {
         self.ffmpeg = ffmpeg
     }
 
-    /// The keyframes worth warming around a landing: the anchor itself, then its
-    /// neighbours alternating forward/backward — nearest first, so the frames a
-    /// `]`/`[` press needs next arrive soonest — bounded by the cache capacity.
-    /// `position` indexes into `keyframes` (the file's keyframe frame numbers).
     static func neighborhood(position: Int, keyframes: [Int], cap: Int) -> [Int] {
         guard keyframes.indices.contains(position), cap > 0 else { return [] }
         var wanted = [keyframes[position]]
@@ -53,17 +37,6 @@ final class KeyframePrefetcher {
         return wanted
     }
 
-    /// Fetches the given keyframes one one-shot at a time, in the order given
-    /// (callers put the nearest neighbours first), calling `onImage` as each arrives
-    /// (on the prefetch queue). A newer request abandons the rest of this one.
-    /// `frames` must be keyframe numbers — the seek lands on that exact pts.
-    ///
-    /// Every emitted frame's pts is verified (showinfo) before it is reported, and it
-    /// is reported under the frame it actually is: on the open-GOP HEVC fixture the
-    /// `nokey` decode silently drops some mid-stream CRAs and emits the *following*
-    /// keyframe instead (measured — caching that under the requested number flashed
-    /// the wrong keyframe on every step onto one). A dropped keyframe is re-fetched
-    /// with a plain accurate seek — slower, but exact.
     func fetch(_ frames: [Int], onImage: @escaping @Sendable (Int, NSImage) -> Void) {
         lock.lock()
         generation += 1
@@ -76,7 +49,7 @@ final class KeyframePrefetcher {
                 var delivered = false
                 if let (actual, image) = self.decodeKeyframe(at: frame, skipNonKey: true) {
                     guard self.isCurrent(gen) else { return }
-                    onImage(actual, image)   // a mislabel-free image, wherever it landed
+                    onImage(actual, image)
                     delivered = actual == frame
                 }
                 if !delivered {
@@ -104,25 +77,19 @@ final class KeyframePrefetcher {
         return generation == gen
     }
 
-    /// Decodes one frame at the keyframe's pts and returns it with the frame number
-    /// it *actually* is — never trusted, always read back from showinfo's pts (the
-    /// emitted timestamp is relative to the seek, so requested-pts + relative maps it
-    /// into the index). `skipNonKey` is the fast path (`-skip_frame nokey`, 50–80 ms);
-    /// without it a plain accurate seek pays the GOP warm-up but cannot miss.
+    // ADR-0036
     private func decodeKeyframe(at frame: Int, skipNonKey: Bool) -> (frame: Int, image: NSImage)? {
         guard frame >= 0, frame < pts.count else { return nil }
         let process = Process()
         process.executableURL = ffmpeg
-        process.standardInput = FileHandle.nullDevice   // no SIGTTIN stop (see ProcessRunner)
+        process.standardInput = FileHandle.nullDevice
         var arguments = ["-hide_banner", "-loglevel", "info", "-nostats"]
         if skipNonKey {
             arguments += ["-skip_frame", "nokey"]
         } else {
-            arguments += ["-hwaccel", "videotoolbox"]   // the warm-up path; hw is faster there
+            arguments += ["-hwaccel", "videotoolbox"]
         }
         arguments += [
-            // -ss is measured from the container's start_time, not absolute pts (the
-            // issue #3 trap).
             "-ss", String(format: "%.6f", pts[frame] - containerStart),
             "-i", url.path, "-an",
             "-vf", "showinfo,scale=\(width):\(height),format=rgb24",
@@ -154,8 +121,6 @@ final class KeyframePrefetcher {
             buffer.append(chunk)
         }
         try? handle.close()
-        // The frame is read; stderr holds showinfo's line for it (a few hundred
-        // bytes — read after the frame so neither pipe can wedge the other).
         process.terminate()
         let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         try? errPipe.fileHandleForReading.close()
@@ -167,8 +132,6 @@ final class KeyframePrefetcher {
         return (actual, image)
     }
 
-    /// The first frame's pts_time from showinfo output, in seconds relative to the
-    /// seek point; nil when no frame was logged.
     static func firstShowinfoPts(in stderr: String) -> Double? {
         guard let range = stderr.range(of: "pts_time:") else { return nil }
         let tail = stderr[range.upperBound...].prefix(24)
@@ -176,9 +139,6 @@ final class KeyframePrefetcher {
         return Double(token)
     }
 
-    /// The frame number whose pts is nearest `target`, accepted only when within
-    /// 40 % of the local frame spacing — a mismatch means the decode emitted some
-    /// other frame and the image must not be filed under a guess.
     static func nearestFrame(forPts target: Double, in pts: [Double]) -> Int? {
         guard !pts.isEmpty else { return nil }
         var low = 0, high = pts.count - 1
@@ -186,7 +146,6 @@ final class KeyframePrefetcher {
             let mid = (low + high) / 2
             if pts[mid] < target { low = mid + 1 } else { high = mid }
         }
-        // `low` is the first pts >= target; the nearest is it or its predecessor.
         var best = low
         if low > 0, abs(pts[low - 1] - target) < abs(pts[low] - target) { best = low - 1 }
         let gapBefore = best > 0 ? pts[best] - pts[best - 1] : .infinity
@@ -197,8 +156,6 @@ final class KeyframePrefetcher {
     }
 }
 
-/// A tiny bounded least-recently-used map keyed by frame number — the keyframe
-/// cache's eviction policy (issue #34: ≤ ~16 entries at display resolution).
 struct BoundedLRU<Value> {
     let capacity: Int
     private var store: [Int: Value] = [:]
@@ -210,10 +167,8 @@ struct BoundedLRU<Value> {
 
     var count: Int { order.count }
 
-    /// Whether `key` is cached — without refreshing its recency.
     func contains(_ key: Int) -> Bool { store[key] != nil }
 
-    /// The cached value, refreshing its recency.
     mutating func value(at key: Int) -> Value? {
         guard let value = store[key] else { return nil }
         touch(key)

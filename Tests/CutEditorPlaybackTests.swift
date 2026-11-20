@@ -1,10 +1,6 @@
 import Testing
 @testable import ClipStitcher
 
-/// Where a play session stops (the QA finding on issue #7's verification pass:
-/// pressing Play at or past the out point looked like a dead button, because the
-/// loop stopped on its first tick). The rule: the out point ends a session that
-/// started before it; a session starting at or past it runs to the clip end.
 struct PlaybackEndTests {
     @Test func sessionStartedBeforeTheOutPointStopsThere() {
         #expect(CutEditorModel.playbackEnd(outPoint: 100, origin: 50, lastFrame: 500) == 100)

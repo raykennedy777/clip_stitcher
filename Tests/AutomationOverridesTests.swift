@@ -2,9 +2,6 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Pins the panel-bypass gate (issue #37): without the exact marker the bypass is
-/// unreachable and every flow keeps its panel; with it, paths come from the
-/// companion variables.
 struct AutomationOverridesTests {
     @Test func withoutTheMarkerThereAreNoOverrides() {
         #expect(AutomationOverrides.fromEnvironment([:]) == nil)

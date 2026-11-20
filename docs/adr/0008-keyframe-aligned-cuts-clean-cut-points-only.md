@@ -82,6 +82,13 @@ on its own.
     keyframe's PTS. De-risked in the shell on synthesised MPEG-2 (`.ts`, `.mpg`), H.264 and
     HEVC sources into `.mkv`, `.mp4` and `.ts`: the old time failed all 12, the new time
     passed all 12.
+  - **Stream `start_time` subtraction & plain remux:** `FrameIndex.segmentTime(forCutAt:)`
+    subtracts the video stream's first presentation timestamp (`pts.first ?? 0`) because the
+    segment muxer measures `-segment_times` relative to the stream's start time (for the first
+    decoded frame with no DTS predecessor, `cut/2 - startOffset` may legitimately be negative).
+    When neither end of a copy plan is trimmed (`!needsCut`), the engine uses a plain remux
+    (`ExportEngine.remuxArguments`) instead of the segment muxer, because omitting
+    `-segment_times` causes the segment muxer to split at *every* keyframe.
 - **Clean-cut-point detection is codec-specific** (no decode needed; read the bitstream headers via
   the `trace_headers` bitstream filter, correlating keyframe NAL/picture units 1:1 with keyframe
   packets in decode order):

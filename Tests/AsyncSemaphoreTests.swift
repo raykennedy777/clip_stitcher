@@ -2,33 +2,26 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// The import-throttle semaphore (issue #86): bounding concurrency, and — the fix —
-/// cancellation-awareness. A waiter cancelled while parked must resume by throwing and
-/// give its slot back; before the fix its continuation stayed parked forever, so every
-/// later `release()` fed the dead waiter and the throttle wedged. Tests race a timeout so
-/// a regression fails (a thrown cancellation) instead of hanging the whole suite.
 struct AsyncSemaphoreTests {
-
     @Test func acquireAndReleaseBoundConcurrency() async throws {
         let sem = AsyncSemaphore(limit: 2)
         try await sem.acquire()
-        try await sem.acquire()               // both slots taken
+        try await sem.acquire()
 
-        // A third acquire must park until a slot frees.
         let third = Task { try await sem.acquire() }
         try await Task.sleep(nanoseconds: 100_000_000)
-        await sem.release()                   // hands the slot straight to `third`
+        await sem.release()
 
         let timeout = Task { try? await Task.sleep(nanoseconds: 5_000_000_000); third.cancel() }
-        try await third.value                 // completes, or the timeout cancel fails the test
+        try await third.value
         timeout.cancel()
     }
 
     @Test func aCancelledWaiterResumesByThrowing() async throws {
         let sem = AsyncSemaphore(limit: 1)
-        try await sem.acquire()               // hold the only slot
+        try await sem.acquire()
 
-        let waiter = Task { try await sem.acquire() }   // parks: no slot free
+        let waiter = Task { try await sem.acquire() }
         try await Task.sleep(nanoseconds: 100_000_000)
         waiter.cancel()
         await #expect(throws: CancellationError.self) { try await waiter.value }
@@ -36,28 +29,21 @@ struct AsyncSemaphoreTests {
 
     @Test func aCancelledWaiterDoesNotLeakItsSlot() async throws {
         let sem = AsyncSemaphore(limit: 1)
-        try await sem.acquire()               // hold the only slot
+        try await sem.acquire()
 
-        let waiter = Task { try await sem.acquire() }   // parks
+        let waiter = Task { try await sem.acquire() }
         try await Task.sleep(nanoseconds: 100_000_000)
         waiter.cancel()
         await #expect(throws: CancellationError.self) { try await waiter.value }
 
-        await sem.release()                   // free the held slot
+        await sem.release()
 
-        // The freed slot must be claimable. A leak would have handed it to the dead
-        // waiter, so this acquire would block forever — the timeout makes that a failure.
         let claim = Task { try await sem.acquire() }
         let timeout = Task { try? await Task.sleep(nanoseconds: 5_000_000_000); claim.cancel() }
         try await claim.value
         timeout.cancel()
     }
 
-    /// The leak fix: a cancellation that finds no live acquire — the real race is `release()`
-    /// resuming a waiter normally just before its late cancel handler lands — must not grow
-    /// `cancelledBeforeRegister`. The race isn't deterministically reproducible, so this drives
-    /// the off-actor path directly: a cancel for an id that was never (or is no longer) live is a
-    /// no-op. Before the fix it inserted unconditionally, so the set grew without bound.
     @Test func cancelForANonLiveIdDoesNotGrowTheSet() async {
         let sem = AsyncSemaphore(limit: 1)
         await sem.simulateCancel(UUID())
@@ -66,17 +52,15 @@ struct AsyncSemaphoreTests {
         #expect(await sem.liveCount == 0)
     }
 
-    /// A completed acquire/release cycle leaves both tracking sets empty — nothing lingers once
-    /// the acquire has resumed, even the parked path resumed by `release()`.
     @Test func acquireReleaseCycleLeavesTrackingSetsEmpty() async throws {
         let sem = AsyncSemaphore(limit: 1)
-        try await sem.acquire()                 // fast path
+        try await sem.acquire()
         await sem.release()
 
-        try await sem.acquire()                 // hold the slot
-        let parked = Task { try await sem.acquire() }   // parks
+        try await sem.acquire()
+        let parked = Task { try await sem.acquire() }
         try await Task.sleep(nanoseconds: 100_000_000)
-        await sem.release()                     // hands the slot to `parked`
+        await sem.release()
         try await parked.value
         await sem.release()
 

@@ -1,8 +1,5 @@
 import SwiftUI
 
-/// The Output Preview (sidebar "Preview"): scrubs the assembled timeline by decoding
-/// source frames on demand (ADR-0012). Mirrors the cut-editor's layout so the two
-/// frame views feel like siblings.
 struct PreviewView: View {
     @StateObject private var model: PreviewModel
 
@@ -23,9 +20,6 @@ struct PreviewView: View {
                     preview
                     controls
                 }
-                // Scroll anywhere over the detail pane scrubs (issue #40);
-                // Shift strides keyframe anchors, mirroring ⇧←/⇧→. The
-                // sidebar sits outside this view, so it keeps scrolling.
                 .scrollScrub { steps, keyframeStride in
                     if keyframeStride {
                         for _ in 0..<abs(steps) {
@@ -40,15 +34,9 @@ struct PreviewView: View {
         .navigationTitle("Preview")
         .task { await model.load() }
         .onDisappear { model.teardown() }
-        // Publish the "Save Frame as Image…" command (issue #89) while the preview owns
-        // the key window's scene, so the File-menu item enables and acts on the frame on
-        // screen. Re-evaluated as `canSaveFrame` (reads `model.image`) changes.
         .focusedSceneValue(\.saveFrame, SaveFrameCommand(isEnabled: model.canSaveFrame) {
             saveFrame()
         })
-        // Publish the transport (issue #67) so the Playback menu's shared actions
-        // (Play/Pause, Step, Keyframe) drive the preview while it's key. Scene scanning is
-        // cut-editor-only, so it isn't offered here.
         .focusedSceneValue(\.previewTransport, PreviewTransport(
             isPlaying: model.isPlaying,
             canStep: !model.isLoading && model.frameCount > 0,
@@ -57,13 +45,10 @@ struct PreviewView: View {
             stepKeyframe: { $0 < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe() }))
     }
 
-    /// Runs the shared save pipeline for the frame under the playhead (issue #89).
     private func saveFrame() {
         guard let request = model.frameSnapshotRequest() else { return }
         FrameSnapshot.save(request)
     }
-
-    // MARK: - Preview area
 
     private var preview: some View {
         ZStack {
@@ -88,8 +73,6 @@ struct PreviewView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Controls
-
     private var controls: some View {
         VStack(spacing: 10) {
             scrubber
@@ -106,9 +89,6 @@ struct PreviewView: View {
         .background(.bar)
     }
 
-    /// Which output track to hear during playback (issue #8) — one track at a
-    /// time, named like the cut-editor's dropdown, persisted with the project.
-    /// Switching mid-play restarts the stream on the new track.
     private var audioTrackPicker: some View {
         Picker("Audio:", selection: Binding(
             get: { model.monitoredTrack },
@@ -137,8 +117,6 @@ struct PreviewView: View {
         }
     }
 
-    /// Tick marks under the scrubber at each join (where one clip ends and the next
-    /// begins). Inset to roughly match the slider knob's travel.
     private var joinMarkers: some View {
         GeometryReader { geo in
             let inset: CGFloat = 10
@@ -177,10 +155,6 @@ struct PreviewView: View {
         HStack(spacing: 8) {
             button("backward.end.fill", help: "First frame") { model.goToStart() }
             button("backward.fill", help: "Previous keyframe (⇧←)") { model.stepToPreviousKeyframe() }
-            // One registered shortcut per arrow key, dispatching on the live Shift
-            // state: SwiftUI matches arrow-key equivalents ignoring Shift, so two
-            // buttons declaring ← and ⇧← both fire the first-registered one (the
-            // cut-editor's pattern).
             button("backward.frame.fill", help: "Back one frame (←)") { arrowJump(-1) }
                 .keyboardShortcut(.leftArrow, modifiers: [])
 
@@ -196,7 +170,7 @@ struct PreviewView: View {
         .disabled(model.isLoading || model.frameCount == 0)
     }
 
-    /// ←/→ step a frame; with Shift held they jump a keyframe instead.
+    // ADR-0037
     private func arrowJump(_ delta: Int) {
         if NSEvent.modifierFlags.contains(.shift) {
             delta < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe()

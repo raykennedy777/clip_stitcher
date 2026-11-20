@@ -5,29 +5,19 @@ struct SourceView: View {
     @ObservedObject var document: ProjectDocument
     @EnvironmentObject private var cutEditor: CutEditorPresenter
     @State private var selection: Set<Clip.ID> = []
-    /// Whether the clip inspector is showing (issue #88). `@SceneStorage` so each window
-    /// remembers its own inspector state across relaunch — HIG-natural for a per-window
-    /// inspector, unlike an app-wide `@AppStorage` default.
     @SceneStorage("source.inspector.shown") private var inspectorShown = false
     @State private var importing = false
     @State private var importPurpose: ImportPurpose = .add
     @State private var isDropTargeted = false
-    /// The clips an open Audio Settings sheet edits, in timeline order; empty when
-    /// the sheet is closed. More than one only under the same-source gate.
     @State private var audioSettingsClips: [Clip.ID] = []
-    /// The clip an open Clip Doctor sheet repairs (issue #53); nil when closed.
     @State private var doctorTarget: DoctorTarget?
 
-    /// What a presented file picker is for. A single `.fileImporter` serves both jobs —
-    /// stacking two of the same presentation modifier on one view silently breaks all but
-    /// the last, which once left "Add File" doing nothing.
+    // ADR-0037
     private enum ImportPurpose {
         case add
         case relink(Set<Clip.ID>)
     }
 
-    /// The Clip Doctor sheet's target, wrapped so `.sheet(item:)` can drive it off a
-    /// `Clip.ID` (issue #53).
     private struct DoctorTarget: Identifiable { let id: Clip.ID }
 
     var body: some View {
@@ -37,8 +27,6 @@ struct SourceView: View {
                 doctorBanner
                 clipList
             }
-            // The Clip Doctor sheet lives on this column, not the root — two `.sheet`
-            // presenters on one view can clash like the duplicated `.fileImporter` did.
             .sheet(item: $doctorTarget) { target in
                 ClipDoctorView(document: document, clipID: target.id)
             }
@@ -77,9 +65,6 @@ struct SourceView: View {
                 if let url = urls.first { document.relink(ids: ids, to: url) }
             }
         }
-        // The trailing clip inspector (issue #88): a full technical read-out of the selected
-        // clip and why it does or doesn't match the target. Updates live as the selection
-        // moves (arrow keys included) — it reads the same `selection` the List drives.
         .inspector(isPresented: $inspectorShown) {
             ClipInspectorView(document: document, selection: selection)
         }
@@ -91,14 +76,11 @@ struct SourceView: View {
                     Label("Clip Inspector", systemImage: "sidebar.right")
                 }
                 .help("Show or hide the clip inspector")
-                // Finder's inspector shortcut; ⌘I alone is "Get Info" on files.
                 .keyboardShortcut("i", modifiers: [.command, .option])
                 .accessibilityIdentifier("inspector.toggle")
             }
         }
     }
-
-    // MARK: - Clip list
 
     @ViewBuilder
     private var clipList: some View {
@@ -121,12 +103,8 @@ struct SourceView: View {
                         share: document.copyShares[clip.id]
                     )
                     .tag(clip.id)
-                    // A container, not a flattened element — so the badge keeps its
-                    // own `source.clip.<index>.role` identifier and value (issue #5).
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("source.clip.\(index)")
-                    // Native NSTableView double-click → open the cut-editor, without
-                    // disturbing the List's single-click selection + highlight.
                     .background(ListDoubleClickAction { row in
                         let clips = document.project.clips
                         guard clips.indices.contains(row) else { return }
@@ -134,8 +112,6 @@ struct SourceView: View {
                         selection = [clip.id]
                         openCutEditor(for: clip)
                     })
-                    // Acts on the whole selection when the row under the pointer is
-                    // part of it, else on just that row (macOS convention).
                     .contextMenu {
                         let targets = contextTargets(for: clip)
                         Button("Open in Cut-Editor") {
@@ -159,7 +135,6 @@ struct SourceView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onKeyPress(.return) {
-                // The cut-editor opens one clip — only an unambiguous selection.
                 if selection.count == 1, let id = selection.first,
                    let clip = document.project.clips.first(where: { $0.id == id }) {
                     openCutEditor(for: clip)
@@ -167,18 +142,12 @@ struct SourceView: View {
                 }
                 return .ignored
             }
-            // ⌘↑ / ⌘↓ reorder the selected clip. Plain arrows are left to the List
-            // for selection navigation (we ignore them here).
             .onKeyPress(keys: [.upArrow, .downArrow]) { press in
                 guard press.modifiers.contains(.command) else { return .ignored }
                 move(by: press.key == .upArrow ? -1 : 1)
                 return .handled
             }
-            // Backspace / forward delete remove the selected clips — the keyboard
-            // path to the Delete button and context-menu item (issue #42).
-            // Backspace reaches the list as DEL (U+007F), not `.delete` (BS, U+0008),
-            // so match both; forward delete arrives with the .function modifier, so
-            // only reject the modifiers that would make this a different chord.
+            // ADR-0037
             .onKeyPress(keys: ["\u{7F}", .delete, .deleteForward]) { press in
                 let chordModifiers: EventModifiers = [.command, .option, .control, .shift]
                 guard press.modifiers.isDisjoint(with: chordModifiers),
@@ -194,13 +163,9 @@ struct SourceView: View {
                       output: document.project.output)
     }
 
-    // MARK: - Action panel
-
     private var actionPanel: some View {
         VStack(spacing: 8) {
             action("Add File", systemImage: "plus", id: "source.addFile") {
-                // Automation bypass (issue #37): sources come from the environment
-                // instead of an open panel; the import pipeline is unchanged.
                 if let sources = AutomationOverrides.current?.importSources, !sources.isEmpty {
                     document.addFiles(sources)
                     return
@@ -249,9 +214,6 @@ struct SourceView: View {
                    enabled: canDoctorSelection) {
                 if let id = selection.first { presentDoctor(for: id) }
             }
-            // Why Clip Doctor is disabled for an audio-only selection (issue #83): it
-            // repairs video damage, so a no-video source is out of scope — named, never
-            // silent. Present only for that case.
             if let notice = audioOnlyDoctorNotice {
                 Text(notice)
                     .font(.caption)
@@ -279,24 +241,15 @@ struct SourceView: View {
         .accessibilityIdentifier(id)
     }
 
-    // MARK: - Selection helpers (issue #12)
-
-    /// The selected rows' positions in timeline order — the selection set itself
-    /// carries no order.
     private func indices(of ids: Set<Clip.ID>) -> Set<Int> {
         Set(document.project.clips.enumerated()
             .filter { ids.contains($0.element.id) }.map(\.offset))
     }
 
-    /// What a context-menu item acts on: the whole selection when the right-clicked
-    /// row is part of it, else just that row.
     private func contextTargets(for clip: Clip) -> Set<Clip.ID> {
         selection.contains(clip.id) ? selection : [clip.id]
     }
 
-    /// A clip's identity for the same-source gate: its resolved URL when the file is
-    /// reachable, else its raw bookmark — so duplicated rows of a now-missing file
-    /// (byte-identical bookmarks) still count as one source for Relink.
     private func sourceKey(for clip: Clip) -> String? {
         if let url = document.url(for: clip) { return "url:\(url.standardizedFileURL.path)" }
         return clip.bookmark.isEmpty ? nil : "bookmark:\(clip.bookmark.base64EncodedString())"
@@ -309,28 +262,21 @@ struct SourceView: View {
         return BatchSelection.allSameSource(keys)
     }
 
-    // MARK: - Actions
-
     private func canMove(by delta: Int) -> Bool {
         BatchSelection.canMove(count: document.project.clips.count,
                                selected: indices(of: selection), delta: delta)
     }
 
-    /// The target is a single role — only an unambiguous selection can assign it.
     private var canSetTarget: Bool {
         selection.count == 1 && selection.first != document.project.targetClipID
     }
 
-    /// Relink rebinds the selection to one picked file, so every selected clip must
-    /// be source-missing and they must all have pointed at the same file.
     private var canRelink: Bool {
         !selection.isEmpty
             && selection.allSatisfy { document.importStates[$0] == .sourceMissing }
             && allSameSource(selection)
     }
 
-    /// The sheet's track list must hold for every clip it writes to, so all
-    /// selected clips must share the same source file.
     private var canOpenAudioSettings: Bool {
         !selection.isEmpty && allSameSource(selection)
     }
@@ -339,14 +285,6 @@ struct SourceView: View {
         audioSettingsClips = document.project.clips.map(\.id).filter { ids.contains($0) }
     }
 
-    // MARK: - Clip Doctor (issue #53/#55)
-
-    /// Clip Doctor repairs one clip's **video** damage. Enabled for a clip with a
-    /// video-affecting damage zone whose source is reachable — including a field-coded
-    /// (PAFF) clip, which takes the damage-to-EOF re-encode (issue #54, opt-in in the
-    /// sheet). A field-coded clip whose codec isn't H.264 is excluded: that route's tail is
-    /// MBAFF H.264, so a non-H.264 head can't repair without a mixed-codec output (issue #57).
-    /// An audio-only gap needs no doctor: every export already silence-fills it (issue #44).
     private func canDoctor(_ clip: Clip) -> Bool {
         (clip.damageZones?.contains(where: \.affectsVideo) ?? false)
             && document.importStates[clip.id] != .sourceMissing
@@ -354,20 +292,12 @@ struct SourceView: View {
             && (clip.fieldCoded != true || ClipDoctorEngine.canRepairFieldCoded(codec: clip.video?.codec))
     }
 
-    /// Clip Doctor is single-clip only.
     private var canDoctorSelection: Bool {
         guard selection.count == 1, let id = selection.first,
               let clip = document.project.clips.first(where: { $0.id == id }) else { return false }
         return canDoctor(clip)
     }
 
-    /// The explanation shown beside the disabled Clip Doctor button when the single selected
-    /// clip is audio-only (issue #83): Clip Doctor repairs video damage, so a source import
-    /// rejected for having no video track is out of scope — say so rather than leaving the
-    /// button silently disabled. nil for every other disabled reason (no damage, source
-    /// missing, unsupported field-coded), which the row's own state already explains. Keyed
-    /// off the exact no-video-track import failure so a corrupt-video probe failure (also
-    /// video == nil) isn't mislabelled.
     private var audioOnlyDoctorNotice: String? {
         guard selection.count == 1, let id = selection.first,
               document.importStates[id] == .failed(ProjectDocument.noVideoTrackFailure)
@@ -375,17 +305,12 @@ struct SourceView: View {
         return "Clip Doctor repairs video sources only."
     }
 
-    /// Selects the clip and opens its Clip Doctor sheet, clearing any pending banner
-    /// suggestion for it (issue #55 — the user is now acting on it).
     private func presentDoctor(for id: Clip.ID) {
         selection = [id]
         document.dismissDoctorSuggestion(id)
         doctorTarget = DoctorTarget(id: id)
     }
 
-    /// The clip a Clip Doctor banner is currently offered for (issue #55): the first
-    /// still-valid suggestion in the queue. A suggestion is skipped if the clip went
-    /// away or no longer qualifies (e.g. relinked clean).
     private var doctorBannerClip: Clip? {
         for id in document.doctorSuggestions {
             if let clip = document.project.clips.first(where: { $0.id == id }), canDoctor(clip) {
@@ -395,10 +320,6 @@ struct SourceView: View {
         return nil
     }
 
-    /// A non-modal, dismissible banner above the timeline suggesting Clip Doctor for a
-    /// freshly-detected damaged clip (issue #55). One at a time — a burst of imports
-    /// surfaces the next once this is dismissed or opened. The row damage badge stays
-    /// the always-present marker.
     @ViewBuilder
     private var doctorBanner: some View {
         if let clip = doctorBannerClip {
@@ -428,8 +349,6 @@ struct SourceView: View {
         }
     }
 
-    /// The clip an in/out-reset notice is currently offered for (issue #74): the first
-    /// still-present clip in the queue. Skipped if the clip went away.
     private var inOutResetClip: Clip? {
         for id in document.inOutResets {
             if let clip = document.project.clips.first(where: { $0.id == id }) { return clip }
@@ -437,10 +356,6 @@ struct SourceView: View {
         return nil
     }
 
-    /// A non-modal, dismissible notice above the timeline when index reconciliation
-    /// adjusted a clip's stored in/out points: reset to whole-clip after a re-import
-    /// landed a shorter file (issue #74), or moved to copy-valid boundaries on a
-    /// field-coded copy-cut clip (issue #96). Never silent.
     @ViewBuilder
     private var inOutResetBanner: some View {
         if let clip = inOutResetClip {
@@ -476,7 +391,6 @@ struct SourceView: View {
         selection.subtract(ids)
     }
 
-    /// Duplicates the clips and selects the copies, Finder-style.
     private func duplicate(_ ids: Set<Clip.ID>) {
         let newIDs = document.duplicateClips(ids: ids)
         if !newIDs.isEmpty {
@@ -488,10 +402,6 @@ struct SourceView: View {
         cutEditor.open(clip: clip, document: document)
     }
 
-    // MARK: - Drag & drop
-
-    /// Append-drop onto the window chrome / empty state. Positional drops between
-    /// rows are handled by the list's `onInsert`.
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         guard providers.contains(where: {
             $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
@@ -502,8 +412,6 @@ struct SourceView: View {
         return true
     }
 
-    /// Loads file URLs from drop providers, keeping only importable videos and
-    /// preserving drop order, then delivers them on the main actor.
     private func loadVideoURLs(from providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
         let fileProviders = providers.filter {
             $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
@@ -527,8 +435,6 @@ struct SourceView: View {
         }
     }
 
-    // MARK: - Importable types
-
     static let acceptedExtensions: Set<String> =
         ["ts", "m2ts", "mts", "mkv", "mpg", "mpeg", "m2v", "vob", "mp4", "mov", "m4v"]
 
@@ -542,8 +448,6 @@ struct SourceView: View {
         return types
     }()
 
-    /// Whether a dropped file looks like an importable video — by extension, or by
-    /// its type conforming to one we accept. Keeps stray files (text, images) out.
     static func isImportable(_ url: URL) -> Bool {
         if acceptedExtensions.contains(url.pathExtension.lowercased()) { return true }
         guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else { return false }
@@ -551,9 +455,6 @@ struct SourceView: View {
     }
 }
 
-/// Pins every icon into a uniform 28 pt slot (same width as `PreviewView`'s
-/// transport buttons) so button titles share one left edge regardless of how
-/// wide each SF Symbol happens to be.
 private struct FixedIconColumnLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 4) {

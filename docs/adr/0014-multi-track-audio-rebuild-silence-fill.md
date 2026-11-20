@@ -106,3 +106,16 @@ caveat above that titles generally only exist on MKV sources.
   source makes a video piece whose head packets carry unknown timestamps and abort the
   MKV mux ("Can't write packet with unknown timestamp"). Test carrier pieces must be
   cut at leading-picture-free keyframes (as the real engine does) or re-encoded.
+- **Default container is MKV (issue #10):** MKV is the unconditional default output container
+  (overridable for new GUI projects in Settings, issue #87) because it is the only supported
+  container that round-trips audio track titles while stream-copying all three video codecs.
+- **Kept audio window bounds (issues #3, #75):** `ExportEngine.keptWindow` subtracts
+  `containerStart` from input `-ss` seek bounds (keeping `duration` in absolute PTS) and ends a
+  closed out point at the out frame's **display end** (`pts[out + 1]`, or `pts[out] +
+  frameDuration` at EOF), never `pts[out]` — preventing 1-frame-per-join drift on tail-trimmed
+  clips and keeping single-frame keeps (`in == out`) positive-duration.
+- **Stream tags & multi-clip Audio Settings:** Language and title stream tags are looked up
+  case-insensitively across containers (empty strings treated as absent). Opening Audio
+  Settings on a multi-clip same-source selection shows the first clip's slot list and writes
+  the edited list across all selected clips so diverged lists converge while keeping per-clip
+  `monitoredAudioTrack` independent.

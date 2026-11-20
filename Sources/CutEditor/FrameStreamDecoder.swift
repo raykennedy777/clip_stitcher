@@ -1,19 +1,7 @@
 import AppKit
 import os
 
-/// A long-lived ffmpeg process that streams decoded frames as raw RGB over a pipe,
-/// so sequential stepping costs one frame read (~1-2 ms) instead of spawning a new
-/// process and re-decoding from the keyframe every time (ADR-0003's deferred
-/// upgrade).
-///
-/// The process decodes forward from a seek point; `image(at:)` reads ahead to the
-/// requested frame, and restarts at the nearest keyframe only when the target is
-/// behind the playhead or in a later GOP. Blocking pipe reads run on a dedicated
-/// serial queue (never the main thread or the Swift concurrency pool).
 final class FrameStreamDecoder {
-    /// The frame requested plus the trailing run of frames decoded on the way to
-    /// it — so the caller can populate its cache and serve backward steps within
-    /// that run without forcing another keyframe-seek-and-decode.
     struct Result {
         let image: NSImage?
         let window: [(frame: Int, image: NSImage)]
@@ -21,32 +9,22 @@ final class FrameStreamDecoder {
 
     private let url: URL
     private let index: FrameIndex
-    /// The container's start_time — input `-ss` is measured from it, not absolute
-    /// pts (the issue #3 trap; nonzero on .mpg/.ts captures), so seeks subtract it.
     private let containerStart: Double
     private let width: Int
     private let height: Int
     private let useHardware: Bool
-    /// Replaces the default `scale=W:H` when set (the preview's spatial conform chain,
-    /// ADR-0012). Must be 1-frame-in-1-frame-out — the seek arithmetic counts frames —
-    /// and must emit exactly `width`×`height` (the pipe reads fixed-size frames).
     private let filter: String?
     private let ffmpeg: URL
     private let queue = DispatchQueue(label: "io.github.raykennedy777.clipstitcher.decoder")
     private static let log = Logger(subsystem: "io.github.raykennedy777.clipstitcher",
                                     category: "FrameStreamDecoder")
 
-    /// How many trailing frames to materialise when decoding forward through a GOP.
-    /// Matches the model's cache cap so a run of backward steps stays in cache.
     private let windowSize: Int
 
     private var process: Process?
     private var handle: FileHandle?
-    /// The running ffmpeg's stderr pipe, drained live into `stderrTail`.
     private var errPipe: Pipe?
-    /// A bounded recent tail of the current ffmpeg's stderr, so a persistent decode
-    /// failure can be logged instead of silently degrading to the `FrameExtractor`
-    /// slow path forever (issue #86). Reuses `ProcessRunner`'s implementation.
+    // ADR-0034, ADR-0036
     private var stderrTail: StderrTail?
     private var nextFrame = 0
 
@@ -66,22 +44,12 @@ final class FrameStreamDecoder {
         self.windowSize = max(1, windowSize)
     }
 
-    /// Returns the image for presentation frame `n` along with the trailing run of
-    /// frames decoded to reach it, reading the stream forward or restarting at the
-    /// nearest keyframe as needed. `image` is nil only on decode failure (caller
-    /// should fall back to `FrameExtractor`).
     func image(at n: Int) async -> Result {
         await withCheckedContinuation { continuation in
             queue.async { continuation.resume(returning: self.imageSync(at: n)) }
         }
     }
 
-    /// If reaching frame `n` requires a keyframe seek + decode (a jump or a
-    /// backward miss), restarts the stream at the anchor keyframe and returns just
-    /// that keyframe — one cheap frame read — so the caller can show it instantly
-    /// while the exact frame decodes. Leaves the stream positioned to continue
-    /// forward to `n`. Returns nil when no restart is needed (contiguous forward
-    /// stepping) or when `n` is itself the keyframe (the exact frame is already cheap).
     func keyframePreview(forFrameAt n: Int) async -> (frame: Int, image: NSImage)? {
         await withCheckedContinuation { continuation in
             queue.async { continuation.resume(returning: self.keyframePreviewSync(at: n)) }
@@ -92,23 +60,14 @@ final class FrameStreamDecoder {
         queue.async { self.stopSync() }
     }
 
-    // MARK: - Queue-confined work
-
     private func imageSync(at n: Int) -> Result {
         let target = min(max(0, n), index.count - 1)
-        // No keyframe at/before the target → decode from the earliest frame (pts[0]);
-        // ffmpeg's input seek lands on the file's first decodable position either way.
         let anchor = index.keyframeIndex(atOrBefore: target) ?? 0
 
-        // Restart if we have no stream, the target is behind us, or its keyframe is
-        // ahead of the playhead (a later GOP — cheaper to seek than decode through).
         if process == nil || target < nextFrame || anchor > nextFrame {
             start(seekingTo: anchor)
         }
 
-        // Materialise only the trailing window of frames we pass through, so a run
-        // of backward steps over this GOP is served from the caller's cache rather
-        // than re-seeking the keyframe and re-decoding for every single frame.
         let windowStart = max(0, target - windowSize + 1)
         var targetImage: NSImage?
         var window: [(frame: Int, image: NSImage)] = []
@@ -122,19 +81,14 @@ final class FrameStreamDecoder {
             nextFrame += 1
         }
 
-        // Reached target but never produced its image → the decode broke early; surface
-        // ffmpeg's error (when it emitted one) so a persistent failure is diagnosable.
         if targetImage == nil { logDecodeFailure(target: target) }
         return Result(image: targetImage, window: window)
     }
 
     private func keyframePreviewSync(at n: Int) -> (frame: Int, image: NSImage)? {
         let target = min(max(0, n), index.count - 1)
-        // No keyframe at/before the target → anchor on the earliest frame (see `imageSync`).
         let anchor = index.keyframeIndex(atOrBefore: target) ?? 0
 
-        // Only worth previewing when we'd otherwise restart-and-decode a GOP, and
-        // only when the keyframe isn't the target itself.
         let needsRestart = process == nil || target < nextFrame || anchor > nextFrame
         guard needsRestart, anchor != target else { return nil }
 
@@ -149,7 +103,7 @@ final class FrameStreamDecoder {
         stopSync()
         let process = Process()
         process.executableURL = ffmpeg
-        process.standardInput = FileHandle.nullDevice   // no SIGTTIN stop (see ProcessRunner)
+        process.standardInput = FileHandle.nullDevice
         var arguments = ["-hide_banner", "-loglevel", "error"]
         if useHardware { arguments += ["-hwaccel", "videotoolbox"] }
         arguments += [
@@ -163,11 +117,6 @@ final class FrameStreamDecoder {
         let pipe = Pipe()
         process.standardOutput = pipe
 
-        // Capture a bounded tail of ffmpeg's stderr (was `/dev/null`) so a persistent
-        // decode failure is logged, not silently swallowed (issue #86). Drained live via a
-        // readability handler so the stderr pipe can never fill and block the decoder's
-        // blocking stdout reads mid-stream (the issue #59 deadlock). At `-loglevel error`
-        // a healthy decode writes nothing here, so the tail stays empty and never logs.
         let errPipe = Pipe()
         let tail = StderrTail(cap: 64 * 1024)
         process.standardError = errPipe
@@ -195,7 +144,7 @@ final class FrameStreamDecoder {
         buffer.reserveCapacity(frameBytes)
         while buffer.count < frameBytes {
             let chunk = handle.readData(ofLength: frameBytes - buffer.count)
-            if chunk.isEmpty { return nil } // EOF
+            if chunk.isEmpty { return nil }
             buffer.append(chunk)
         }
         return buffer
@@ -212,17 +161,7 @@ final class FrameStreamDecoder {
         stderrTail = nil
     }
 
-    /// Logs the current ffmpeg's stderr tail when a decode ended before reaching its
-    /// target — the point where the caller falls back to the slow `FrameExtractor` path.
-    /// Only logs when the tail is non-empty (at `-loglevel error` that means ffmpeg
-    /// actually reported an error), so a healthy clip's clean EOF never logs.
     private func logDecodeFailure(target: Int) {
-        // The stderr readability handler drains live, but ffmpeg's final error line may not have
-        // been delivered yet at the instant the stdout loop broke. The decode only ends short when
-        // stdout hit EOF — i.e. ffmpeg closed its output and is exiting — so when the process has
-        // already terminated it's safe to synchronously drain whatever stderr remains into the
-        // tail before snapshotting. We never drain while ffmpeg is still alive (that could block
-        // the decoder queue), so a still-running process just logs the live tail as before.
         if let errPipe, process?.isRunning != true {
             let reader = errPipe.fileHandleForReading
             reader.readabilityHandler = nil
@@ -235,14 +174,10 @@ final class FrameStreamDecoder {
         Self.log.error("decode failed reaching frame \(target, privacy: .public); falling back to FrameExtractor. ffmpeg: \(text, privacy: .public)")
     }
 
-    /// Converts an absolute frame pts to the input `-ss` value: ffmpeg measures
-    /// input `-ss` from the container's start_time (issue #36 — seeking a .mpg
-    /// capture at absolute pts lands a whole GOP late and mislabels every frame).
     static func seekSeconds(forPts pts: Double, containerStart: Double) -> Double {
         max(0, pts - containerStart)
     }
 
-    /// Shared with `KeyframePrefetcher` — both read the same raw RGB frame layout.
     static func makeImage(from data: Data, width: Int, height: Int) -> NSImage? {
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,

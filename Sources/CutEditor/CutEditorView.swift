@@ -2,12 +2,8 @@ import SwiftUI
 
 struct CutEditorView: View {
     @ObservedObject var model: CutEditorModel
-    /// Observed so the audio track dropdown follows live edits from the settings sheet.
     @ObservedObject var document: ProjectDocument
     @State private var showingAudioSettings = false
-    /// The jump popover's relative/absolute choice, kept here so it persists
-    /// while the window is open (issue #21). Its presentation lives on the model
-    /// (`isShowingJump`) so the ⌘J menu item can open it (issue #67).
     @State private var jumpRelative = true
 
     var body: some View {
@@ -16,8 +12,6 @@ struct CutEditorView: View {
             controls
         }
         .frame(minWidth: 640, minHeight: 480)
-        // Scroll anywhere over the window scrubs (issue #40); Shift strides
-        // keyframes, mirroring ⇧←/⇧→.
         .scrollScrub { steps, keyframeStride in
             if keyframeStride {
                 for _ in 0..<abs(steps) {
@@ -30,21 +24,11 @@ struct CutEditorView: View {
         .sheet(isPresented: $showingAudioSettings) {
             AudioSettingsView(document: document, clipIDs: [model.clip.id])
         }
-        // "Save Frame as Image…" (issue #89) and "Go To…" (issue #21) now route through
-        // the menu bar (issue #67): while this window is key it publishes its model to
-        // `ActiveCutEditor`, and the File ▸ Save Frame and Marking ▸ Go To menu items act
-        // on it — so the local hidden ⌃⌘S and ⌘J buttons that used to carry those
-        // shortcuts have retired. The transport buttons below keep their own
-        // `.keyboardShortcut`s (key-window-local); the menu mirrors them for discoverability.
     }
 
-    /// The clip's live state in the document (the model's copy is a snapshot from
-    /// when the window opened).
     private var liveClip: Clip? {
         document.project.clips.first { $0.id == model.clip.id }
     }
-
-    // MARK: - Preview area
 
     private var preview: some View {
         ZStack {
@@ -68,8 +52,6 @@ struct CutEditorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-
-    // MARK: - Controls
 
     private var controls: some View {
         VStack(spacing: 10) {
@@ -100,10 +82,6 @@ struct CutEditorView: View {
         }
     }
 
-    /// Which of the clip's audio tracks to monitor (ADR-0014) — the track heard
-    /// during playback (issue #7; switching mid-play restarts the stream on the
-    /// new source). Tracks are named from container metadata with the "Track N"
-    /// fallback.
     @ViewBuilder
     private var audioTrackPicker: some View {
         if let clip = liveClip, !clip.resolvedAudioSelections.isEmpty {
@@ -134,9 +112,6 @@ struct CutEditorView: View {
             Text("Frame \(model.currentFrame) / \(model.lastFrame)")
                 .monospacedDigit()
             Spacer()
-            // The timecode readout doubles as the jump popover's anchor (issue
-            // #21): click it — or ⌘J via the hidden button — to go to a typed
-            // time or frame.
             Text(model.timecode(forFrame: model.currentFrame))
                 .monospacedDigit()
                 .font(.body.weight(.medium))
@@ -163,7 +138,6 @@ struct CutEditorView: View {
         }
     }
 
-    /// A set selection point reads as a link that jumps the playhead to its frame.
     @ViewBuilder
     private func selectionPoint(_ frame: Int?, help: String) -> some View {
         if let frame {
@@ -181,9 +155,6 @@ struct CutEditorView: View {
         HStack(spacing: 8) {
             button("backward.end.fill", help: "First frame") { model.goToStart() }
             button("backward.fill", help: "Previous keyframe (⇧←)") { model.stepToPreviousKeyframe() }
-            // One registered shortcut per arrow key, dispatching on the live Shift
-            // state: SwiftUI matches arrow-key equivalents ignoring Shift, so two
-            // buttons declaring ← and ⇧← both fire the first-registered one.
             button("backward.frame.fill", help: "Back one frame (←)") { arrowJump(-1) }
                 .keyboardShortcut(.leftArrow, modifiers: [])
 
@@ -207,7 +178,6 @@ struct CutEditorView: View {
             }
             .keyboardShortcut(.downArrow, modifiers: [])
             .disabled(model.isSceneScanning)
-            // Fixed-size slot so the spinner's appearance doesn't shift the row.
             ProgressView()
                 .controlSize(.small)
                 .frame(width: 20)
@@ -234,7 +204,7 @@ struct CutEditorView: View {
         .disabled(model.isIndexing || model.frameCount == 0)
     }
 
-    /// ←/→ step a frame; with Shift held they jump a keyframe instead.
+    // ADR-0037
     private func arrowJump(_ delta: Int) {
         if NSEvent.modifierFlags.contains(.shift) {
             delta < 0 ? model.stepToPreviousKeyframe() : model.stepToNextKeyframe()

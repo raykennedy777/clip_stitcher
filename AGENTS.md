@@ -25,3 +25,7 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agent
 ### UI automation
 
 Accessibility identifiers and AX probing for driving the running app. See `docs/agents/ui-automation.md`.
+
+### Code comments
+
+Code comments (`//`, `///`, `/* ... */`) are banned in Swift files (`Sources/`, `CLI/`, `Tests/`), enforced by `python3 scripts/lint-comments.py` with a downward-only ratchet in `.comment-ratchet.json`. The sole allowed exception is a bare ADR signpost (`// ADR-NNNN` or `// ADR-NNNN, ADR-MMMM`) whose referenced ADR exists in `docs/adr/`, reserved for genuinely non-obvious invariants. Put engineering decisions in `docs/adr/` (or `CONTEXT.md`) and track workarounds/shortcuts as GitHub issues instead of excusing them inline. Use the `/delete-comment` skill (`.agents/skills/delete-comment/SKILL.md`) to audit and burn down any remaining baseline entries.

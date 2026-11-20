@@ -46,3 +46,27 @@ damage zones, video and audio.**
   timebase, start_time) that would silently shift damage-zone times on re-import; requires the
   smart-render concat to emit a clean transport stream (continuity counters, PCR), proven in
   the same de-risk.
+
+## Additional implementation invariants
+
+- **Source-codec audio rebuild:** HE-AAC tracks encode via AudioToolbox
+  `-c:a aac_at -profile:a 4` (numeric profile; ffmpeg's native `aac` is LC-only and
+  `-profile:a aac_he` is invalid in this build). Each leg uses `aresample=<rate>:async=1`
+  **without** `first_pts=0` so audio keeps its source priming offset (~21 ms) against preserved
+  video `start_time`, and inputs pass `-max_error_rate 1.0` to survive dead zones.
+- **Upfront destination validation & atomic overwrite (issue #77):** Destination validity (same
+  file via symlink/inode identity `ExportEngine.denotesSameFile`, and folder writability) is
+  checked up front — including at init for the default `_repaired` sibling — disabling Repair
+  before mux time and taking UI precedence over overwrite notices. Overwriting uses atomic
+  `FileManager.replaceItemAt` and passes the returned URL into verification and results.
+- **Cancellation during auto-verify vs failure (issue #82):** Cancelling *before* the repaired
+  file lands returns to `.configuring` with nothing on disk. Cancelling *during* post-mux
+  auto-verify keeps the already-written repaired file and returns `.notVerified` (never
+  escaping as `CancellationError`, and distinct from involuntary `.inconclusive`), allowing
+  in-place re-verification via **Verify Now** (whose own cancel leaves `.notVerified` intact).
+- **UI surfacing:** Freshly-detected damaged clips queue into a non-modal, dismissible banner
+  shown one clip at a time (avoiding modal pile-ups on multi-file imports); "Use Repaired File
+  in This Project" reuses `document.relink` so the doctored file re-imports and re-scans clean;
+  the sheet's repair summary reads `truncatedEndingTrim` off `ClipDoctorEngine.Result` so
+  truncated-ending wording survives nil probed durations; Source's disabled-reason caption
+  appears only for audio-only imports.

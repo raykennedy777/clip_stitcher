@@ -1,21 +1,12 @@
 import SwiftUI
 
-/// The jump popover (issue #21): time and frame fields anchored to the cut-editor
-/// readout, opened with ⌘J or by clicking the readout. Return jumps to whichever
-/// field was edited last and closes; Esc closes without moving; invalid input
-/// does nothing so it can be corrected. The relative checkbox (ticked by default)
-/// makes the value an offset from the playhead — negative
-/// moves backward; unticked, it's a position from the clip's first frame.
 struct JumpPopoverView: View {
     @ObservedObject var model: CutEditorModel
     @Binding var isPresented: Bool
-    /// Owned by the cut-editor window so the choice survives reopening the popover.
     @Binding var relative: Bool
 
     @State private var timeText: String
     @State private var frameText: String
-    /// Which field Return acts on — the one edited last, nil when neither was
-    /// touched (then Return just closes; the prefill is only a starting point).
     @State private var edited: Field?
     @FocusState private var focused: Field?
 
@@ -42,11 +33,6 @@ struct JumpPopoverView: View {
                     TextField("00:00:00:00", text: $timeText)
                         .focused($focused, equals: .time)
                         .onSubmit(jump)
-                        // Scroll over the field rolls its staged timecode a
-                        // frame per step (issue #40) — never a live jump:
-                        // Return commits (onChange marks it edited), Esc still
-                        // bails. Absolute mode clamps at 0:00; Shift is
-                        // meaningless here, so the stride flag is ignored.
                         .scrollScrub { steps, _ in
                             if let stepped = JumpParser.steppedTimecode(
                                 timeText, by: steps, fps: model.fps, allowNegative: relative) {
@@ -59,7 +45,6 @@ struct JumpPopoverView: View {
                     TextField("0", text: $frameText)
                         .focused($focused, equals: .frame)
                         .onSubmit(jump)
-                        // Same rolling for the frame field, as a bare count.
                         .scrollScrub { steps, _ in
                             if let stepped = JumpParser.steppedFrames(
                                 frameText, by: steps, allowNegative: relative) {
@@ -91,7 +76,7 @@ struct JumpPopoverView: View {
         case .time: value = JumpParser.timecodeFrames(timeText, fps: model.fps)
         case .frame: value = JumpParser.frames(frameText)
         }
-        guard let value else { return } // invalid input: stay open for correction
+        guard let value else { return }
         model.seek(to: JumpParser.target(
             value: value, relative: relative, current: model.currentFrame))
         isPresented = false

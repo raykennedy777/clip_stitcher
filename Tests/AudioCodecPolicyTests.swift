@@ -2,24 +2,14 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Exercises the audio codec policy — which codec the rebuilt audio encodes to
-/// (ADR-0010) and the extensions that follow from it. Moved verbatim from the export
-/// engine's test surface when the policy was extracted (issue #25); the output-track
-/// derivation tests moved on to the audio source resolver's surface (issue #27).
 struct AudioCodecPolicyTests {
-
-    // MARK: audio codec resolution (ADR-0010)
-
     @Test func resolvesToTargetCodecWhenContainerAllowsIt() {
-        // mp2 source -> TS: keep mp2, map to its encoder, no fallback warning.
         let choice = AudioCodecPolicy.resolveAudioCodec(targetCodec: "mp2", container: .ts)
         #expect(choice == AudioCodecPolicy.AudioEncodeChoice(codec: "mp2", encoder: "mp2", fellBack: false))
-        // mp3 maps to libmp3lame.
         #expect(AudioCodecPolicy.resolveAudioCodec(targetCodec: "mp3", container: .mkv).encoder == "libmp3lame")
     }
 
     @Test func fallsBackToAACForMp2InMp4() {
-        // The one awkward combo: mp2 can't sit cleanly in MP4, so fall back + flag a warning.
         let choice = AudioCodecPolicy.resolveAudioCodec(targetCodec: "mp2", container: .mp4)
         #expect(choice == AudioCodecPolicy.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: true))
     }
@@ -30,7 +20,6 @@ struct AudioCodecPolicyTests {
     }
 
     @Test func anAACTargetUsesAACWithoutFlaggingAFallback() {
-        // No codec was declined, so no warning.
         #expect(AudioCodecPolicy.resolveAudioCodec(targetCodec: "aac", container: .mp4)
                 == AudioCodecPolicy.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
     }
@@ -40,16 +29,11 @@ struct AudioCodecPolicyTests {
                 == AudioCodecPolicy.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
     }
 
-    // MARK: audio-only output (#1)
-
     @Test func audioOnlyKeepsTheTargetCodecRegardlessOfContainer() {
-        // No video container to fit — mp2 stays mp2 even though it wouldn't fit MP4 video.
         #expect(AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: "mp2")
                 == AudioCodecPolicy.AudioEncodeChoice(codec: "mp2", encoder: "mp2", fellBack: false))
-        // An unmappable codec still falls back to AAC and flags it.
         let dts = AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: "dts")
         #expect(dts.encoder == "aac" && dts.fellBack)
-        // No target audio -> AAC, no warning.
         #expect(AudioCodecPolicy.resolveAudioOnlyCodec(targetCodec: nil)
                 == AudioCodecPolicy.AudioEncodeChoice(codec: "aac", encoder: "aac", fellBack: false))
     }
@@ -62,9 +46,7 @@ struct AudioCodecPolicyTests {
     }
 
     @Test func outputExtensionUsesAudioExtForAudioOnlyElseContainer() {
-        // audio-only ignores the video container and follows the codec.
         #expect(AudioCodecPolicy.outputExtension(type: .audioOnly, container: .mp4, audioEncoder: "mp2") == "mp2")
-        // video outputs keep the container extension.
         #expect(AudioCodecPolicy.outputExtension(type: .videoAndAudio, container: .ts, audioEncoder: "mp2") == "ts")
         #expect(AudioCodecPolicy.outputExtension(type: .videoOnly, container: .mkv, audioEncoder: "aac") == "mkv")
     }

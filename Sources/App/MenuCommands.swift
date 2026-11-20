@@ -1,38 +1,10 @@
 import SwiftUI
 
-// Menu-bar commands for the frame surfaces (issue #67): a Playback menu (Play/Pause,
-// Step, Keyframe, Scene) and a Marking menu (Set In/Out, Split, Go To…). These make the
-// shortcuts discoverable where macOS users look for them (HIG), and carry the ⌘J / ⌃⌘S
-// routing that the cut-editor's hidden buttons used to.
-//
-// Routing: the output preview lives in the document scene, so it publishes a
-// `previewTransport` focused value while it's key. The cut editor is a separate
-// top-level window outside that scene, so it can't; its key window publishes its model
-// through `ActiveCutEditor` instead (see that type). The two are mutually exclusive — a
-// cut-editor window being key resigns the document scene — so each menu reads the cut
-// editor first, then the preview. Cut-editor-only actions (Scene, all of Marking) show
-// disabled when no cut editor is key.
-//
-// The transport buttons inside each window keep their own `.keyboardShortcut`s; while a
-// window is key those key-window-local equivalents handle the keystroke (the same
-// window-before-menu ordering #89 relied on), so the menu never double-fires — and both
-// paths call the same model method regardless, so even a menu-first match is a single,
-// correct action. For the retired ⌘J / ⌃⌘S buttons the menu is now the only path, and it
-// routes to the key cut-editor's model.
-
-// MARK: - Preview transport (document-scene focused value)
-
-/// The output preview's transport, published as a focused scene value while the preview
-/// is key so the Playback menu can drive it (issue #67). The preview shares Play/Pause,
-/// frame stepping, and keyframe stepping with the cut editor; it has no scene scan.
 struct PreviewTransport {
     let isPlaying: Bool
-    /// A frame is loaded and steppable (not still building the index / empty).
     let canStep: Bool
     let togglePlay: () -> Void
-    /// ±1 frame.
     let step: (Int) -> Void
-    /// Previous (−) / next (+) keyframe anchor.
     let stepKeyframe: (Int) -> Void
 }
 
@@ -46,8 +18,6 @@ extension FocusedValues {
         set { self[PreviewTransportKey.self] = newValue }
     }
 }
-
-// MARK: - Playback menu
 
 struct PlaybackCommands: View {
     @ObservedObject private var active = ActiveCutEditor.shared
@@ -69,9 +39,6 @@ struct PlaybackCommands: View {
     }
 }
 
-/// The Playback items bound to the key cut-editor. A dedicated `@ObservedObject` view so
-/// the menu re-evaluates as the model's `isPlaying` / `canStep` / scene-scan state change
-/// (an app-level `@ObservedObject` on `ActiveCutEditor` only sees the model swap).
 private struct CutEditorTransportMenu: View {
     @ObservedObject var model: CutEditorModel
 
@@ -88,7 +55,6 @@ private struct CutEditorTransportMenu: View {
 private struct TransportMenuItems: View {
     let isPlaying: Bool
     let canPlay: Bool
-    /// Scene scanning is cut-editor-only; the preview passes false so its items disable.
     let canScene: Bool
     let togglePlay: () -> Void
     let step: (Int) -> Void
@@ -136,8 +102,6 @@ private struct TransportMenuItems: View {
     }
 }
 
-// MARK: - Marking menu (cut-editor only)
-
 struct MarkingCommands: View {
     @ObservedObject private var active = ActiveCutEditor.shared
 
@@ -166,10 +130,7 @@ private struct CutEditorMarkingMenu: View {
 
 private struct MarkingMenuItems: View {
     let enabled: Bool
-    /// Go To (⌘J) is enabled whenever a cut editor is key — no `canStep`/indexing gate — so it
-    /// matches the timecode-readout tap, which opens the jump popover unconditionally.
     let canGoTo: Bool
-    /// A split at the playhead is only valid strictly inside the selection range.
     let canSplit: Bool
     let isSplitAtPlayhead: Bool
     let setIn: () -> Void

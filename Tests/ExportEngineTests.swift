@@ -2,10 +2,6 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Exercises the pure argument-building core of the Milestone 1 export engine — the
-/// ffmpeg invocations that cut each clip's video at its clean cut points, concat the
-/// pieces, and rebuild a continuous re-encoded audio track aligned to the video
-/// (ADR-0008). These pin the command shape, which was validated against real footage.
 struct ExportEngineTests {
     private let src = URL(fileURLWithPath: "/tmp/clip.mp4")
 
@@ -28,7 +24,6 @@ struct ExportEngineTests {
         #expect(args.contains("-c") && args.contains("copy"))
         let times = args[args.firstIndex(of: "-segment_times")! + 1]
         #expect(times == "0.06,0.3")
-        // video-only — audio is rebuilt separately, never copied by the cut
         #expect(args.contains("0:v:0"))
         #expect(!args.contains("0:a:0?"))
         #expect(args.last == "/tmp/seg_%03d.mp4")
@@ -46,7 +41,7 @@ struct ExportEngineTests {
     @Test func remuxArgumentsCopyTheWholeClipVideoToOneFile() {
         let out = URL(fileURLWithPath: "/tmp/clip0.mp4")
         let args = ExportEngine.remuxArguments(source: src, output: out)
-        #expect(!args.contains("-f"))           // no segment muxer
+        #expect(!args.contains("-f"))
         #expect(args.contains("-c") && args.contains("copy"))
         #expect(args.contains("0:v:0"))
         #expect(args.last == "/tmp/clip0.mp4")
@@ -69,35 +64,21 @@ struct ExportEngineTests {
     }
 
     @Test func mpeg2IntoMkvGetsThePtsRefillFilter() {
-        // Matroska refuses the broadcast capture's no-PTS packets on stream copy (issue #2);
-        // the setts filter refills exactly those from DTS — same rule as the frame index.
         let bsf = ExportEngine.ptsRefillBitstreamFilter(codec: "mpeg2video", ext: "mkv")
         #expect(bsf == ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"])
     }
 
-    /// A damaged source carries no-PTS packets whatever its codec (the 1844 capture's
-    /// truncated pictures killed every MKV copy cut — even ones whose kept window was
-    /// clean, since the segment muxer writes the discarded segments too). The refill
-    /// extends to damaged clips into MKV; clean clips keep today's exact commands.
     @Test func damagedSourcesIntoMkvGetThePtsRefillWhateverTheCodec() {
         let want = ["-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)"]
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "mkv", damaged: true) == want)
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "hevc", ext: "mkv", damaged: true) == want)
-        // mp4/ts tolerate a missing PTS — no shape change there even when damaged.
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "mp4", damaged: true).isEmpty)
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "ts", damaged: true).isEmpty)
     }
 
-    /// An MPEG-PS PES packet carries one timestamp, so the second access unit packed into
-    /// one PES loses its PTS — and that one is an anchor picture, whose PTS leads its DTS by
-    /// the reorder delay. The `setts` fallback would put it `bf` frames early, on the
-    /// previous anchor's PTS, and the finished MKV piece then failed the verify decode with
-    /// "non monotonically increasing dts to muxer" though its pictures were correct
-    /// (issue #116). `+genpts` makes the demuxer derive the true reordered PTS instead.
     @Test func mpeg2IntoMkvAlsoGetsTheDemuxerPtsRefill() {
         #expect(ExportEngine.ptsRefillInputFlags(codec: "mpeg2video", ext: "mkv")
             == ["-fflags", "+genpts"])
-        // Same scope as the bitstream half, so the two always travel together.
         #expect(ExportEngine.ptsRefillInputFlags(codec: "h264", ext: "mkv", damaged: true)
             == ["-fflags", "+genpts"])
         #expect(ExportEngine.ptsRefillInputFlags(codec: "hevc", ext: "mkv", damaged: true)
@@ -115,8 +96,6 @@ struct ExportEngineTests {
         }
     }
 
-    /// The flag is an *input* option, so it has to reach the command line before `-i` —
-    /// after it, ffmpeg would read it as an output option and the demuxer would never see it.
     @Test func theDemuxerPtsRefillReachesTheCommandBeforeTheInput() {
         let flags = ExportEngine.ptsRefillInputFlags(codec: "mpeg2video", ext: "mkv")
         let plan = SegmentPlan(inFrame: 10, outFrame: 20, inSegmentTime: 1.0, outSegmentTime: 2.0)
@@ -125,14 +104,12 @@ struct ExportEngineTests {
             headSeek: ExportEngine.CopyHeadSeek(seek: 5.0, origin: 4.8), inputFlags: flags)
         #expect(cut.firstIndex(of: "-fflags")! < cut.firstIndex(of: "-i")!)
         #expect(cut[cut.firstIndex(of: "-fflags")! + 1] == "+genpts")
-        // The seek still precedes the input too (issue #108), and nothing else moved.
         #expect(cut.firstIndex(of: "-ss")! < cut.firstIndex(of: "-i")!)
 
         let remux = ExportEngine.remuxArguments(
             source: src, output: URL(fileURLWithPath: "/tmp/o.mkv"), inputFlags: flags)
         #expect(remux.firstIndex(of: "-fflags")! < remux.firstIndex(of: "-i")!)
 
-        // No flags means the validated command shapes are byte-identical to before.
         #expect(ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
             == ExportEngine.cutArguments(source: src, plan: plan,
                                          segmentPattern: "/tmp/p_%03d.ts", inputFlags: []))
@@ -144,7 +121,6 @@ struct ExportEngineTests {
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "h264", ext: "mkv").isEmpty)
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: "hevc", ext: "mkv").isEmpty)
         #expect(ExportEngine.ptsRefillBitstreamFilter(codec: nil, ext: "mkv").isEmpty)
-        // and without a filter the cut/remux commands are byte-identical to before
         let plan = SegmentPlan(inFrame: 10, outFrame: 20, inSegmentTime: 1.0, outSegmentTime: 2.0)
         let cut = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
         #expect(!cut.contains("-bsf:v"))
@@ -152,29 +128,15 @@ struct ExportEngineTests {
         #expect(!remux.contains("-bsf:v"))
     }
 
-    // MARK: - Parameter sets travel with the piece (issue #113)
-
-    /// A join's container carries exactly one parameter-set header, taken from the *first*
-    /// piece in the concat list, so every other piece has to carry its own SPS/PPS/VPS in-band
-    /// or it is decoded against a foreign one — garbage pictures at an exactly correct frame
-    /// count, PTS spacing and duration. A copy gets there via the codec's `mp4toannexb`, which
-    /// inserts the source's parameter sets at every IRAP; `dump_extra` can't do it on a copy
-    /// because a Matroska/MP4 source's extradata is an `hvcC`/`avcC` record, not a NAL.
     @Test func copiedH264AndHevcPiecesRepeatTheirParameterSetsInBand() {
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: "hevc", ext: "mkv")
             == ["-bsf:v", "hevc_mp4toannexb"])
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: "h264", ext: "mp4")
             == ["-bsf:v", "h264_mp4toannexb"])
-        // MPEG-2 needs none: its sequence header is already repeated per GOP in the
-        // elementary stream, so the chain stays empty off MKV.
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: "mpeg2video", ext: "ts").isEmpty)
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: nil, ext: "ts").isEmpty)
     }
 
-    /// A source that repeats its own parameter sets in-band gets no repeat: `hevc_mp4toannexb`
-    /// would put a stale header SPS in front of the source's own at every IRAP, and the
-    /// decoder would clear its references at every CRA (the 1080p50 x265 MotoGP capture:
-    /// 28 error lines in 60 s with the filter, 0 without). The refill rule is unchanged.
     @Test func aSourceWithInBandParameterSetsCopiesWithoutTheRepeat() {
         #expect(ExportEngine.copyPieceBitstreamFilter(
             codec: "hevc", ext: "mkv", inBandParameterSets: true).isEmpty)
@@ -185,8 +147,6 @@ struct ExportEngineTests {
             == ["-bsf:v", ExportEngine.ptsRefillFilter])
     }
 
-    /// The probe traces exactly one copied packet, and only an SPS *after* the `Packet:` line
-    /// counts — the header's own sets are printed above it under "Extradata".
     @Test func theInBandProbeCountsOnlyAnSpsInsideThePacket() {
         let src = URL(fileURLWithPath: "/m/a.mkv")
         let args = ExportEngine.inBandParameterSetProbeArguments(source: src, seek: 12.5, codec: "hevc")
@@ -201,18 +161,11 @@ struct ExportEngineTests {
         #expect(ExportEngine.tracesInBandParameterSets(
             header + "Packet: 900 bytes, key frame\nVideo Parameter Set\nSequence Parameter Set\n"
                 + "Picture Parameter Set\n"))
-        // An in-band SPS whose PPS lives only in the header still needs the repeat.
         #expect(!ExportEngine.tracesInBandParameterSets(
             header + "Packet: 900 bytes, key frame\nSequence Parameter Set\nSlice Header\n"))
         #expect(!ExportEngine.tracesInBandParameterSets(header))
     }
 
-    /// ffmpeg takes **one** `-bsf:v` per stream and a second occurrence replaces the first
-    /// rather than adding to it, so whatever a copy piece needs has to arrive as a single
-    /// comma-separated chain. No combination reaches for both filters today — the two rules
-    /// don't overlap, since the refill is mpeg2video-or-damaged and neither of those takes the
-    /// parameter-set repeat — but the chain form is what stops a later overlap from silently
-    /// dropping one of them, so the invariant is asserted across the whole grid.
     @Test func aCopyPieceNeverEmitsMoreThanOneBitstreamFilterArgument() {
         for codec in ["hevc", "h264", "mpeg2video", nil] {
             for ext in ["mkv", "mp4", "ts"] {
@@ -224,15 +177,10 @@ struct ExportEngineTests {
                 }
             }
         }
-        // The MKV refill rule itself is unchanged (issue #2): mpeg2video into MKV still gets it.
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: "mpeg2video", ext: "mkv")
             == ["-bsf:v", ExportEngine.ptsRefillFilter])
     }
 
-    /// A damaged source stays on the PTS refill alone: its truncated pictures are what the
-    /// `mp4toannexb` parser would have to walk, and a repair export is one source's own
-    /// pieces — the container header a copy is decoded against is either that source's or a
-    /// repair re-encode's (which carries its parameter sets in-band), never a foreign clip's.
     @Test func aDamagedSourcesCopyKeepsTheRefillWithoutTheAnnexbConversion() {
         let args = ExportEngine.copyPieceBitstreamFilter(codec: "hevc", ext: "mkv", damaged: true)
         #expect(args == ["-bsf:v", ExportEngine.ptsRefillFilter])
@@ -240,9 +188,6 @@ struct ExportEngineTests {
         #expect(ExportEngine.copyPieceBitstreamFilter(codec: "hevc", ext: "ts", damaged: true).isEmpty)
     }
 
-    /// Every re-encoded piece carries the repeat too, so a boundary GOP or a conform beside a
-    /// stream-copied body re-initialises the decoder at its own first frame instead of
-    /// inheriting whichever piece happened to be first in the concat list.
     @Test func everyReencodedPieceRepeatsItsParameterSetsInBand() {
         let index = FrameIndex(pts: (0..<8).map { 0.24 + Double($0) * 0.04 },
                                keyframeFlags: [true, false, false, false, true, false, false, false])
@@ -256,18 +201,10 @@ struct ExportEngineTests {
             containerStart: 0.24, frameRate: "25/1",
             encoder: ["-c:v", "libx264"], output: URL(fileURLWithPath: "/tmp/rep.mkv"))
         #expect(repaired[repaired.firstIndex(of: "-bsf:v")! + 1] == ExportEngine.parameterSetRepeatFilter)
-        // One -bsf:v per piece, always: a second occurrence would replace the first.
         #expect(boundary.filter { $0 == "-bsf:v" }.count == 1)
         #expect(repaired.filter { $0 == "-bsf:v" }.count == 1)
     }
 
-    // MARK: - Bounded segment-muxer read (issue #107)
-
-    /// With no read bound the segment muxer reads to EOF and writes the whole source as
-    /// pieces to keep one — 43 GB of discarded trailing segments on a 4h36 capture. An
-    /// output `-t` past the out-cut stops the read just after the wanted piece; the bound
-    /// is evaluated on the unreset output timeline and is start-relative like the segment
-    /// times themselves (ADR-0008), so `-t`, not `-to`.
     @Test func theCutStopsReadingJustPastTheOutCut() {
         let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
         let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.mkv")
@@ -275,17 +212,12 @@ struct ExportEngineTests {
         let i = args.firstIndex(of: "-t")
         #expect(i != nil)
         #expect(Double(args[args.index(after: i!)]) == 82.0)
-        // an output option: after the muxer flags, before the segment pattern
         #expect(i! > args.firstIndex(of: "-segment_times")!)
         #expect(args.last == "/tmp/p_%03d.mkv")
     }
 
-    /// The regression that matters: a margin at or below one frame interval truncates the
-    /// wanted piece **silently** — exit 0, no stderr, just a short piece. The de-risk run
-    /// on the HEVC fixture came back 2 frames short at margin 0 and 1 frame short at 0.02.
-    /// The bound must clear the out-cut by more than a frame at any plausible rate.
     @Test func theReadBoundClearsTheOutCutByMoreThanAFrame() {
-        let slowestFrameInterval = 1.0 / 23.976     // the longest frame this app ever sees
+        let slowestFrameInterval = 1.0 / 23.976
         for out in [0.5, 12.0, 80.0, 16_560.0] {
             let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: out)
             let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
@@ -294,68 +226,46 @@ struct ExportEngineTests {
         }
     }
 
-    /// No out-cut means nothing to bound — the wanted piece runs to the file end, so the
-    /// read must reach EOF.
     @Test func aCutWithNoOutCutReadsToEof() {
         let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: nil)
         let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
         #expect(!args.contains("-t"))
     }
 
-    // MARK: - Head seek (issue #108)
-
-    /// A 50 fps index with a keyframe every 50 frames — the shape of the real capture, so
-    /// the anchor arithmetic is exercised against real keyframe spacing.
     private func keyframedIndex(frames: Int = 600, gop: Int = 50, start: Double = 0) -> FrameIndex {
         let pts = (0..<frames).map { start + Double($0) / 50.0 }
         return FrameIndex(pts: pts, keyframeFlags: (0..<frames).map { $0 % gop == 0 })
     }
 
-    /// The seek anchors two keyframes before the in-cut, not one: the landing can undershoot
-    /// by a whole keyframe (it does on the real open-GOP HEVC capture, whose Matroska cues
-    /// don't index every flagged keyframe), and segment `000` still has to receive packets or
-    /// the muxer never writes it and the wanted piece stops being `001`.
     @Test func theHeadSeekAnchorsTwoKeyframesBeforeTheInCut() {
         let index = keyframedIndex()
         let plan = SegmentPlan(inFrame: 300, outFrame: 400, inSegmentTime: 5.99, outSegmentTime: 7.99)
         let seek = ExportEngine.copyHeadSeekTarget(plan: plan, index: index, containerStart: 0)
-        #expect(seek == 4.0)                                        // frame 200, two GOPs back
+        #expect(seek == 4.0)
     }
 
-    /// Only one keyframe before the in-cut is still a usable anchor, and the seek is
-    /// start_time-relative like every other input seek in the engine — never negative.
     @Test func theHeadSeekFallsBackToTheOnlyEarlierKeyframe() {
         let index = keyframedIndex(start: 1.44)
         let plan = SegmentPlan(inFrame: 50, outFrame: 90, inSegmentTime: 0.99, outSegmentTime: 1.79)
         #expect(ExportEngine.copyHeadSeekTarget(plan: plan, index: index, containerStart: 1.44) == 0)
-        // and with two available the container start is still subtracted
         let later = SegmentPlan(inFrame: 150, outFrame: 190, inSegmentTime: 2.99, outSegmentTime: 3.79)
         #expect(ExportEngine.copyHeadSeekTarget(plan: later, index: index, containerStart: 1.44) == 1.0)
     }
 
-    /// Nothing to skip → no seek, and the copy keeps the proven read-from-zero recipe.
     @Test func aCopyWithNoHeadGetsNoSeek() {
         let index = keyframedIndex()
-        // no in-cut: the clip starts at the file's own beginning
         let noInCut = SegmentPlan(inFrame: 0, outFrame: 100, inSegmentTime: nil, outSegmentTime: 2.0)
         #expect(ExportEngine.copyHeadSeekTarget(plan: noInCut, index: index, containerStart: 0) == nil)
-        // an in-cut at the very first frame has no earlier keyframe to anchor on
         let atFrameZero = SegmentPlan(inFrame: 0, outFrame: 100, inSegmentTime: 0.0, outSegmentTime: 2.0)
         #expect(ExportEngine.copyHeadSeekTarget(plan: atFrameZero, index: index, containerStart: 0) == nil)
     }
 
-    /// The whole point of #108: with a seek the read starts at the anchor instead of frame 0.
-    /// Because the muxer measures `-segment_times` from its *first packet*, both cut times
-    /// move onto the seek's timeline by the measured landing — and `-t`, being a duration
-    /// rather than an instant, shortens by the same amount. `-copyts` is deliberately absent:
-    /// it zeroes ffmpeg's `out_time`, which the progress bar reads.
     @Test func theHeadSeekRebasesEveryTimeOntoTheLanding() {
         let plan = SegmentPlan(inFrame: 400_000, outFrame: 400_250,
                                inSegmentTime: 8000.07, outSegmentTime: 8005.03)
         let seek = ExportEngine.CopyHeadSeek(seek: 7990.14, origin: 7985.14)
         let args = ExportEngine.cutArguments(source: src, plan: plan,
                                              segmentPattern: "/tmp/p_%03d.mkv", headSeek: seek)
-        // an *input* seek: before -i, or it decodes the head it is meant to skip
         let ss = args.firstIndex(of: "-ss")
         #expect(ss != nil && ss! < args.firstIndex(of: "-i")!)
         #expect(args[args.index(after: ss!)] == "7990.14")
@@ -363,11 +273,9 @@ struct ExportEngineTests {
         let times = args[args.index(after: args.firstIndex(of: "-segment_times")!)]
         #expect(times == "14.93,19.89")
         let bound = Double(args[args.index(after: args.firstIndex(of: "-t")!)])
-        #expect(bound != nil && abs(bound! - 21.89) < 0.001)        // out + margin − origin
+        #expect(bound != nil && abs(bound! - 21.89) < 0.001)
     }
 
-    /// Without a seek the command is byte-for-byte what #107 validated — the seek is an
-    /// addition to the recipe, never a change to it.
     @Test func withoutAHeadSeekTheCutIsUnchanged() {
         let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
         let args = ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.mkv")
@@ -376,7 +284,6 @@ struct ExportEngineTests {
         #expect(Double(args[args.index(after: args.firstIndex(of: "-t")!)]) == 82.0)
     }
 
-    /// A seeked copy with no out-cut still has to read to EOF — there is no bound to shorten.
     @Test func aSeekedCutWithNoOutCutStillReadsToEof() {
         let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: nil)
         let seek = ExportEngine.CopyHeadSeek(seek: 1.0, origin: 1.0)
@@ -386,10 +293,7 @@ struct ExportEngineTests {
         #expect(args[args.index(after: args.firstIndex(of: "-segment_times")!)] == "3")
     }
 
-    // MARK: export-wide MP4 timescale (issue #24)
-
     @Test func exportWideTimescaleIsTheLcmOfTheProbes() {
-        // the two real failure legs: 25000 vs 90000 sources, and an MKV-source 16000
         #expect(ExportEngine.exportWideTimescale(probed: [25000, 90000]) == 450000)
         #expect(ExportEngine.exportWideTimescale(probed: [16000, 25000]) == 400000)
         #expect(ExportEngine.exportWideTimescale(probed: [16000]) == 16000)
@@ -397,22 +301,15 @@ struct ExportEngineTests {
     }
 
     @Test func exportWideTimescaleRefusesToOverflowTheMuxerRange() {
-        // co-prime monsters would blow past Int32 — no pin beats a rounded pin
         #expect(ExportEngine.exportWideTimescale(probed: [1_000_003, 999_999_937]) == nil)
         #expect(ExportEngine.exportWideTimescale(probed: []) == nil)
     }
 
     @Test func exportWideTimescaleFromProbesIsAllOrNothing() {
-        // Every clip measured → the LCM (same as the raw-value overload).
         #expect(ExportEngine.exportWideTimescale(probes: [25000, 90000]) == 450000)
-        // A single unprobeable clip (nil) drops the whole export-wide pin: the pin is stamped
-        // on every piece, so a partial LCM would round the unprobed clip's copied frames.
         #expect(ExportEngine.exportWideTimescale(probes: [25000, nil, 90000]) == nil)
         #expect(ExportEngine.exportWideTimescale(probes: [nil]) == nil)
-        // No clips at all → no pin (mirrors the empty raw-value case).
         #expect(ExportEngine.exportWideTimescale(probes: []) == nil)
-        // A single-clip probe still yields no *export-wide* pin below the >1 bar (the per-#18
-        // path covers a lone clip) — the combine mirrors exportWideTimescale(probed:).
         #expect(ExportEngine.exportWideTimescale(probes: [25000]) == 25000)
     }
 
@@ -420,14 +317,12 @@ struct ExportEngineTests {
         let plan = SegmentPlan(inFrame: 0, outFrame: 10, inSegmentTime: nil, outSegmentTime: 2.0)
         let cut = ExportEngine.cutArguments(source: src, plan: plan,
                                             segmentPattern: "/tmp/p_%03d.mp4", trackTimescale: 450000)
-        // the segment muxer forwards inner-muxer flags only via -segment_format_options
         let i = cut.firstIndex(of: "-segment_format_options")
         #expect(i != nil && cut[cut.index(after: i!)] == "video_track_timescale=450000")
         let remux = ExportEngine.remuxArguments(source: src, output: URL(fileURLWithPath: "/tmp/o.mp4"),
                                                 trackTimescale: 450000)
         let j = remux.firstIndex(of: "-video_track_timescale")
         #expect(j != nil && remux[remux.index(after: j!)] == "450000")
-        // and without a pin both commands keep their validated shapes
         #expect(!ExportEngine.cutArguments(source: src, plan: plan, segmentPattern: "/tmp/p_%03d.ts")
             .contains("-segment_format_options"))
         #expect(!ExportEngine.remuxArguments(source: src, output: URL(fileURLWithPath: "/tmp/o.ts"))
@@ -447,37 +342,22 @@ struct ExportEngineTests {
         #expect(remux.contains("-bsf:v") && remux.last == "/tmp/o.mkv")
     }
 
-    // MARK: - Audio re-encode
-
     @Test func audioInputArgsSeekAndLimitToTheClipRange() {
-        // both ends cut: fast seek to start, read (end - start) seconds. Every audio
-        // input tolerates decode errors (issue #44 — the default ⅔ threshold aborted
-        // the run with a truncated output on the real capture's MP2 dead zone).
         let a = ExportEngine.audioInputArgs(source: src, start: 1654.8, end: 1727.6)
         #expect(a == ["-max_error_rate", "1.0", "-ss", "1654.8", "-t", "72.8", "-i", "/tmp/clip.mp4"])
     }
 
     @Test func audioInputArgsOmitSeekForAnOpenStart() {
-        // no head cut: read from the file start up to `end`.
         let a = ExportEngine.audioInputArgs(source: src, start: nil, end: 30.0)
         #expect(a == ["-max_error_rate", "1.0", "-t", "30", "-i", "/tmp/clip.mp4"])
     }
 
     @Test func audioInputArgsOmitDurationForAnOpenEnd() {
-        // no tail cut: seek to start, read to the file end.
         let a = ExportEngine.audioInputArgs(source: src, start: 10.0, end: nil)
         #expect(a == ["-max_error_rate", "1.0", "-ss", "10", "-i", "/tmp/clip.mp4"])
     }
 
-    // MARK: - Kept window (issue #3: input -ss is measured from the container's
-    // start_time, not absolute pts — ADR-0015)
-
     @Test func keptWindowSubtractsTheContainerStartFromTheSeek() {
-        // The measured .mpg case: in point at pts 60.2 in a 0.24-start container must
-        // seek 59.96 — passing 60.2 lands 0.24 s late in content (measured +230 ms
-        // audio-ahead lip-sync error in the real TS output). The window ends at the out
-        // frame's display end (`outEndPts` = pts[out+1] = 70.24 → seek 70.0), so the leg
-        // covers the full kept video span, not one frame short (issue #75).
         let w = ExportEngine.keptWindow(inPts: 60.2, outPts: 70.2, outEndPts: 70.24, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == 59.96)
@@ -486,9 +366,6 @@ struct ExportEngineTests {
     }
 
     @Test func keptWindowClampsANegativeSeekToZero() {
-        // An in point whose pts sits before the container start must not produce a negative
-        // `-ss` — the same max(0, …) rule the seek builders apply (issue #86). Here inPts
-        // 0.10 < containerStart 0.24, so `start` clamps to 0, not −0.14; `end` = 5.04 − 0.24.
         let w = ExportEngine.keptWindow(inPts: 0.10, outPts: 5.0, outEndPts: 5.04, firstPts: 0.10,
                                         lastPts: 100.0, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == 0)
@@ -497,8 +374,6 @@ struct ExportEngineTests {
     }
 
     @Test func keptWindowIsUnchangedOnAZeroStartContainer() {
-        // Closed out at pts 60.0 whose next frame is 60.04: the window runs to the out
-        // frame's display end (60.04), matching the kept video span (issue #75).
         let w = ExportEngine.keptWindow(inPts: 57.0, outPts: 60.0, outEndPts: 60.04, firstPts: 0.04,
                                         lastPts: 5169.0, frameDuration: 0.04, containerStart: 0)
         #expect(w.start == 57.0)
@@ -507,8 +382,6 @@ struct ExportEngineTests {
     }
 
     @Test func keptWindowClosedOutAtFileEndUsesTheFrameDuration() {
-        // The out point is the last frame, so `pts[out+1]` doesn't exist (`outEndPts`
-        // nil): the display end falls back to one frame beyond the out pts (issue #75).
         let w = ExportEngine.keptWindow(inPts: 4010.2, outPts: 4020.2, outEndPts: nil, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == 4009.96)
@@ -517,9 +390,6 @@ struct ExportEngineTests {
     }
 
     @Test func keptWindowOpenStartReadsFromTheFileStart() {
-        // No in point: no seek at all (and none needed — reading from the start is
-        // immune to the start_time trap). Duration spans first frame to the out frame's
-        // display end (pts[out+1] = 10.28 → seek 10.04).
         let w = ExportEngine.keptWindow(inPts: nil, outPts: 10.24, outEndPts: 10.28, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == nil)
@@ -528,9 +398,6 @@ struct ExportEngineTests {
     }
 
     @Test func keptWindowOpenEndRunsToTheLastFrame() {
-        // No out point: read to the file end (end nil); the kept span ends one frame
-        // *after* the last frame's pts (the last frame still displays for a frame).
-        // Unchanged by #75 — the open-end branch already reached the display end.
         let w = ExportEngine.keptWindow(inPts: 4010.2, outPts: nil, outEndPts: nil, firstPts: 0.24,
                                         lastPts: 4020.2, frameDuration: 0.04, containerStart: 0.24)
         #expect(w.start == 4009.96)
@@ -538,31 +405,24 @@ struct ExportEngineTests {
         #expect(abs(w.duration - 10.04) < 1e-9)
     }
 
-    /// The invariant issue #75 is about: for a tail-trimmed smart-rendered clip, the
-    /// forced audio-leg duration (`keptWindow.duration`) must equal the kept video span
-    /// (`clipSpan`) — pre-fix the leg was one frame short. Uses the same 25 fps 0.24-start
-    /// index as `clipSpanOfATrimmedSmartRenderedClipIsExact`, kept `[0, 4)`.
     @Test func keptWindowDurationEqualsClipSpanForATrimmedClip() {
         let pts = [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52]
         let index = FrameIndex(pts: pts,
                                keyframeFlags: [true, false, false, false, true, false, false, false])
-        // Clip kept in=0…out=3 (a copy segment 0..<4). clipSpan = pts[4] - pts[0].
         let item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mpg"),
                               segments: [PlannedSegment(kind: .copy, range: 0..<4)], index: index)
         let w = ExportEngine.keptWindow(inPts: pts[0], outPts: pts[3], outEndPts: pts[4],
                                         firstPts: pts.first, lastPts: pts.last,
                                         frameDuration: 0.04, containerStart: 0.24)
         #expect(abs(w.duration - (ExportEngine.clipSpan(item) ?? -1)) < 1e-9)
-        #expect(abs(w.duration - 0.16) < 1e-9)   // pts[4] - pts[0], four frame slots
+        #expect(abs(w.duration - 0.16) < 1e-9)
     }
 
-    /// A single-frame keep (`in == out`) must still force a one-frame-duration leg —
-    /// pre-#75 its duration collapsed to 0 (out pts − in pts), leaving the leg unforced.
     @Test func keptWindowSingleFrameKeepForcesOneFrame() {
         let w = ExportEngine.keptWindow(inPts: 1.0, outPts: 1.0, outEndPts: 1.04,
                                         firstPts: 0.0, lastPts: 5.0, frameDuration: 0.04,
                                         containerStart: 0)
-        #expect(abs(w.duration - 0.04) < 1e-9)   // exactly one frame, not zero
+        #expect(abs(w.duration - 0.04) < 1e-9)
         #expect(w.start == 1.0)
         #expect(abs(w.end! - 1.04) < 1e-9)
     }
@@ -577,13 +437,8 @@ struct ExportEngineTests {
         ]
         let args = ExportEngine.audioMuxArguments(videoInput: video, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.ts"))
-        // video copied, audio re-encoded
         #expect(args.contains("0:v:0") && args.contains("-c:v") && args.contains("copy"))
         #expect(args.contains("-c:a") && args.contains("aac"))
-        // two audio inputs (indices 1 and 2 after the video input), each leg conformed to
-        // the track's format with the defensive gap-fill resample (issue #44), backed by
-        // silence and cut to its exact kept length (1 s / 2 s at 48 kHz — ADR-0014 /
-        // ADR-0028), then concatenated.
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
         #expect(fc == "[1:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[c0t0src];"
                     + "anullsrc=r=48000:cl=stereo[c0t0pad];"
@@ -592,17 +447,12 @@ struct ExportEngineTests {
                     + "anullsrc=r=48000:cl=stereo[c1t0pad];"
                     + "[c1t0src][c1t0pad]concat=n=2:v=0:a=1,atrim=end_sample=96000[c1t0];"
                     + "[c0t0][c1t0]concat=n=2:v=0:a=1[a0]")
-        // the pre-#111 force is gone: `apad` wrote an empty leg's samples with no advancing
-        // timestamps, collapsing every later packet onto one pts.
         #expect(!fc.contains("apad"))
         #expect(args.contains("[a0]"))
         #expect(args.last == "/tmp/out.ts")
     }
 
     @Test func audioMuxInsertsTheLegsMixBeforeItsConform() {
-        // Clip 0 mixes track 0 to left-only (ADR-0019); clip 1 keeps Original. The pan
-        // sits before the conform and wholly before the sample-exact length cut, and
-        // only on clip 0's leg — the join's sample math is untouched (shell-verified).
         var mixed = ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 1)
         mixed.audioMixFilters = ["pan=stereo|c0=c0|c1=c0"]
         let items = [mixed, ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 1)]
@@ -616,10 +466,6 @@ struct ExportEngineTests {
         #expect(fc.contains("[c1t0src][c1t0pad]concat=n=2:v=0:a=1,atrim=end_sample=48000[c1t0]"))
     }
 
-    /// The #111 defect, at the argument level: every real leg carries its own silence
-    /// backing *before* the length cut, so a leg whose window decodes to zero frames still
-    /// contributes exactly its clip's samples instead of stamping every later packet with
-    /// one pts. `EmptyAudioLegIntegrationTests` proves the rendered result.
     @Test func audioMuxBacksEveryRealLegWithSilenceBeforeTheLengthCut() {
         let items = [
             ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2),
@@ -628,23 +474,15 @@ struct ExportEngineTests {
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
-        // one endless silence source per real leg, in the track's format…
         #expect(fc.contains("anullsrc=r=48000:cl=stereo[c0t0pad]"))
         #expect(fc.contains("anullsrc=r=48000:cl=stereo[c1t0pad]"))
-        // …concatenated behind the leg, and the cut applied to the pair
         #expect(fc.contains("[c0t0src][c0t0pad]concat=n=2:v=0:a=1,atrim=end_sample=96000[c0t0]"))
         #expect(fc.contains("[c1t0src][c1t0pad]concat=n=2:v=0:a=1,atrim=end_sample=192000[c1t0]"))
-        // the backing is per leg, never shared: two sources for two legs
         #expect(fc.components(separatedBy: "anullsrc").count - 1 == 2)
-        // and nothing relies on apad, which is what failed on an empty leg
         #expect(!fc.contains("apad"))
     }
 
-    /// A leg whose clip has **no** known kept duration stays unforced, exactly as before
-    /// #111 — with no length there is nothing to cut to and nothing to back it with. The
-    /// leg must not acquire a zero-sample cut on the way.
     @Test func audioMuxLeavesALegWithNoKnownLengthUnforced() {
-        // No audioDuration and an open window end: `keptDuration` is nil.
         let items = [ExportItem(source: src, codec: "h264", audioStart: 1.0, audioEnd: nil)]
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
@@ -654,9 +492,6 @@ struct ExportEngineTests {
         #expect(!fc.contains("atrim"))
     }
 
-    /// No path emits a leg cut to zero samples (#111): a kept duration too short to round
-    /// to a whole sample still contributes one, rather than an empty leg that drags every
-    /// later clip earlier.
     @Test func audioMuxNeverCutsALegToZeroSamples() {
         let items = [ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
                                 audioSources: [.stream(0), nil], audioDuration: 0.000004)]
@@ -665,14 +500,11 @@ struct ExportEngineTests {
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
         #expect(!fc.contains("end_sample=0"))
-        #expect(fc.contains("atrim=end_sample=1[c0t0]"))                      // the real leg
-        #expect(fc.contains("anullsrc=r=48000:cl=stereo,atrim=end_sample=1[c0t1]"))  // the silence leg
+        #expect(fc.contains("atrim=end_sample=1[c0t0]"))
+        #expect(fc.contains("anullsrc=r=48000:cl=stereo,atrim=end_sample=1[c0t1]"))
     }
 
     @Test func audioMuxSilenceFillsAClipWithoutTheTrack(){
-        // Two output tracks, but the second clip only carries one source: its leg on
-        // track 2 is anullsrc silence in the track's format, trimmed to the same exact
-        // sample count as its real legs (ADR-0014).
         let video = URL(fileURLWithPath: "/tmp/joined.mkv")
         let monoTrack = AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 1)
         let items = [
@@ -685,27 +517,20 @@ struct ExportEngineTests {
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mkv"))
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
         #expect(!fc.contains("[2:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=mono[c1t1src]"))
-        // the second clip has no second source…
-        #expect(fc.contains("anullsrc=r=48000:cl=mono,atrim=end_sample=96000[c1t1]")) // …so it is silence
-        // generated silence has no gaps to fill — the defensive resample stays off it
+        #expect(fc.contains("anullsrc=r=48000:cl=mono,atrim=end_sample=96000[c1t1]"))
         #expect(!fc.contains("anullsrc=r=48000:cl=mono,aresample"))
         #expect(fc.contains("[c0t0][c1t0]concat=n=2:v=0:a=1[a0]"))
         #expect(fc.contains("[c0t1][c1t1]concat=n=2:v=0:a=1[a1]"))
-        // both rebuilt tracks mapped
         #expect(args.contains("[a0]") && args.contains("[a1]"))
     }
 
     @Test func audioMuxReadsAnExternalFileAsItsOwnInput() {
-        // A track re-pointed at an external file: the file gets its own input with the
-        // SAME seek window as the clip (file start = video start — ADR-0014) and feeds
-        // the leg via the chosen audio stream of that file.
         let external = URL(fileURLWithPath: "/tmp/demo.mkv")
         let items = [ExportItem(source: src, codec: "h264", audioStart: 10.0, audioEnd: 12.0,
                                 audioSources: [.stream(0), .external(external, stream: 1)])]
         let args = ExportEngine.audioMuxArguments(videoInput: URL(fileURLWithPath: "/tmp/joined.mp4"),
                                                   items: items, tracks: [stereoTrack, stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/out.mp4"))
-        // inputs: 0 video, 1 the clip, 2 the external file — both with -ss 10 -t 2
         #expect(args.contains("/tmp/demo.mkv"))
         #expect(args.filter { $0 == "10" }.count == 2 && args.filter { $0 == "2" }.count == 2)
         let fc = args[args.firstIndex(of: "-filter_complex")! + 1]
@@ -714,8 +539,6 @@ struct ExportEngineTests {
     }
 
     @Test func audioMuxSharesOneInputAcrossTwoStreamsOfTheSameExternalFile() {
-        // Two slots fed by different streams of the same external file: one -i for the
-        // file, two leg references into it.
         let external = URL(fileURLWithPath: "/tmp/demo.mkv")
         let items = [ExportItem(source: src, codec: "h264", audioStart: 0, audioEnd: 2,
                                 audioSources: [.external(external, stream: 0), .external(external, stream: 1)])]
@@ -744,8 +567,6 @@ struct ExportEngineTests {
     }
 
     @Test func audioMuxPrefersTheExplicitKeptDuration() {
-        // The app passes the kept *video* span explicitly; the window fallback only
-        // covers builder calls without it.
         let items = [ExportItem(source: src, codec: "h264", audioStart: 1.0, audioEnd: 2.0,
                                 audioSources: [.stream(0)], audioDuration: 1.5)]
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
@@ -755,7 +576,6 @@ struct ExportEngineTests {
     }
 
     @Test func audioMuxWithoutVideoStartsAudioInputsAtZero() {
-        // audio-only export: no video input, so the first audio source is input 0.
         let items = [ExportItem(source: src, codec: "mpeg2video", audioStart: 1.0, audioEnd: 2.0)]
         let args = ExportEngine.audioMuxArguments(videoInput: nil, items: items, tracks: [stereoTrack],
                                                   audioCodec: "aac", output: URL(fileURLWithPath: "/tmp/a.m4a"))
@@ -774,10 +594,7 @@ struct ExportEngineTests {
         #expect(ca == "mp2")
     }
 
-    // MARK: concat duration directives (the start_time seam gap, ADR-0008)
-
     @Test func concatListOmitsDurationsByDefault() {
-        // The bare two-arg call must reproduce the plain list (no `duration` lines).
         let pieces = [URL(fileURLWithPath: "/tmp/a.mkv"), URL(fileURLWithPath: "/tmp/b.mkv")]
         let list = ExportEngine.concatListContents(pieces: pieces)
         #expect(!list.contains("duration"))
@@ -785,8 +602,6 @@ struct ExportEngineTests {
     }
 
     @Test func concatListEmitsDurationDirectivesAlignedToPieces() {
-        // A head-copy span of 3.56s pins the demuxer's advance so the re-encode piece can't
-        // land late; a `nil` (the final, run-to-end piece) emits no directive.
         let pieces = [URL(fileURLWithPath: "/tmp/cp.mkv"), URL(fileURLWithPath: "/tmp/re.mkv")]
         let list = ExportEngine.concatListContents(pieces: pieces, durations: [3.56, nil])
         #expect(list == "file '/tmp/cp.mkv'\nduration 3.56\nfile '/tmp/re.mkv'\n")
@@ -798,23 +613,15 @@ struct ExportEngineTests {
         #expect(!list.contains("duration"))
     }
 
-    // MARK: cross-clip spans (issue #6 — the same seam gap at the join between clips)
-
-    /// The biting case: a single-copy-segment clip trimmed only at its tail (segment 0 of
-    /// the muxer cut keeps the source's non-zero start_time). Its span is exact —
-    /// `pts[hi] - pts[lo]` of the kept range — because `hi` is a real, in-bounds frame.
     @Test func clipSpanOfATrimmedSmartRenderedClipIsExact() {
-        // A source at start_time 0.24, 25fps; kept [0, 4) — trimmed on a copy-safe keyframe.
         let index = FrameIndex(
             pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
             keyframeFlags: [true, false, false, false, true, false, false, false])
         let item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mpg"),
                               segments: [PlannedSegment(kind: .copy, range: 0..<4)], index: index)
-        #expect(abs((ExportEngine.clipSpan(item) ?? -1) - 0.16) < 1e-9)   // pts[4] - pts[0]
+        #expect(abs((ExportEngine.clipSpan(item) ?? -1) - 0.16) < 1e-9)
     }
 
-    /// A clip kept to its end (`hi == count`, `pts[hi]` out of bounds) estimates the last
-    /// frame's slot from the mean frame interval — safe because a clip is CFR.
     @Test func clipSpanOfARunToEndClipAddsOneFrameSlot() {
         let index = FrameIndex(
             pts: [0.24, 0.28, 0.32, 0.36, 0.40, 0.44, 0.48, 0.52],
@@ -822,12 +629,9 @@ struct ExportEngineTests {
         let item = ExportItem(source: URL(fileURLWithPath: "/tmp/a.mpg"),
                               segments: [PlannedSegment(kind: .copy, range: 0..<4),
                                          PlannedSegment(kind: .reEncode, range: 4..<8)], index: index)
-        // pts[7] - pts[0] + one 0.04 slot = the full 8-frame clip = 0.32.
         #expect(abs((ExportEngine.clipSpan(item) ?? -1) - 0.32) < 1e-9)
     }
 
-    /// A conformed clip re-encodes its kept window to the target spec preserving duration,
-    /// so its span is the kept duration the app supplies (closed-window fallback).
     @Test func clipSpanOfAConformedClipIsTheKeptDuration() {
         let vp = VideoProperties(codec: "h264", profile: nil, level: nil, width: 704, height: 528,
                                  frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: nil,
@@ -841,8 +645,6 @@ struct ExportEngineTests {
         #expect(ExportEngine.clipSpan(item) == 3.0)
     }
 
-    /// The last clip offsets nothing → `nil`; an uncomputable span (no segments, no
-    /// conform) degrades to `nil` — no directive, today's behavior — rather than a guess.
     @Test func clipSpansLastClipAndUncomputableSpansAreNil() {
         let index = FrameIndex(pts: [0.0, 0.04, 0.08, 0.12],
                                keyframeFlags: [true, false, false, false])
@@ -852,19 +654,16 @@ struct ExportEngineTests {
         let spans = ExportEngine.clipSpans(items: [trimmed, planless, trimmed])
         #expect(spans.count == 3)
         #expect(abs((spans[0] ?? -1) - 0.08) < 1e-9)
-        #expect(spans[1] == nil)   // uncomputable → no directive
-        #expect(spans[2] == nil)   // last clip → no directive
+        #expect(spans[1] == nil)
+        #expect(spans[2] == nil)
     }
 
-    // MARK: timestamp self-check (catches both shipped defects)
-
     @Test func timestampDefectPassesUniformSpacing() {
-        let pts = (0..<100).map { 0.04 * Double($0) }   // clean 25fps run
+        let pts = (0..<100).map { 0.04 * Double($0) }
         #expect(ExportEngine.timestampDefect(pts: pts) == nil)
     }
 
     @Test func timestampDefectCatchesASeamGap() {
-        // 25fps that skips one slot at frame 89 (the start_time off-by-one): …3.52, 3.60…
         var pts = (0..<89).map { 0.04 * Double($0) }
         pts += (89..<100).map { 0.04 * Double($0) + 0.04 }
         let reason = ExportEngine.timestampDefect(pts: pts)
@@ -873,7 +672,6 @@ struct ExportEngineTests {
     }
 
     @Test func timestampDefectCatchesADuplicate() {
-        // Two frames collapsed onto one PTS (the B-pyramid/MKV mux defect).
         var pts = (0..<50).map { 0.04 * Double($0) }
         pts[25] = pts[24]
         let reason = ExportEngine.timestampDefect(pts: pts)
@@ -885,18 +683,13 @@ struct ExportEngineTests {
         #expect(ExportEngine.timestampDefect(pts: [0.0, 0.04]) == nil)
     }
 
-    // MARK: plan-aware gate (issue #19): copy spans verify against the source's pattern
-
-    /// 25fps source with the broadcast capture's signature anomaly: a duplicated PTS at
-    /// frame `dupAt`, then a double-slot gap two frames later that re-syncs.
     private func dirtySource(count: Int, dupAt: Int) -> [Double] {
         var pts: [Double] = []
         var t = 0.0
         for i in 0..<count {
             pts.append(t)
-            // the duplicate's slot is repaid by the gap, so the tail re-syncs
-            if i == dupAt { continue }              // duplicate: next frame shares t
-            t += (i == dupAt + 2) ? 0.08 : 0.04     // gap two frames later
+            if i == dupAt { continue }
+            t += (i == dupAt + 2) ? 0.08 : 0.04
         }
         return pts
     }
@@ -905,65 +698,44 @@ struct ExportEngineTests {
         let src = dirtySource(count: 120, dupAt: 50)
         let plan = [PlannedSegment(kind: .copy, range: 0..<100),
                     PlannedSegment(kind: .reEncode, range: 100..<110)]
-        // piece = source pattern over the copy span + uniform re-encode tail
         var pts = Array(src[0..<100])
         let tail0 = src[99] + 0.04
         pts += (0..<10).map { tail0 + 0.04 * Double($0) }
-        #expect(ExportEngine.timestampDefect(pts: pts) != nil)              // old gate rejected it
+        #expect(ExportEngine.timestampDefect(pts: pts) != nil)
         #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src) == nil)
     }
 
     @Test func theReMaterializedAnomalyMayDriftUpToThreeIntervals() {
-        // The mpegts round-trip refills the duplicate's lost pts from dts, displacing
-        // the anomaly by up to the B-frame reorder depth (measured 2 on the real
-        // broadcast fixture; ±3 is the documented bound).
         let src = dirtySource(count: 120, dupAt: 50)
         let plan = [PlannedSegment(kind: .copy, range: 0..<100),
                     PlannedSegment(kind: .reEncode, range: 100..<110)]
-        var drifted = dirtySource(count: 120, dupAt: 53)   // same shape, 3 intervals later
+        var drifted = dirtySource(count: 120, dupAt: 53)
         drifted = Array(drifted[0..<100]) + (0..<10).map { drifted[99] + 0.04 * Double($0 + 1) }
         #expect(ExportEngine.timestampDefect(pts: drifted, plan: plan, sourcePts: src) == nil)
-        var tooFar = dirtySource(count: 120, dupAt: 56)    // 6 intervals: not the same anomaly
+        var tooFar = dirtySource(count: 120, dupAt: 56)
         tooFar = Array(tooFar[0..<100]) + (0..<10).map { tooFar[99] + 0.04 * Double($0 + 1) }
         #expect(ExportEngine.timestampDefect(pts: tooFar, plan: plan, sourcePts: src) != nil)
     }
 
-    /// The piece's outermost edges are not seams — nothing abuts them. A copy running
-    /// to the file end may faithfully reproduce a source anomaly in its last intervals
-    /// (the HEVC fixture's tail presents with a missing slot: a `-t` stream-copy keeps
-    /// a decode-order prefix of its B-pyramid), and the source-match requirement still
-    /// applies. Interior seams keep the strict window — that is where the shipped
-    /// defect classes live.
     @Test func outerEdgesOfThePieceAreNotSeams() {
-        // Source whose final interval is a double slot (B-pyramid tail cut).
         var src = (0..<100).map { 0.04 * Double($0) }
         src[99] = src[98] + 0.08
         let plan = [PlannedSegment(kind: .copy, range: 0..<100)]
         #expect(ExportEngine.timestampDefect(pts: src, plan: plan, sourcePts: src) == nil)
-        // The same gap WITHOUT a source match still fails, outer edge or not.
         let clean = (0..<100).map { 0.04 * Double($0) }
         #expect(ExportEngine.timestampDefect(pts: src, plan: plan, sourcePts: clean) != nil)
-        // An interior seam keeps the strict window: the same anomaly at a copy
-        // segment's last interval before a re-encode segment is never excused.
         let interior = [PlannedSegment(kind: .copy, range: 0..<50),
                         PlannedSegment(kind: .reEncode, range: 50..<100)]
         var seamed = (0..<100).map { 0.04 * Double($0) }
         seamed[49] = seamed[48] + 0.08
-        // ...even with an identical source — the seam stays strict.
         #expect(ExportEngine.timestampDefect(pts: seamed, plan: interior, sourcePts: seamed) != nil)
     }
 
-    /// A repaired segment's output count differs from its frame range (holes filled,
-    /// corrupt dropped — issue #47), shifting where later copy segments land in the
-    /// piece. `outputCounts` re-anchors the mapping so a copy span after a repair still
-    /// verifies against the source's own pattern at the right position.
     @Test func outputCountsReanchorCopySpansAfterARepairedSegment() {
         let src = dirtySource(count: 30, dupAt: 15)
         let z = DamageZone(start: 0.1, end: 0.2, affectsVideo: true)
         let plan = [PlannedSegment(kind: .reEncode, range: 0..<10, damage: [z]),
                     PlannedSegment(kind: .copy, range: 10..<25)]
-        // The repaired piece came out 8 frames; the copy follows with the source's
-        // dup at source frame 15 → output interval 8 + (15 − 10) = 13.
         var pts = (0..<8).map { 0.04 * Double($0) }
         var t = pts.last! + 0.04
         for i in 10..<25 {
@@ -971,50 +743,42 @@ struct ExportEngineTests {
             if i == 15 { continue }
             t += (i == 17) ? 0.08 : 0.04
         }
-        // Without the counts the plan can't map (23 ≠ 25 frames) → strict gate trips.
         #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src) != nil)
         #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src,
                                              outputCounts: [8, 15]) == nil)
     }
 
     @Test func anAnomalyTheSourceDoesNotHaveStillFails() {
-        let src = (0..<120).map { 0.04 * Double($0) }      // clean source
+        let src = (0..<120).map { 0.04 * Double($0) }
         let plan = [PlannedSegment(kind: .copy, range: 0..<100),
                     PlannedSegment(kind: .reEncode, range: 100..<110)]
         var pts = (0..<110).map { 0.04 * Double($0) }
-        pts[50] = pts[49]                                   // collapse inside the copy span
+        pts[50] = pts[49]
         let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src)
         #expect(reason?.contains("duplicate") == true)
     }
 
     @Test func aMatchingKindIsRequiredNotJustAnyAnomaly() {
-        let src = dirtySource(count: 120, dupAt: 50)       // source has dup@50, gap@52
+        let src = dirtySource(count: 120, dupAt: 50)
         let plan = [PlannedSegment(kind: .copy, range: 0..<100)]
         var pts = Array(src[0..<100])
-        pts[20] = pts[19]                                   // dup where source is clean
+        pts[20] = pts[19]
         #expect(ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src) != nil)
     }
 
     @Test func seamAndSegmentEdgeWindowsStayStrict() {
         let plan = [PlannedSegment(kind: .copy, range: 0..<100),
                     PlannedSegment(kind: .reEncode, range: 100..<110)]
-        // A source anomaly *at* the planned seam is not forgiven — the seam is where
-        // the shipped defect classes live, so the gate stays conservative there (the
-        // de-risk caught a real misplaced-seam gap exactly at this position).
         var src = (0..<120).map { 0.04 * Double($0) }
-        for j in 100..<120 { src[j] += 0.04 }            // source gap at interval 99: the seam
+        for j in 100..<120 { src[j] += 0.04 }
         var pts = Array(src[0..<100])
-        pts += (0..<10).map { src[100] + 0.04 * Double($0) }   // reproduces the seam gap
+        pts += (0..<10).map { src[100] + 0.04 * Double($0) }
         let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src)
         #expect(reason?.contains("gap") == true)
-        // an injected gap at the copy→re-encode seam of an otherwise clean export
         var clean = (0..<110).map { 0.04 * Double($0) }
         for j in 100..<110 { clean[j] += 0.04 }
         #expect(ExportEngine.timestampDefect(pts: clean, plan: plan,
                                              sourcePts: (0..<120).map { 0.04 * Double($0) }) != nil)
-        // a source anomaly inside the 2-interval window at an *interior* copy edge is
-        // also strict, even when the source matches — only the piece's outermost
-        // edges relax (nothing abuts them; see outerEdgesOfThePieceAreNotSeams)
         let edgy = dirtySource(count: 120, dupAt: 97)
         var edgyPts = Array(edgy[0..<100])
         edgyPts += (0..<10).map { edgy[99] + 0.04 * Double($0 + 1) }
@@ -1027,7 +791,7 @@ struct ExportEngineTests {
                     PlannedSegment(kind: .reEncode, range: 100..<110)]
         var pts = Array(src[0..<100])
         pts += (0..<10).map { src[99] + 0.04 * Double($0 + 1) }
-        pts[105] = pts[104]                                 // dup inside the re-encode
+        pts[105] = pts[104]
         let reason = ExportEngine.timestampDefect(pts: pts, plan: plan, sourcePts: src)
         #expect(reason?.contains("duplicate") == true)
     }
@@ -1039,10 +803,6 @@ struct ExportEngineTests {
     }
 }
 
-/// Pins the per-track own-codec mux shape (issue #31 / ADR-0018): cut-only tracks each
-/// carry their own encoder via `-c:a:N` (de-risked in the shell on MPEG-2/H.264/HEVC in
-/// TS/MKV/MP4); without per-track encoders the long-validated single `-c:a` shape is
-/// emitted unchanged.
 struct PerTrackAudioCodecTests {
     private let src = URL(fileURLWithPath: "/tmp/clip.mkv")
     private let out = URL(fileURLWithPath: "/tmp/out.mkv")
@@ -1087,10 +847,6 @@ struct PerTrackAudioCodecTests {
     }
 }
 
-/// Pins the `.separate`-mode file naming contract (issue #30): `NN <clip name>.<ext>`
-/// in timeline order, zero-padded to the clip total (minimum two digits), source
-/// extension dropped, filesystem-hostile characters replaced, and a collision suffix
-/// as a guard even though distinct prefixes should make collisions impossible.
 struct SeparateFileNamingTests {
     @Test func threeClipsGetTwoDigitPrefixesInTimelineOrder() {
         let names = ExportEngine.separateFileNames(
@@ -1142,11 +898,6 @@ struct SeparateFileNamingTests {
     }
 }
 
-/// The destination/source collision guard (issue #77): the main export must refuse — before
-/// writing anything — any planned output path that equals one of its own source files, or it
-/// truncates the original capture (ffmpeg `-y`, `placeFile`'s remove-then-move) before reading
-/// it. Exercised with real files/symlinks/hard links in a throwaway temp dir so the symlink and
-/// file-identity branches are covered, not just literal-path equality.
 struct ExportSourceCollisionTests {
     private func tempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -1157,8 +908,6 @@ struct ExportSourceCollisionTests {
     private func touch(_ url: URL) {
         FileManager.default.createFile(atPath: url.path, contents: Data("x".utf8))
     }
-
-    // MARK: denotesSameFile
 
     @Test func identicalPathIsTheSameFile() {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
@@ -1186,7 +935,6 @@ struct ExportSourceCollisionTests {
         let real = dir.appendingPathComponent("real.ts"); touch(real)
         let hard = dir.appendingPathComponent("hard.ts")
         try FileManager.default.linkItem(at: real, to: hard)
-        // Neither path is a symlink, so this can only match by inode/device identity.
         #expect(ExportEngine.denotesSameFile(hard, real))
     }
 
@@ -1197,13 +945,9 @@ struct ExportSourceCollisionTests {
         let linkDir = dir.appendingPathComponent("link")
         try FileManager.default.createSymbolicLink(at: linkDir, withDestinationURL: realDir)
         let source = realDir.appendingPathComponent("clip.ts"); touch(source)
-        // A destination that does not yet exist under this exact path, but resolves through
-        // the symlinked parent to the source, must still be caught.
         let dest = linkDir.appendingPathComponent("clip.ts")
         #expect(ExportEngine.denotesSameFile(dest, source))
     }
-
-    // MARK: assertNoSourceCollision
 
     private func item(source: URL, name: String,
                       audio: [ExportEngine.AudioSource?] = [.stream(0)]) -> ExportItem {
@@ -1215,7 +959,6 @@ struct ExportSourceCollisionTests {
         let source = dir.appendingPathComponent("clip.ts"); touch(source)
         var settings = OutputSettings(); settings.mode = .connect
         let items = [item(source: source, name: "Clip A")]
-        // The connect destination is the source file itself.
         let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
                                                   ext: "ts", audioCodec: "aac", to: source)
         do {
@@ -1243,8 +986,6 @@ struct ExportSourceCollisionTests {
 
     @Test func separateRefusesWhenAGeneratedPathIsASource() {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        // Separate mode writes `NN <stem>.<ext>`; a source already sitting at that path in
-        // the chosen folder would be overwritten by its own clip.
         let source = dir.appendingPathComponent("01 clip.ts"); touch(source)
         var settings = OutputSettings(); settings.mode = .separate
         let items = [item(source: source, name: "clip.ts")]
@@ -1267,7 +1008,6 @@ struct ExportSourceCollisionTests {
         var settings = OutputSettings(); settings.mode = .connect
         let items = [item(source: video, name: "Clip A",
                           audio: [.external(external, stream: 0)])]
-        // The connect destination lands on the external audio file, not the video source.
         let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,
                                                   ext: "ts", audioCodec: "aac", to: external)
         do {
@@ -1281,16 +1021,10 @@ struct ExportSourceCollisionTests {
     }
 }
 
-/// The one audio leg the rebuild cannot express (issue #111): silence standing in for a
-/// track a clip doesn't have, on a clip with **no known kept duration**. Silence has to be
-/// generated to a length; written as zero samples it contributes nothing and pulls every
-/// later clip earlier, so the export refuses before it writes anything. A *real* leg of
-/// unknown length is allowed — it plays its own natural length.
 struct AudioLegLengthGuardTests {
     private let src = URL(fileURLWithPath: "/tmp/clip.mkv")
     private let stereoTrack = AudioCodecPolicy.OutputAudioTrack(sampleRate: 48000, channels: 2)
 
-    /// No duration and no closed window → `keptDuration` is nil.
     private func lengthless(audio: [ExportEngine.AudioSource?],
                             ownTracks: [AudioCodecPolicy.OutputAudioTrack]? = nil) -> ExportItem {
         ExportItem(source: src, displayName: "Clip A", audioStart: 1.0, audioEnd: nil,
@@ -1298,7 +1032,6 @@ struct AudioLegLengthGuardTests {
     }
 
     @Test func aSilenceLegWithNoKnownLengthRefusesTheExport() {
-        // Two output tracks, one source: track 2 is silence, and there is no length for it.
         let items = [lengthless(audio: [.stream(0)])]
         do {
             try ExportEngine.assertAudioLegLengthsKnown(items: items,
@@ -1314,7 +1047,6 @@ struct AudioLegLengthGuardTests {
         }
     }
 
-    /// An explicitly nil source (a track the clip carries no audio for) is the same case.
     @Test func anExplicitlyNilSourceWithNoKnownLengthRefusesToo() {
         let items = [lengthless(audio: [nil])]
         #expect(throws: ExportError.self) {
@@ -1324,8 +1056,6 @@ struct AudioLegLengthGuardTests {
     }
 
     @Test func aRealLegWithNoKnownLengthIsAllowed() throws {
-        // Every track has a source: nothing has to be generated, so the legs just play
-        // their own lengths (`audioMuxLeavesALegWithNoKnownLengthUnforced`).
         let items = [lengthless(audio: [.stream(0), .stream(1)])]
         try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack, stereoTrack],
                                                     mode: .connect)
@@ -1338,9 +1068,6 @@ struct AudioLegLengthGuardTests {
                                                     mode: .connect)
     }
 
-    /// Separate mode muxes each clip against its **own** tracks (ADR-0018), so the guard
-    /// reads the same list the mux will: a clip whose own tracks are all sourced passes,
-    /// even though the export-wide list would have needed silence.
     @Test func separateModeJudgesAClipAgainstItsOwnTracks() throws {
         let items = [lengthless(audio: [.stream(0)], ownTracks: [stereoTrack])]
         try ExportEngine.assertAudioLegLengthsKnown(items: items, tracks: [stereoTrack, stereoTrack],
@@ -1352,55 +1079,32 @@ struct AudioLegLengthGuardTests {
     }
 }
 
-/// Slice 4 of the field-coded copy-cut route (issue #96): the export path's pure
-/// decisions for a confirmed field-coded (PAFF) H.264 clip — whose plan the planner has
-/// already forced to copy segments only (`fieldCodedPlanNotCopyOnly`). Every shape here
-/// pins the shell de-risk on the real capture: cut pieces are always `.ts` (an MKV piece
-/// carries no independent DTS and collapses the B-field PTS dips on concat; TS pieces
-/// feed TS/MKV/MP4 finals cleanly), the concat list drops all `duration` directives, and
-/// the *final* outputs keep the chosen container extension.
 struct FieldCodedCopyCutExportTests {
-    /// A copy-only plan trimmed at both ends — the shape the cut editor's snapped marks
-    /// produce on a field-coded clip.
     private let trimmed = [PlannedSegment(kind: .copy, range: 100..<2000, outCutKeyframe: 2010)]
 
-    // MARK: piece extension (issue #96)
-
     @Test func aFieldCodedCutAlwaysProducesTsPieces() {
-        // …whatever the output container — MKV pieces are the trap, and the MP4 shape
-        // was never the validated one either; TS feeding all three finals is.
         #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: trimmed) == "ts")
         #expect(ExportEngine.pieceExtension(container: "mp4", fieldCoded: true, plan: trimmed) == "ts")
         #expect(ExportEngine.pieceExtension(container: "ts", fieldCoded: true, plan: trimmed) == "ts")
     }
 
     @Test func aSingleEndedTrimIsStillACutAndStillTs() {
-        // In-cut only (the copy runs to the clip end)…
         let headCut = [PlannedSegment(kind: .copy, range: 100..<2000, outCutKeyframe: nil)]
         #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: headCut) == "ts")
-        // …and out-cut only (the copy starts at the file head) both go through the
-        // segment muxer, so both take the `.ts` piece.
         let tailCut = [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: 2010)]
         #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: tailCut) == "ts")
     }
 
     @Test func aWholeClipFieldCodedKeepStaysOnThePlainRemuxPath() {
-        // A single copy segment cutting neither end is today's whole-clip remux — no
-        // piece seam for MKV's DTS regeneration to collapse — and must stay
-        // byte-for-byte unchanged (same nil-cut shape `needsCut` reads).
         let whole = [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: nil)]
         #expect(ExportEngine.pieceExtension(container: "mkv", fieldCoded: true, plan: whole) == "mkv")
         #expect(ExportEngine.pieceExtension(container: "mp4", fieldCoded: true, plan: whole) == "mp4")
         #expect(ExportEngine.pieceExtension(container: "ts", fieldCoded: true, plan: whole) == "ts")
     }
 
-    // MARK: whole-clip-copy predicate (the remux criterion's single owner)
-
     @Test func theWholeClipCopyShapeIsOneUncutCopySegment() {
         #expect(ExportEngine.isWholeClipCopy(
             [PlannedSegment(kind: .copy, range: 0..<2000, outCutKeyframe: nil)]))
-        // Any cut end, a re-encode, or a multi-segment plan is not the remux shape —
-        // the same verdicts `copySegmentPlan` + `needsCut` reach on a lone copy segment.
         #expect(!ExportEngine.isWholeClipCopy(
             [PlannedSegment(kind: .copy, range: 100..<2000, outCutKeyframe: nil)]))
         #expect(!ExportEngine.isWholeClipCopy(
@@ -1418,10 +1122,6 @@ struct FieldCodedCopyCutExportTests {
         #expect(ExportEngine.pieceExtension(container: "mp4", fieldCoded: false, plan: trimmed) == "mp4")
     }
 
-    /// The MP4 timescale pin (#18/#24) rides the *piece* extension: an MP4 piece still
-    /// carries `-segment_format_options video_track_timescale=…`, while the cut command
-    /// for a field-coded clip's `.ts` piece — built with no timescale, exactly as the
-    /// engine's ext-gated `copyTimescale` passes it — has no such flag.
     @Test func theMp4TimescalePinNeverReachesATsPiece() {
         let src = URL(fileURLWithPath: "/tmp/clip.ts")
         let plan = SegmentPlan(inFrame: 100, outFrame: 1999, inSegmentTime: 4.0, outSegmentTime: 80.0)
@@ -1433,8 +1133,6 @@ struct FieldCodedCopyCutExportTests {
         #expect(!tsCut.contains("-segment_format_options"))
         #expect(!tsCut.joined().contains("video_track_timescale"))
     }
-
-    // MARK: join-level piece containers (issue #96)
 
     private func item(_ path: String, fieldCoded: Bool = false,
                       segments: [PlannedSegment]? = nil) -> ExportItem {
@@ -1448,10 +1146,6 @@ struct FieldCodedCopyCutExportTests {
     }
 
     @Test func aFieldCodedItemForcesEveryPieceOfAConnectJoinToTs() {
-        // A mixed-container concat list is misplaced outright by the demuxer (the MKV
-        // piece's duration re-read in the TS timebase pushed its neighbour ~90× late;
-        // reversed, the MKV piece collapsed onto duplicate PTS), so the whole join —
-        // the other clips' cut pieces AND a whole-clip keep — cuts as `.ts`.
         let whole = [PlannedSegment(kind: .copy, range: 0..<4, outCutKeyframe: nil)]
         let items = [item("/tmp/paff.ts", fieldCoded: true),
                      item("/tmp/plain.mkv"),
@@ -1469,9 +1163,6 @@ struct FieldCodedCopyCutExportTests {
     }
 
     @Test func aSingleClipConnectAndSeparateItemsKeepThePerItemRule() {
-        // Each `.separate` item — and a lone `.connect` clip — is its own join, so the
-        // per-item `pieceExtension` verdicts apply unchanged: the field-coded cut is
-        // `.ts`, the whole-clip keep and every other clip stay the container.
         let whole = [PlannedSegment(kind: .copy, range: 0..<4, outCutKeyframe: nil)]
         let cut = [PlannedSegment(kind: .copy, range: 1..<3, outCutKeyframe: 3)]
         let separate = [item("/tmp/paff.ts", fieldCoded: true, segments: cut),
@@ -1484,23 +1175,16 @@ struct FieldCodedCopyCutExportTests {
                 == ["mkv"])
     }
 
-    // MARK: cross-clip concat durations (issue #96)
-
     @Test func onlyFieldCodedEntriesDropTheirConcatDurationDirective() {
-        // Per-entry, not all-or-nothing: dropping every directive for one field-coded
-        // item would reopen the issue-#6/ADR-0008 seam gap for the other clips. The
-        // field-coded entry emits none (its `.ts` piece self-reports its true span;
-        // the whole-keep estimate even under-states a ragged tail and overlapped the
-        // next clip in the shell); the progressive entry keeps its exact kept span.
         let leading = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts", fieldCoded: true),
                                                               item("/tmp/b.ts")])
         #expect(leading.count == 2)
         #expect(leading[0] == nil)
-        #expect(leading[1] == nil)   // the last clip offsets nothing (clipSpans)
+        #expect(leading[1] == nil)
         let trailing = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts"),
                                                                item("/tmp/b.ts", fieldCoded: true)])
         #expect(trailing.count == 2)
-        #expect(abs((trailing[0] ?? -1) - 0.08) < 1e-9)   // pts[2] - pts[0], kept
+        #expect(abs((trailing[0] ?? -1) - 0.08) < 1e-9)
         #expect(trailing[1] == nil)
         let sandwich = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts", fieldCoded: true),
                                                                item("/tmp/b.ts"),
@@ -1509,7 +1193,6 @@ struct FieldCodedCopyCutExportTests {
         #expect(sandwich[0] == nil)
         #expect(abs((sandwich[1] ?? -1) - 0.08) < 1e-9)
         #expect(sandwich[2] == nil)
-        // The written list carries exactly the surviving directives, aligned by entry.
         let pieces = [URL(fileURLWithPath: "/tmp/a_piece.ts"), URL(fileURLWithPath: "/tmp/b_piece.ts")]
         #expect(ExportEngine.concatListContents(pieces: pieces, durations: leading)
                 == "file '/tmp/a_piece.ts'\nfile '/tmp/b_piece.ts'\n")
@@ -1518,18 +1201,12 @@ struct FieldCodedCopyCutExportTests {
     }
 
     @Test func withoutAFieldCodedPieceTheDirectivesAreUnchanged() {
-        // The seam-closing `clipSpans` directives (issue #6) still flow through — the
-        // first clip pins its exact kept span, the last emits none.
         let durations = ExportEngine.crossClipDurations(items: [item("/tmp/a.ts"), item("/tmp/b.ts")])
         #expect(durations.count == 2)
-        #expect(abs((durations[0] ?? -1) - 0.08) < 1e-9)   // pts[2] - pts[0]
+        #expect(abs((durations[0] ?? -1) - 0.08) < 1e-9)
         #expect(durations[1] == nil)
     }
 
-    // MARK: reorder depth across a join (ADR-0026, issue #106)
-
-    /// A minimal probed video spec — the reorder-depth tests only care that a conform
-    /// *exists* on the item, not what it transforms.
     private func video() -> VideoProperties {
         VideoProperties(codec: "h264", profile: nil, level: nil, width: 704, height: 528,
                         frameRate: "25/1", pixelFormat: "yuv420p", fieldOrder: nil,
@@ -1537,10 +1214,6 @@ struct FieldCodedCopyCutExportTests {
                         colorRange: nil)
     }
 
-    /// A copy piece carries its source's reorder depth verbatim, so the join's depth is the
-    /// deepest of them — that is the bar the app's own encodes are matched to. A conformed
-    /// item contributes nothing (every piece of it is a fresh encode), and neither does a
-    /// plan that copies nothing.
     @Test func theJoinsDepthIsTheDeepestCopiedPiece() {
         let src = URL(fileURLWithPath: "/tmp/a.mkv")
         func copying(_ depth: Int?) -> ExportItem {
@@ -1554,11 +1227,8 @@ struct FieldCodedCopyCutExportTests {
         #expect(ExportEngine.joinReorderDepth(items: [copying(2)]) == 2)
         #expect(ExportEngine.joinReorderDepth(items: [copying(1), copying(2)]) == 2)
         #expect(ExportEngine.joinReorderDepth(items: [copying(1)]) == 1)
-        // An unprobed depth counts as the shallow 1 — the floor every join needs anyway.
         #expect(ExportEngine.joinReorderDepth(items: [copying(nil)]) == 1)
-        // Nothing copied: a fully re-encoded clip imposes no depth, whatever its source is.
         #expect(ExportEngine.joinReorderDepth(items: [reencodingOnly(2)]) == 1)
-        // Neither does a conformed clip (the repro: its deep source is irrelevant, #106).
         let conformed = ExportItem(source: src, sourceReorderDepth: 2,
                                    conform: ConformEngine.VideoConform(
                                        sourceVideo: video(), targetVideo: video()))
@@ -1566,10 +1236,6 @@ struct FieldCodedCopyCutExportTests {
         #expect(ExportEngine.joinReorderDepth(items: [conformed, copying(2)]) == 2)
     }
 
-    /// An item whose own first piece is one the app encodes declares the *join's* depth —
-    /// that piece is what an MKV latches. An item whose first piece is a stream copy can
-    /// only match its own source: out-deepening the copy standing in front of it would
-    /// break that item's internal join.
     @Test func anItemsPiecesFollowTheJoinOnlyWhenItsFirstPieceIsOurs() {
         let src = URL(fileURLWithPath: "/tmp/a.mkv")
         let copyFirst = ExportItem(source: src,
@@ -1586,7 +1252,6 @@ struct FieldCodedCopyCutExportTests {
             sourceVideo: video(), targetVideo: video()))
         #expect(ExportEngine.pieceReorderDepth(item: conformed, joinDepth: 2) == 2)
         #expect(ExportEngine.pieceReorderDepth(item: conformed, joinDepth: 1) == 1)
-        // Never deeper than the encoders can actually produce.
         let veryDeep = ExportItem(source: src,
                                   segments: [PlannedSegment(kind: .reEncode, range: 0..<4)],
                                   sourceReorderDepth: 4)
@@ -1594,12 +1259,7 @@ struct FieldCodedCopyCutExportTests {
             == EncoderSelection.deepestEncodableReorderDepth)
     }
 
-    // MARK: final outputs keep the container extension
-
     @Test func plannedOutputsNameTheContainerExtensionForAFieldCodedClip() {
-        // The `.ts` decision is per *piece*; the final files — what the collision guard
-        // compares against the sources — are always the chosen container (a `.ts` piece
-        // is rewrapped on its way there, never placed under a container name it isn't).
         var settings = OutputSettings(); settings.mode = .separate
         let items = [item("/tmp/paff.ts", fieldCoded: true), item("/tmp/plain.ts")]
         let outputs = ExportEngine.plannedOutputs(items: items, settings: settings,

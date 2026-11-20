@@ -1,47 +1,25 @@
 import Foundation
 
-/// The `clipstitch` command line, parsed as pure data (issue #115). Separate from
-/// `ClipStitchMain` because that type's job is to exit the process: the parse has to be
-/// unit-testable, and nothing that calls `exit` is.
-///
-/// Options are recognised anywhere among the positional arguments; an unknown `--option`
-/// is refused rather than read as a file name, so a mistyped `--pan` can't become a job
-/// path and fail two stages later with the wrong exit code.
 enum ClipStitchArguments {
-    /// What the command line asks for.
     enum Invocation: Equatable {
-        /// Print the usage text and exit 0.
         case help
-        /// Stitch `job` into `output` — the normal run.
         case stitch(job: String, output: String)
-        /// Report what `job` would do, as JSON on stdout, and write no media.
         case plan(job: String)
     }
 
     struct Parsed: Equatable {
         var invocation: Invocation
-        /// `--verbose`: print an error's whole detail instead of the bounded excerpt
-        /// (issue #113). Accepted in every mode; stderr only.
         var verbose: Bool = false
-        /// `--index-cache <dir>`: keep each source's probe, frame index and damage zones in
-        /// `dir` between runs (`IndexCache`). Accepted in every mode.
         var indexCache: String? = nil
-        /// `--piece-cache <dir>`: reuse the re-encoded pieces of an earlier render from
-        /// `dir` (`PieceCache`). Accepted by `--plan` too, which renders nothing and so
-        /// ignores it — one flag set can drive a plan and its render.
         var pieceCache: String? = nil
     }
 
-    /// The options that take a value, as the next argument.
     static let valueOptions: Set<String> = ["--index-cache", "--piece-cache"]
 
-    /// A usage error (exit 64). `message` is the reason alone — the caller appends the
-    /// usage text.
     struct UsageError: Error, Equatable {
         var message: String
     }
 
-    /// Parses the arguments after the program name.
     static func parse(_ arguments: [String]) throws -> Parsed {
         if arguments.contains("--help") || arguments.contains("-h") {
             return Parsed(invocation: .help)
@@ -72,8 +50,6 @@ enum ClipStitchArguments {
         }
         let indexCache = values["--index-cache"], pieceCache = values["--piece-cache"]
         if plan {
-            // A plan query writes no media, so an output file is not merely unused —
-            // it would mean the caller expected a render.
             guard positional.count == 1 else {
                 return try refusePlanArguments(positional)
             }

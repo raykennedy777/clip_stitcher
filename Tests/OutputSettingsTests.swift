@@ -2,9 +2,6 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Pins `OutputSettings` decoding across save vintages: the `rendering` choice arrived
-/// with ADR-0018, and saves made before it must decode to conform-to-target — today's
-/// behavior — rather than failing the whole project file.
 struct OutputSettingsTests {
     @Test func anOldSaveWithoutRenderingDecodesToConformToTarget() throws {
         let old = #"{"mode":"separate","type":"videoAndAudio","container":"ts"}"#
@@ -14,9 +11,6 @@ struct OutputSettingsTests {
         #expect(decoded.container == .ts)
     }
 
-    // MKV is the unconditional default container (issue #10): the only supported
-    // container that round-trips audio track titles (ADR-0014), and since issue #2 it
-    // carries MPEG-2 by stream-copy too — no per-codec override on first import.
     @Test func freshSettingsDefaultToMkv() {
         #expect(OutputSettings().container == .mkv)
     }
@@ -33,9 +27,6 @@ struct OutputSettingsTests {
         #expect(decoded.container == .mp4)
     }
 
-    // The conform CRF (issue #105 follow-up) is nil by default and on every save made
-    // before the field — the conform then runs at the encoder's own default, exactly
-    // as before the knob existed.
     @Test func anOldSaveWithoutConformCrfDecodesToNil() throws {
         let old = #"{"mode":"connect","type":"videoAndAudio","container":"mkv"}"#
         let decoded = try JSONDecoder().decode(OutputSettings.self, from: Data(old.utf8))

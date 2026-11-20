@@ -44,3 +44,11 @@ taken from the piece cache passes the same verify gate as a fresh encode.**
   to a fresh encode. Delete the piece cache after such an upgrade.
 - A change to the join's reorder depth or MP4 timescale re-keys every piece of the join.
 - Neither cache is pruned.
+- **Persistence, TOCTOU, APFS clones, and CLI ergonomics:** Unreadable, corrupt, or
+  schema-mismatched cache entries fail open as misses (never errors); writes go to a temp file
+  and atomically `rename` on a best-effort basis so concurrent runs never read partial entries.
+  `StitchPipeline.sourceFacts` re-measures `SourceIdentity` after scanning and stores only if
+  it matches the pre-scan identity (closing a mid-scan modification TOCTOU window).
+  `PieceCache` uses zero-copy APFS `clonefile` on the same volume and falls back to
+  `FileManager.copyItem` across volumes. `--plan` accepts `--piece-cache <dir>` as a no-op so
+  callers can pass one flag set to both plan and render invocations.

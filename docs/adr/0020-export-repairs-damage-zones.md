@@ -72,3 +72,31 @@ end on the real 1844 capture across all nine documented zones (issue #47's run r
   the kept copy.
 - Field-coded (PAFF) sources stay warn-only (issue #46) — repair presumes the
   packet==frame index (ADR-0006).
+
+## Additional repair invariants
+
+- **Coordinate base & tri-state storage:** Recorded `DamageZone` timestamps are sorted source
+  seconds measured from the **container's `start_time`** (matching input `-ss`; absolute PTS =
+  zone + `containerStart`), so `ExportPlanner` adds `containerStart` when mapping zones onto
+  `FrameIndex.pts`. `Clip.damageZones` is tri-state: `nil` = unscanned, `[]` = scanned clean,
+  non-empty = damaged.
+- **Repair decode anchor backstep:** Repaired segments anchor 1 keyframe before the keyframe
+  at/before span start — and **2 keyframes back on MPEG-PS** (`.mpg`/`.mpeg`/`.vob`), where
+  byte-estimated `-ss` lands late near damage and entering a truncated final GOP directly
+  decodes nothing.
+- **Window widening, head-clamp, and adjacent merge:** Each dropped zone is widened by
+  `±¼ frame` against float jitter and head-clamped so the span's first frame always survives
+  for `fps` to hold (preferring one glitched held frame over a shifted timeline). A gap between
+  repairs that cannot copy merges with its neighbor into one `.reEncode` segment so no concat
+  seam sits inside damaged territory.
+- **Truncated-ending single classification (issue #79):** Decided once in
+  `ExportPlanner.truncatedEndingTrim` (shared across conform, smart-render `trimmedSlotBudget`,
+  and `repairReport`) using two gates: the kept window reaches EOF (`reachesFileEnd`) **and** a
+  video zone ends within 1 frame interval of `fileEnd` (never a wide margin like 1.0 s that
+  spuriously trims interior cuts). `ConformEngine.eofShortfallAllowance` is non-zero strictly
+  when `trimEnd` is set.
+- **Audio damage survival (issue #44):** Every audio input passes `-max_error_rate 1.0` (so
+  undecodable dead zones don't abort at ffmpeg's default ⅔ error threshold with exit 69) and
+  every real export leg runs `aresample=<rate>:async=1:first_pts=0` (`async=1` fills timestamp
+  gaps with silence in place; `first_pts=0` anchors windows starting inside a dead zone;
+  verified byte-identical on clean sources). Generated `anullsrc` silence legs omit `aresample`.

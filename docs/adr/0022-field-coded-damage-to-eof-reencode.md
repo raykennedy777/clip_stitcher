@@ -46,11 +46,13 @@ too; damage-to-EOF degenerates to it only when the damage is early).
   keyframe and overlap the tail, so the seam must land on a real keyframe where the head's copy
   ends and the tail's forced IDR begins — adjacent, no overlap, no gap.
 - **MBAFF tail encoder** (`BoundaryReencodeEngine.mbaffRepairVideoArgs`): `libx264 +ildct+ilme`,
-  `-top` from `field_order`, **`-crf 18` fixed** (visually lossless, ~1.33× source bitrate — a
-  fixed engine constant, not a user control), `-forced-idr 1` + `open_gop=0` for the clean entry
-  IDR, `ref=5:level=4.0` matching the source's out-of-spec 5-ref cadence, `b-pyramid=0` (the
-  issue-#2 MKV/TS duplicate-PTS collapse), `keyint=25:scenecut=0`, `dump_extra` to
-  repeat SPS/PPS into the stream.
+  `setparams=field_mode=tff|bff` (amended for ffmpeg 9 below; formerly `-top`), **`-crf 18`
+  fixed** (visually lossless, ~1.33× source bitrate — a fixed engine constant, not a user
+  control), `-forced-idr 1` + `open_gop=0` for the clean entry IDR, `ref=5:level=4.0` matching
+  the source's out-of-spec 5-ref cadence, `b-pyramid=0` (the issue-#2 MKV/TS duplicate-PTS
+  collapse), `keyint=25:scenecut=0`. In-band parameter-set repetition (`-bsf:v dump_extra`) was
+  moved out of `mbaffRepairVideoArgs` into all re-encode segment builders by issue #113
+  (ADR-0032) so encoder builders never emit a competing `-bsf:v` flag.
 - **Audio, staging, and the auto-verify verdict are unchanged from ADR-0021.**
 
 ## Verification gates this changes
@@ -109,7 +111,9 @@ clearly dominates a mostly-interlaced sample (≥ 90 %); otherwise the repair **
 (`DoctorError.fieldOrderUndetermined`) rather than guess — consistent with the conservative
 H.264-only guard (issue #57). De-risked in the shell on the real PAFF capture: `idet` reports TFF
 unanimously (501/501 at the head, 801/801 mid-file), matching the metadata `tt`; the summary logs
-at `-v info` (suppressed at `-v error`) and lands in `ProcessRunner`'s trailing tail.
+at `-v info` (suppressed at `-v error`) and lands in `ProcessRunner`'s trailing tail. The parser
+reads the **last** `Multi frame detection:` line (multi-frame is steadier than single-frame, and
+earlier lines are running subtotals while the last line is the cumulative total).
 
 ## Layering: the specialization stays in Clip Doctor (issue #58)
 

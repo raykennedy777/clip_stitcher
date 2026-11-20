@@ -1,15 +1,6 @@
 import SwiftUI
 import AppKit
 
-/// The app's Settings window (⌘,, issue #87). Exactly two preferences, both
-/// `@AppStorage`-backed so they persist across launches:
-///
-///  1. **Default export folder** — where the export / Clip Doctor / (future
-///     snapshot) save panels start: remember the last choice, or a pinned folder.
-///  2. **Default container** — the container a new project starts with.
-///
-/// Deliberately small and standard (one `Form`, no tabs) — nothing speculative was
-/// added beyond these two.
 struct SettingsView: View {
     @AppStorage(AppSettings.Key.exportFolderMode)
     private var folderMode: ExportFolderMode = .lastUsed

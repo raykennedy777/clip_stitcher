@@ -1,9 +1,6 @@
 import Testing
 @testable import ClipStitcher
 
-/// The pure parts of cut-editor audio playback (issue #7): the PCM decode command
-/// and the start_time-aware seek math. The streaming/engine side is verified at
-/// runtime (subprocess-spawning tests hang the test runner).
 struct AudioStreamPlayerTests {
     @Test func argumentsDecodeOneStreamToStereo48kFloatOnStdout() {
         let args = AudioStreamPlayer.arguments(
@@ -18,23 +15,16 @@ struct AudioStreamPlayerTests {
         ])
     }
 
-    /// Input -ss is measured from the container's start_time, not absolute pts —
-    /// on the 0.24 s-start MPEG-PS clip, seeking to pts 10.24 needs `-ss 10.0`
-    /// (measured: `-ss 10.24` lands at 10.48, exactly start_time late).
     @Test func seekSubtractsTheContainerStartTime() {
         #expect(AudioStreamPlayer.seekSeconds(sourceTime: 10.24, containerStartTime: 0.24) == 10.0)
         #expect(AudioStreamPlayer.seekSeconds(sourceTime: 0.040, containerStartTime: 0.0) == 0.040)
     }
 
-    /// A frame whose pts precedes the container start (possible when another stream
-    /// starts earlier) must not produce a negative seek.
     @Test func seekClampsAtTheFileStart() {
         #expect(AudioStreamPlayer.seekSeconds(sourceTime: 0.1, containerStartTime: 0.24) == 0.0)
     }
 }
 
-/// The audio-clocked playback loop maps elapsed audio time back to the frame on
-/// screen: the last frame whose pts is at or before the clock time.
 struct FrameIndexTimeLookupTests {
     private let index = FrameIndex(
         pts: [0.24, 0.28, 0.32, 0.36, 0.40],
@@ -57,9 +47,6 @@ struct FrameIndexTimeLookupTests {
     }
 }
 
-/// Preview audio's spawn commands (issue #8): the per-leg conform filter, the leg
-/// duration cap, and the silence leg — shapes de-risked in the shell on all three
-/// formats + the 4-track MKV (exact byte counts, first byte in 13–23 ms).
 struct AudioStreamPlayerPreviewArgumentTests {
     @Test func filterAndDurationSlotIntoTheDecodeCommand() {
         let args = AudioStreamPlayer.arguments(

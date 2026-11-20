@@ -1,23 +1,10 @@
 import Foundation
 
-/// The **index cache** (R2 of the 2026 R16 clipstitch review): what `StitchPipeline.prepare`
-/// learns about a source — the probe, the frame index, the field-coded verdict and the
-/// damage zones — kept on disk between runs. Without it every `--plan` and every render
-/// re-reads every source: about 1.5 s per GB for the packet scan, plus one confirm decode
-/// of about 3 s per damage candidate.
-///
-/// An entry is keyed on the source's `SourceIdentity`, the ffprobe and ffmpeg builds, the
-/// running clipstitch executable and `schema`; any difference is a miss. A cached entry
-/// holds exactly the values a fresh scan produced — the frame index as raw doubles, not
-/// text — so a plan made from it is the plan a fresh scan makes. Opt-in
-/// (`clipstitch --index-cache <dir>`): without the flag nothing is read or written.
 struct IndexCache {
-    /// Bump when the stored shape or the meaning of a stored field changes.
     static let schema = 1
 
     let directory: URL
 
-    /// The stored form of one source's facts.
     private struct Entry: Codable {
         var schema: Int
         var identity: SourceIdentity
@@ -29,8 +16,6 @@ struct IndexCache {
         var damageZones: [DamageZone]
     }
 
-    /// The parts of a source's facts the cache stores — `SourceFacts` without the URL,
-    /// which always comes from the job.
     struct Facts: Equatable {
         var probe: MediaProbe.Result
         var pts: [Double]
@@ -42,7 +27,6 @@ struct IndexCache {
         var index: FrameIndex { FrameIndex(pts: pts, dts: dts, keyframeFlags: keyframeFlags) }
     }
 
-    /// The entry file's name for `identity`.
     func key(for identity: SourceIdentity) async -> String {
         var ffprobe = "none", ffmpeg = "none"
         if let tool = try? FFTools.ffprobeURL() { ffprobe = await CacheFingerprint.toolVersion(tool) }
@@ -64,8 +48,6 @@ struct IndexCache {
         directory.appendingPathComponent("\(key).index.plist")
     }
 
-    /// The cached facts for `identity`, or nil on a miss. An unreadable, undecodable or
-    /// mismatched entry is a miss, never an error.
     func load(_ identity: SourceIdentity) async -> Facts? {
         let url = entryURL(await key(for: identity))
         guard let data = try? Data(contentsOf: url),
@@ -80,9 +62,6 @@ struct IndexCache {
                      fieldCoded: entry.fieldCoded, damageZones: entry.damageZones)
     }
 
-    /// Stores `facts` for `identity`. Written to a temporary name and renamed, so a reader
-    /// in another process never sees half an entry. Best effort: a failed write leaves a
-    /// miss for the next run, and the run that wrote it is unaffected.
     func store(_ facts: Facts, for identity: SourceIdentity) async {
         let entry = Entry(schema: Self.schema, identity: identity, probe: facts.probe,
                           pts: Self.pack(facts.pts), dts: Self.pack(facts.dts),

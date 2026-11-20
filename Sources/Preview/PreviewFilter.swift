@@ -1,20 +1,6 @@
 import Foundation
 
-/// Builds the **spatial** part of a conformed clip's filter chain for the preview's
-/// decode pipeline (ADR-0012): deinterlace, scale, and letterbox/pillarbox onto the
-/// preview canvas. The real conform's temporal and encoder steps (`fps`, `interlace`,
-/// `format`, color tags) are deliberately absent — frame rate is handled by the
-/// timeline's time mapping, and the preview always renders progressive RGB.
-///
-/// Unlike `ConformEngine.scaleAndPad` (which works in the target's storage pixels),
-/// this computes in the canvas's square-pixel **display** space, because the preview
-/// canvas is the target's display size.
 enum PreviewFilter {
-    /// The `-vf` chain that renders `source` frames onto a `canvasW`×`canvasH` canvas
-    /// the way the conformed output will look: scale-fill when the display aspects
-    /// match, scale-to-fit + centred black bars when they differ. Deinterlaces first
-    /// when the source is interlaced and the target progressive, so scaling works on
-    /// whole frames — mirroring `ConformEngine.filterChain`'s spatial decisions.
     static func spatialConformChain(
         source: VideoProperties, target: VideoProperties, canvasW: Int, canvasH: Int
     ) -> String {
@@ -34,8 +20,6 @@ enum PreviewFilter {
         return filters.joined(separator: ",")
     }
 
-    /// Content size (even, never exceeding the canvas) that fits `srcDAR` inside the
-    /// canvas: wider sources letterbox (bars top/bottom), narrower ones pillarbox.
     private static func fittedSize(srcDAR: Double, canvasW: Int, canvasH: Int) -> (Int, Int) {
         let canvasDAR = Double(canvasW) / Double(canvasH)
         let w: Double, h: Double

@@ -1,10 +1,7 @@
 import Testing
 @testable import ClipStitcher
 
-/// The `clipstitch` command line (issue #115). Parsing is pure data so it can be tested
-/// at all: `ClipStitchMain` exits the process, and nothing that calls `exit` is testable.
 struct ClipStitchArgumentsTests {
-
     @Test func stitchTakesAJobFileAndAnOutputFile() throws {
         let parsed = try ClipStitchArguments.parse(["job.json", "out.mkv"])
         #expect(parsed == ClipStitchArguments.Parsed(
@@ -16,8 +13,6 @@ struct ClipStitchArgumentsTests {
         #expect(parsed.invocation == .plan(job: "job.json"))
     }
 
-    /// The usage refusal the issue asks for: a plan query writes no media, so an output
-    /// file means the caller expected a render — exit 64, before any probe runs.
     @Test func planRefusesASecondPositionalArgument() {
         #expect(throws: ClipStitchArguments.UsageError.self) {
             try ClipStitchArguments.parse(["--plan", "job.json", "out.mkv"])
@@ -39,9 +34,6 @@ struct ClipStitchArgumentsTests {
         }
     }
 
-    /// A mistyped option is refused as usage rather than read as a file name — otherwise
-    /// `--pan job.json` would become a two-file stitch and fail one stage later with the
-    /// wrong exit code.
     @Test func anUnknownOptionIsAUsageError() {
         #expect(throws: ClipStitchArguments.UsageError.self) {
             try ClipStitchArguments.parse(["--pan", "job.json"])
@@ -60,8 +52,6 @@ struct ClipStitchArgumentsTests {
         #expect(try ClipStitchArguments.parse(["--plan", "job.json", "-h"]).invocation == .help)
     }
 
-    // MARK: - Cache directories
-
     @Test func cacheOptionsTakeADirectoryInAnyPosition() throws {
         let parsed = try ClipStitchArguments.parse(
             ["--index-cache", "/c/index", "job.json", "--piece-cache", "/c/pieces", "out.mkv"])
@@ -70,7 +60,6 @@ struct ClipStitchArgumentsTests {
             indexCache: "/c/index", pieceCache: "/c/pieces"))
     }
 
-    /// One flag set drives a plan and its render, so `--plan` accepts both caches.
     @Test func planAcceptsBothCacheOptions() throws {
         let parsed = try ClipStitchArguments.parse(
             ["--plan", "job.json", "--index-cache", "/c/index", "--piece-cache", "/c/pieces"])
@@ -79,14 +68,12 @@ struct ClipStitchArgumentsTests {
         #expect(parsed.pieceCache == "/c/pieces")
     }
 
-    /// Without the options no cache is used — today's behaviour.
     @Test func cachesAreOffByDefault() throws {
         let parsed = try ClipStitchArguments.parse(["job.json", "out.mkv"])
         #expect(parsed.indexCache == nil)
         #expect(parsed.pieceCache == nil)
     }
 
-    /// A missing directory must not swallow the next option or a positional file.
     @Test func aCacheOptionWithoutADirectoryIsAUsageError() {
         #expect(throws: ClipStitchArguments.UsageError.self) {
             try ClipStitchArguments.parse(["job.json", "out.mkv", "--index-cache"])

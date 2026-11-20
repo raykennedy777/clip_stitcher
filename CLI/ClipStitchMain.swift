@@ -1,18 +1,5 @@
 import Foundation
 
-/// `clipstitch` — the headless CLI over the app's stitching engine (issue #105,
-/// ADR-0025): a Stitch Job JSON in, a frame-accurate stitched file out, no GUI and no
-/// user interaction. All human-readable output (stage lines, warnings, errors) goes to
-/// **stderr**; stdout stays silent so the exit code and the output file are the whole
-/// scriptable surface. `--plan` is the one exception (issue #115): that flag is a query,
-/// its answer is a JSON document, and the document goes to stdout.
-///
-/// Exit codes (sysexits-flavored, documented in docs/stitch-job.md):
-///   0   success
-///   64  usage error (bad arguments, wrong output extension)
-///   65  invalid job (unreadable/malformed job file, or a job that doesn't fit its sources)
-///   66  probe/index failure (a source couldn't be read, or ffmpeg/ffprobe is missing)
-///   70  export failure (planning or producing the output failed)
 @main
 struct ClipStitchMain {
     static let usage = """
@@ -48,14 +35,10 @@ struct ClipStitchMain {
     70 export failure
     """
 
-    /// `--verbose` prints an error's whole detail instead of the bounded excerpt (issue #113).
-    /// stderr only — stdout stays silent whatever the flag.
     nonisolated(unsafe) static var verbose = false
 
-    /// `--index-cache <dir>`, or nil when the run caches no source facts.
     nonisolated(unsafe) static var indexCache: IndexCache?
 
-    /// `--piece-cache <dir>`, or nil when the render reuses no pieces.
     nonisolated(unsafe) static var pieceCache: PieceCache?
 
     static func directoryURL(_ path: String) -> URL {
@@ -80,19 +63,13 @@ struct ClipStitchMain {
         case .plan(let jobPath):
             await plan(job: readJob(at: jobPath), path: jobPath)
         case .stitch(let jobPath, let outputPath):
-            // Reclaim the work directories a previous hard kill abandoned (issue #109). The
-            // CLI leaks the same way the app does on ^C/SIGTERM, and an AFK render batch may
-            // never launch the app to sweep for it. Synchronous — the CLI is short-lived, so
-            // a detached task could be cut off by `exit` — and cheap: a directory listing,
-            // plus the unlinks for whatever it condemns. Logged, never printed: stderr stays
-            // the job's own output. A plan query never reaches it: a query unlinks nothing.
+            // ADR-0035
             WorkDirectorySweeper.sweep()
             await stitch(job: readJob(at: jobPath),
                          output: URL(fileURLWithPath: (outputPath as NSString).expandingTildeInPath))
         }
     }
 
-    /// Reads and validates the job file, or exits with the invalid-job code.
     static func readJob(at path: String) -> StitchJob {
         guard let data = FileManager.default.contents(atPath: (path as NSString).expandingTildeInPath) else {
             fail(.invalidJob, "could not read job file: \(path)")
@@ -104,7 +81,6 @@ struct ClipStitchMain {
         }
     }
 
-    /// The normal run: stitch the job into `output` and report the verdict on stderr.
     static func stitch(job: StitchJob, output: URL) async -> Never {
         do {
             if let required = try StitchPipeline.requiredExtension(job: job),
@@ -130,11 +106,7 @@ struct ClipStitchMain {
         }
     }
 
-    /// Answers `--plan` (issue #115): probe, index and plan the job, then print the plan
-    /// as JSON on **stdout** and exit. This is the CLI's one deliberate stdout exception —
-    /// the flag is a query, and its answer is the output, so a caller reads it with no log
-    /// parsing. Stage lines and the verdict stay on stderr, so `--plan job.json 2>/dev/null`
-    /// is the JSON alone. No encoder runs and no file is written.
+    // ADR-0025
     static func plan(job: StitchJob, path: String) async -> Never {
         do {
             let clock = StageClock()
@@ -151,15 +123,10 @@ struct ClipStitchMain {
         }
     }
 
-    /// The pipeline's stage lines, on stderr where all human-readable output goes.
     static let logToStderr: (String) -> Void = { line in
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
-    /// Maps a pipeline error onto its exit code. The classes are load-bearing
-    /// (`StitchPipeline`): a job-class error is the caller's job file, an `FFError` is a
-    /// source or a missing tool, anything else is planning or producing the output. A run
-    /// and a plan query share this map so one job's failure gets one code either way.
     static func failRun(_ error: Error) -> Never {
         switch error {
         case let error as StitchJobError: fail(.invalidJob, describe(error))
@@ -169,12 +136,11 @@ struct ClipStitchMain {
     }
 
     enum ExitCode: Int32 {
-        case usage = 64          // EX_USAGE
-        case invalidJob = 65     // EX_DATAERR
-        case probeFailure = 66   // EX_NOINPUT
-        case exportFailure = 70  // EX_SOFTWARE
+        case usage = 64
+        case invalidJob = 65
+        case probeFailure = 66
+        case exportFailure = 70
 
-        /// The verdict line's name for this code, for example “70 export failure”.
         var label: String {
             switch self {
             case .usage: return "64 usage"
@@ -185,12 +151,6 @@ struct ClipStitchMain {
         }
     }
 
-    /// Prints the error, then the verdict line, then exits (issue #113). The verdict is the
-    /// **last** stderr line of the run, so `tail -1` of a piped log is the outcome — the
-    /// message above it can be thousands of decoder lines long. `short` is the verdict's own
-    /// one-line summary; it defaults to the message's first line, and never wraps a newline
-    /// into the verdict. A usage error prints whole: its message is the fixed usage text,
-    /// not an unbounded detail, and an excerpt of it would help no one.
     static func fail(_ code: ExitCode, _ message: String, short: String? = nil) -> Never {
         let body = verbose || code == .usage ? message : BoundedExcerpt.bounded(message)
         FileHandle.standardError.write(Data("clipstitch: error: \(body)\n".utf8))
@@ -203,11 +163,6 @@ struct ClipStitchMain {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
-    /// The verdict's short form for an export error. A verification refusal carries its
-    /// location line as the first line of its own payload (issue #113) — the same text the
-    /// message shows, so there is no second source of truth — while
-    /// `errorDescription` puts a fixed preamble above it. Any other error uses its
-    /// description's first line.
     static func shortForm(_ error: Error) -> String {
         if case .verificationFailed(let payload)? = error as? ExportError {
             return payload
@@ -215,15 +170,12 @@ struct ClipStitchMain {
         return describe(error)
     }
 
-    /// The first line of `text`, trimmed and capped, for the one-line verdict.
     static func oneLine(_ text: String, limit: Int = 200) -> String {
         let first = text.components(separatedBy: "\n").first?
             .trimmingCharacters(in: .whitespaces) ?? ""
         return first.count <= limit ? first : String(first.prefix(limit - 1)) + "\u{2026}"
     }
 
-    /// Serializes the engine's cross-queue progress callbacks into coarse stderr
-    /// lines — one per 10 % step, so a long export shows life without flooding logs.
     final class ProgressReporter: @unchecked Sendable {
         private let lock = NSLock()
         private var lastDecile = -1

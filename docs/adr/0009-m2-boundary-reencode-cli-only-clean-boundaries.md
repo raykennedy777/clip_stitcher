@@ -174,3 +174,29 @@ interlaced copies, in MKV and MP4 alike. The gate is now `interlaceCapable` — 
 libx264 honours the flags (frame-level `interlaced_frame=1`, direction from the filter, both
 directions, `.ts`/`.mkv`/`.mp4`). libx265 accepts them and ignores them; the project assumes
 an HEVC clip is never interlaced, so HEVC gets neither.
+
+## Additional invariants (rate control, `-frames:v`, export-wide MP4 timescale, profiles)
+
+- **Re-encode rate control (issue #110):** Every boundary/repaired piece pins fixed
+  near-lossless quality instead of encoder defaults (libx264 CRF 23, libx265 CRF 28,
+  mpeg2video 200 kbps / q=31): CRF-capable codecs pin `-crf 18`; `mpeg2video` targets
+  `1.25×` the **video stream's** measured bitrate (never `format.bit_rate`, which includes
+  audio) with `-maxrate 1.5×` and `-bufsize 2×`, falling back to `-q:v 2` when unmeasurable.
+  When MPEG-PS/TS omits video-stream `bit_rate`, `MediaProbe.probe` runs one bounded 60 s head
+  packet sample (`-read_intervals %+60`, piped to a temp file via `stdoutTo:` to stay clear of
+  the 64 KB pipe buffer) summing all packet byte sizes (including untimestamped packets) over
+  `(max(pts) - min(pts)) * n / (n - 1)` (decode-order packets, `n - 1` frame intervals).
+- **Mandatory `-frames:v <range.count>` stop bound:** Because `select` drops frames without
+  halting the demuxer/decoder, every partial-GOP boundary re-encode passes `-frames:v` so
+  ffmpeg stops once the cut completes rather than decoding the remainder of a multi-hour file.
+- **Export-wide MP4 track timescale (issues #24, #85 — resolves the cross-clip note above):**
+  Multi-clip MP4 exports probe every clip's inherited copy timescale concurrently (bounded
+  concurrency 4) and combine them via **all-or-nothing LCM** (bounded by `Int32.max`; any
+  single `nil` probe or overflow drops the export-wide pin so an unprobed clip is never
+  rounded). Every MP4 piece — copies, boundary re-encodes, and conforms — is pinned to that
+  value; segment-muxer copies pass `-segment_format_options video_track_timescale=<N>` because
+  the segment muxer does not forward bare `-video_track_timescale`.
+- **Unmapped `-profile:v` omission & unprobed refusal (#78):** Unrecognised profile names are
+  omitted rather than guessed (an invalid token aborts the encode), letting the encoder infer a
+  matching profile from `pix_fmt`. `ExportPlanner.videoTreatment` refuses `clip.video == nil`
+  with `ExportError.clipNotReady` so bypassed callers can never silently re-encode as libx264.
