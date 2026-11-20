@@ -2,8 +2,6 @@ import Foundation
 import Testing
 @testable import ClipStitcher
 
-/// Jump popover parsing (issue #21): lenient timecode and frame fields, with
-/// relative (offset) and absolute (from the clip's first frame) resolution.
 struct JumpParserTests {
     @Test func frameFieldParsesIntegersIncludingNegative() {
         #expect(JumpParser.frames("1500") == 1500)
@@ -14,7 +12,6 @@ struct JumpParserTests {
     }
 
     @Test func bareSecondsConvert() {
-        // Bare seconds convert to frames: 70 seconds is 1:10.
         #expect(JumpParser.timecodeFrames("70", fps: 25) == 1750)
     }
 
@@ -29,7 +26,6 @@ struct JumpParserTests {
     }
 
     @Test func ntscRatesUseTheRoundedFps() {
-        // Same rounding as the readout: 30000/1001 counts 30 frames per second.
         #expect(JumpParser.timecodeFrames("0:0:1:0", fps: 29.97) == 30)
     }
 

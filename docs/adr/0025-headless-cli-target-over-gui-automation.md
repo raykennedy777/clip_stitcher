@@ -3,7 +3,8 @@
 Issue #105 needed scripts and agents to drive frame-accurate stitching without a
 human: a job description in, an exported file out, failure modes a caller can branch
 on. The repo already had one automation route — launching the app with the
-`VIDCONFORM_AUTOMATION` overrides and driving it through the accessibility (AX)
+`CLIPSTITCHER_AUTOMATION=1` marker-gated overrides (unreachable on normal launches;
+companion env vars optional per flow) and driving it through the accessibility (AX)
 layer (docs/agents/ui-automation.md) — so the decision was whether headless
 stitching rides that route or gets a real CLI. It gets a real CLI: a `clipstitch`
 command-line target that reads a **Stitch Job** JSON (docs/stitch-job.md) and calls
@@ -61,3 +62,27 @@ verdict stay on stderr. `--plan job.json 2>/dev/null` is the JSON alone.
 - Per-clip separate export, external audio files, and channel mixes stay out of the
   contract until something needs them; the schema is versioned so they can arrive
   without breaking version-1 callers.
+
+## CLI contract details
+
+- **Argument parsing (`ClipStitchArguments`):** Options are accepted in any position; unknown
+  `--*` tokens fail immediately with exit 64 (never treated as filenames); `--plan` refuses an
+  output-path positional argument (signalling the caller expected a render).
+- **Exit-code boundaries:** Missing source files fail pre-probe as invalid job (exit 65);
+  readable audio-only files fail as probe errors (exit 66, matching GUI issue #83). Video
+  outputs enforce matching destination extensions up front, whereas audio-only outputs skip
+  pre-probe extension checks because the target's audio codec is unknown until probed.
+- **Per-path source deduplication:** `StitchPipeline.prepare` probes and indexes each distinct
+  source path once in first-appearance order.
+- **Stderr error/verdict & timing contracts (issue #113):** Long error details are head+tail
+  excerpted (`BoundedExcerpt`) unless `--verbose` is passed (usage errors always print whole;
+  stdout stays silent regardless). Every run ends on stderr with one single-line verdict
+  (`Done: …`, `Planned: …`, or `clipstitch: FAILED (<code label>): <summary>`) so `tail -1`
+  reliably parses the outcome. `ExportError.verificationFailed` opens its payload with
+  `VerificationLocation.line` (0-based `clips[]` index + piece filename + capped plan summary)
+  as line 1 so the verdict reuses a single source of truth. `StageClock` / `segmentTimingLine`
+  spellings are a pinned contract grepped by external slot logs.
+- **`PlanReport` JSON invariants (issue #115):** Nullable fields are always serialized as
+  explicit `null` (never omitted via `encodeIfPresent`); `videoOnly` outputs report 0 audio
+  tracks; `copySafeKeyframes` reports conservative copy-start-safe keyframes bracketing
+  `outFrame + 1` so any mark moved there is guaranteed copyable.

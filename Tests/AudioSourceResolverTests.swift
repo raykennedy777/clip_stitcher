@@ -2,18 +2,11 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Exercises the one audio source resolver behind preview playback and export
-/// (ADR-0014): turning a clip's audio track selections into concrete sources, with the
-/// missing-external-file policy explicit (preview degrades to silence, export throws),
-/// and the output-track derivation (count from the richest clip, formats target-first).
 struct AudioSourceResolverTests {
-
     private func track(language: String? = nil, title: String? = nil) -> AudioProperties {
         AudioProperties(codec: "aac", sampleRate: 48000, channels: 2,
                         channelLayout: "stereo", language: language, title: title)
     }
-
-    // MARK: source resolution
 
     @Test func defaultSelectionResolvesToOwnStreamsInOrder() throws {
         var clip = Clip(bookmark: Data(), displayName: "multi.mkv")
@@ -23,8 +16,6 @@ struct AudioSourceResolverTests {
     }
 
     @Test func outOfRangeOwnStreamIsSilenceUnderBothPolicies() throws {
-        // The slot exists because a richer clip has it; this clip fills it with silence —
-        // never an error, on either side (ADR-0014).
         var clip = Clip(bookmark: Data(), displayName: "a.mp4")
         clip.audioTracks = [track()]
         clip.audioSelections = [.stream(0), .stream(7)]
@@ -35,7 +26,6 @@ struct AudioSourceResolverTests {
     }
 
     @Test func externalFileResolvesToItsURLAndChosenStream() throws {
-        // A live external file: bookmark resolves, file exists — both policies agree.
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-resolver-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -86,7 +76,6 @@ struct AudioSourceResolverTests {
     }
 
     @Test func missingFileBehindALiveBookmarkCountsAsMissing() throws {
-        // The bookmark resolves but the file was deleted since: same policy split.
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipstitcher-resolver-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -107,8 +96,6 @@ struct AudioSourceResolverTests {
         }
     }
 
-    // MARK: output track derivation (ADR-0014)
-
     private func clipWithTracks(_ tracks: [AudioProperties]) -> Clip {
         var c = Clip(bookmark: Data(), displayName: "c")
         c.audio = tracks.first
@@ -127,8 +114,6 @@ struct AudioSourceResolverTests {
         let mono = AudioProperties(codec: "mp2", sampleRate: 44100, channels: 1, language: "eng", title: "Commentary")
         let stereo = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2, language: "spa", title: "TVE")
         let other = AudioProperties(codec: "ac3", sampleRate: 32000, channels: 2)
-        // target carries one track; the second output track's spec falls to the first
-        // clip in timeline order that has one.
         let target = clipWithTracks([mono])
         let clips = [clipWithTracks([other]), clipWithTracks([other, stereo])]
         let tracks = AudioSourceResolver.resolveOutputTracks(target: target, clips: clips)
@@ -142,8 +127,6 @@ struct AudioSourceResolverTests {
         let clips = [clipWithTracks([]), clipWithTracks([])]
         #expect(AudioSourceResolver.resolveOutputTracks(target: nil, clips: clips).isEmpty)
     }
-
-    // MARK: cut-only own tracks (issue #31 / ADR-0018)
 
     private func ownTrack(codec: String, sampleRate: Int = 48000, channels: Int = 2,
                           language: String? = nil) -> AudioProperties {
@@ -159,8 +142,6 @@ struct AudioSourceResolverTests {
     }
 
     @Test func ownTracksCarryTheClipsOwnCountAndCodecs() {
-        // The 4-track fixture shape: mp2 mono + aac + ac3 — each track encodes to its
-        // own source codec in a container that carries them all; no silence-fill.
         let clip = clipOwning([ownTrack(codec: "mp2", channels: 1, language: "fra"),
                                ownTrack(codec: "aac"), ownTrack(codec: "ac3")])
         let own = AudioSourceResolver.resolveOwnTracks(clip: clip, type: .videoAndAudio, container: .mkv)
@@ -172,8 +153,6 @@ struct AudioSourceResolverTests {
     }
 
     @Test func aContainerInvalidCodecFallsBackToAACAtSourceLayout() {
-        // mp2 can't sit in MP4 — that track exports AAC, still mono at 48 kHz, and the
-        // fallback is reported so the export can warn (ADR-0018).
         let clip = clipOwning([ownTrack(codec: "mp2", channels: 1), ownTrack(codec: "ac3")])
         let own = AudioSourceResolver.resolveOwnTracks(clip: clip, type: .videoAndAudio, container: .mp4)
         #expect(own.tracks.map(\.encoder) == ["aac", "ac3"])
@@ -191,19 +170,14 @@ struct AudioSourceResolverTests {
     }
 
     @Test func audioOnlyKeepsOnlyTrackOne() {
-        // One elementary stream — the same rule the global derivation applies.
         let clip = clipOwning([ownTrack(codec: "mp2"), ownTrack(codec: "ac3")])
         let own = AudioSourceResolver.resolveOwnTracks(clip: clip, type: .audioOnly, container: .mp4)
         #expect(own.tracks.count == 1)
-        // Audio-only has no video container to fit, so mp2 keeps its encoder (ADR-0010).
         #expect(own.tracks.first?.encoder == "mp2")
         #expect(own.fallbacks.isEmpty)
     }
 
     @Test func aSilenceSlotGetsTheDefaultFormatAndNoFallback() {
-        // An own-stream selection past the clip's streams: silence at 48 kHz stereo,
-        // encoded with the export-wide default (no per-track encoder needed — but one
-        // is set anyway since resolveAudioCodec(nil) returns AAC; either way, no warn).
         var clip = clipOwning([ownTrack(codec: "mp2", channels: 1)])
         clip.audioSelections = [.stream(0), .stream(5)]
         let own = AudioSourceResolver.resolveOwnTracks(clip: clip, type: .videoAndAudio, container: .ts)
@@ -213,19 +187,14 @@ struct AudioSourceResolverTests {
         #expect(own.fallbacks.isEmpty)
     }
 
-    // MARK: channel-mix resolution (ADR-0019)
-
-    /// Mix filters resolve per slot from the slot's mix and its *source's* channel
-    /// count — Original and no-ops (here: a mono source, and a silence slot with no
-    /// probed properties) resolve to nil, so those legs carry no filter.
     @Test func mixFiltersResolvePerSlotAgainstTheFeedingSource() {
         var clip = clipOwning([ownTrack(codec: "mp2", channels: 1),
                                ownTrack(codec: "aac", channels: 2)])
         clip.audioSelections = [
-            AudioTrackSlot(selection: .stream(0), mix: .mono),      // mono source: no-op
-            AudioTrackSlot(selection: .stream(1), mix: .leftOnly),  // stereo source: real
-            AudioTrackSlot(selection: .stream(1), mix: .original),  // original: nothing
-            AudioTrackSlot(selection: .stream(9), mix: .mono),      // silence slot: nothing
+            AudioTrackSlot(selection: .stream(0), mix: .mono),
+            AudioTrackSlot(selection: .stream(1), mix: .leftOnly),
+            AudioTrackSlot(selection: .stream(1), mix: .original),
+            AudioTrackSlot(selection: .stream(9), mix: .mono),
         ]
         let filters = AudioSourceResolver.resolveMixFilters(for: clip)
         #expect(filters.count == 4)
@@ -235,7 +204,6 @@ struct AudioSourceResolverTests {
         #expect(filters[3] == nil)
     }
 
-    /// An external slot's mix reads the chosen stream's probed channels.
     @Test func externalSlotMixUsesItsProbedStreamChannels() {
         var clip = clipOwning([ownTrack(codec: "aac")])
         clip.audioSelections = [

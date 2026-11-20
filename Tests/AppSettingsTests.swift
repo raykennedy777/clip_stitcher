@@ -2,27 +2,19 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// The two Settings-window preferences (issue #87): the default-container fallback,
-/// and the shared save-panel starting-directory / last-choice mechanism.
 struct AppSettingsTests {
-
-    /// A throwaway `UserDefaults` domain so tests never touch `.standard`.
     private func makeDefaults() -> (UserDefaults, String) {
         let suite = "AppSettingsTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         return (defaults, suite)
     }
 
-    /// A real directory to point the fixed/last-used folder at (the helper only
-    /// returns paths that still exist as directories).
     private func makeTempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppSettingsTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
-
-    // MARK: - Default container
 
     @Test func defaultContainerFallsBackToMkvWhenUnset() {
         let (defaults, suite) = makeDefaults()
@@ -43,8 +35,6 @@ struct AppSettingsTests {
         defaults.set("avi", forKey: AppSettings.Key.defaultContainer)
         #expect(AppSettings.defaultContainer(defaults) == .mkv)
     }
-
-    // MARK: - Panel starting directory
 
     @Test func startingDirectoryIsNilWhenNothingRecorded() {
         let (defaults, suite) = makeDefaults()
@@ -121,8 +111,6 @@ struct AppSettingsTests {
     }
 }
 
-/// The container default is honored at new-project creation, and only there — an
-/// existing project decodes its stored container untouched (issue #87).
 @MainActor
 struct NewProjectContainerDefaultTests {
     @Test func aNewProjectAdoptsTheConfiguredDefaultContainer() {

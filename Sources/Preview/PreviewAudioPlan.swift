@@ -1,44 +1,19 @@
 import Foundation
 
-/// The audio side of the output preview (issue #8): for each (output track × timeline
-/// segment) it resolves what the export's audio rebuild would put there (ADR-0014) —
-/// the clip's selected source for that track, an external file's chosen stream, or
-/// silence — plus the seek/duration math to join a leg mid-stream. Pure (no decoding,
-/// no file access) so the leg resolution and timing can be unit-tested; the playback
-/// side hands the result to `AudioStreamPlayer`.
 struct PreviewAudioPlan {
-    /// What one leg plays.
     enum LegSource: Equatable {
-        /// One audio stream of a file — the clip's own or an external one, already
-        /// resolved to a URL. The same seek applies either way: an external file is
-        /// aligned file start = video-file start (ADR-0014), and `-ss` into it is
-        /// file-start-relative too (ADR-0015).
         case stream(URL, streamIndex: Int)
-        /// A silence-filled span: the clip has no source for this track. Real
-        /// silence — the playhead keeps moving, matching the export.
         case silence
     }
 
-    /// One segment's contribution to one output track.
     struct Leg: Equatable {
         let source: LegSource
-        /// Input-seek seconds of the kept window's start — `pts[in] − container
-        /// start_time` (the ADR-0013/0015 trap), 0 when the in point is open.
         let seekBase: Double
-        /// Where this leg starts on the assembled timeline, in output seconds.
         let outputStart: Double
-        /// Leg length in output seconds: the segment's frames at the target rate.
         let duration: Double
-        /// The clip's channel-mix filter for this track (ADR-0019), exactly as the
-        /// export's rebuild inserts it before the leg conform; nil for Original/no-op.
         let mixFilter: String?
     }
 
-    /// Per-clip audio inputs, resolved by the caller (bookmarks → URLs, probes done):
-    /// `sources[t]` feeds output track `t` exactly as the export's
-    /// `ExportItem.audioSources` does — nil (and anything past the list's end) is
-    /// silence. `mixFilters[t]` is that leg's channel mix (ADR-0019), resolved by the
-    /// same `AudioSourceResolver` call the export uses.
     struct ClipAudio {
         let url: URL
         let containerStart: Double
@@ -46,10 +21,7 @@ struct PreviewAudioPlan {
         var mixFilters: [String?] = []
     }
 
-    /// The output tracks the export would carry (`AudioSourceResolver.resolveOutputTracks`)
-    /// — the picker's rows, and each leg's conform target.
     let tracks: [AudioCodecPolicy.OutputAudioTrack]
-    /// `legs[track][segment]`, matching the timeline's segment order.
     let legs: [[Leg]]
 
     static func build(segments: [PreviewTimeline.Segment], targetFps: Double,
@@ -80,11 +52,6 @@ struct PreviewAudioPlan {
         return PreviewAudioPlan(tracks: tracks, legs: legs)
     }
 
-    /// Joins leg (`track`, `segment`) at `outputTime` on the assembled timeline:
-    /// the stream to spawn, where to seek it (`seekBase` plus the time already
-    /// elapsed inside the leg), and how much of the leg remains — the spawn's
-    /// duration cap, so a leg never plays past its clip's out point. nil for an
-    /// out-of-range track or segment.
     func entry(track: Int, segment: Int, atOutputTime outputTime: Double)
         -> (source: LegSource, seekSeconds: Double, remaining: Double)? {
         guard track >= 0, track < legs.count,
@@ -94,19 +61,12 @@ struct PreviewAudioPlan {
         return (leg.source, leg.seekBase + offset, leg.duration - offset)
     }
 
-    /// The per-leg conform filter for `track` — the same rate/layout conform the
-    /// export applies to every leg of that track's chain (ADR-0014), so the preview
-    /// sounds like the export. nil for an out-of-range track.
     func conformFilter(track: Int) -> String? {
         guard track >= 0, track < tracks.count else { return nil }
         return ConformEngine.audioFilter(
             sampleRate: tracks[track].sampleRate, channels: tracks[track].channels)
     }
 
-    /// The full decode filter for leg (`track`, `segment`): its channel mix (ADR-0019)
-    /// then the track conform — the same order as the export's rebuild chain, so the
-    /// monitored track previews exactly what ships. Falls back to the bare conform for
-    /// an out-of-range segment.
     func legFilter(track: Int, segment: Int) -> String? {
         let conform = conformFilter(track: track)
         guard track >= 0, track < legs.count,
@@ -115,9 +75,6 @@ struct PreviewAudioPlan {
         return conform.map { mix + "," + $0 } ?? mix
     }
 
-    /// The picker name for output track `t` (0-based), named like the cut-editor's
-    /// dropdown: the track's container title when present, else "Track N", with the
-    /// language tag appended (ADR-0014 naming).
     func trackName(_ t: Int) -> String {
         guard t >= 0, t < tracks.count else { return "Track \(t + 1)" }
         let track = tracks[t]

@@ -1,27 +1,14 @@
 import SwiftUI
 
-/// State for the Output Preview (sidebar "Preview"): shows the assembled timeline by
-/// decoding the right source frame for the playhead on demand — a source-stitched scrub,
-/// not a rendered file (ADR-0012). The playhead moves in output frames at the target
-/// clip's frame rate, mapped across every clip's selection range by `PreviewTimeline`;
-/// each clip gets its own streaming decoder, switched at the joins. The decode worker /
-/// cache state machine is the cut-editor's (CutEditorModel), re-scoped from one window
-/// to the sidebar section.
 @MainActor
 final class PreviewModel: ObservableObject {
-    /// Per-clip media needed at decode time, keyed by clip ID. Decoders are created
-    /// lazily on first visit and all torn down when the section disappears.
     private struct ClipRuntime {
         let url: URL
         let index: FrameIndex
         let name: String
-        /// The container's start_time — the decoder's and extractor's `-ss` is
-        /// measured from it, not absolute pts (issue #36).
         let containerStart: Double
         let previewW: Int
         let previewH: Int
-        /// The spatial conform chain for a non-matching clip (ADR-0012); nil for a
-        /// matching clip, whose frames already have the canvas's shape.
         let filter: String?
         var decoder: FrameStreamDecoder?
     }
@@ -29,66 +16,38 @@ final class PreviewModel: ObservableObject {
     private weak var document: ProjectDocument?
 
     @Published var image: NSImage?
-    /// Playhead position in global output frames (0-based).
     @Published var currentFrame = 0
-    /// Total output frames across the assembled timeline.
     @Published var frameCount = 0
     @Published var isLoading = true
     @Published var isPlaying = false
-    /// Friendly empty-state text (no clips yet / nothing previewable) — not an error.
     @Published var statusMessage: String?
     @Published var errorMessage: String?
-    /// Name of the clip under the playhead.
     @Published var currentClipName: String?
-    /// Global output frame of each join, for the scrubber's markers.
     @Published var joinFrames: [Int] = []
 
-    /// The output frame rate (the target clip's) — what timecode and stepping use.
     private(set) var fps: Double = 25
 
     private var timeline: PreviewTimeline?
     private var runtimes: [UUID: ClipRuntime] = [:]
-    /// Output frames the ⇧←/⇧→ keys jump between: every kept keyframe plus each
-    /// join, sorted (computed once at load — the timeline is fixed while shown).
     private var keyframeAnchors: [Int] = []
 
-    /// The output track heard during playback (issue #8) — one track at a time,
-    /// exactly what the export's track would carry. Persisted per project.
     @Published var monitoredTrack = 0
-    /// Per-(track × segment) audio legs mirroring the export's rebuild (ADR-0014);
-    /// nil until `load`, empty tracks when no clip carries audio.
     private var audioPlan: PreviewAudioPlan?
-    /// Audio playback of the monitored track. While it runs it is the master clock
-    /// (ADR-0015): the play loop derives the frame on screen from elapsed audio time.
     private var audioPlayer: AudioStreamPlayer?
-    /// Output-timeline seconds at the audio clock's zero (where playback started or
-    /// the stream last restarted); position = `audioClockBase + elapsed`.
     private var audioClockBase: Double = 0
-    /// Segment whose leg the audio stream is playing — a tick that lands in a
-    /// different segment restarts the stream on that segment's leg (restart-per-leg
-    /// stitching; gapless pre-spawn is a possible later upgrade).
     private var audioSegment: Int?
-    /// True when this play session paces by sleep instead of the audio clock — no
-    /// output tracks, or the stream never produced samples in time.
     private var audioFallback = false
-    /// How long the play loop waits for the first samples before falling back
-    /// (spawn-to-first-byte measures 13–25 ms; a dead stream never primes).
     private var audioPrimeDeadline = Date.distantPast
 
-    /// The output tracks the export would carry — the audio picker's rows.
     var outputTracks: [AudioCodecPolicy.OutputAudioTrack] { audioPlan?.tracks ?? [] }
 
     func trackName(_ t: Int) -> String { audioPlan?.trackName(t) ?? "Track \(t + 1)" }
 
-    /// The latest output frame the user wants that isn't satisfied yet, drained by a
-    /// single decode worker toward the most recent request (same shape as the
-    /// cut-editor: holding a key retargets the worker, never cancels a decode).
     private var pendingFrame: Int?
     private var pendingIsJump = false
     private var decodeTask: Task<Void, Never>?
     private var playTask: Task<Void, Never>?
 
-    /// FIFO cache of recently shown frames, keyed by **global output frame**.
     private var cache: [Int: NSImage] = [:]
     private var cacheOrder: [Int] = []
     private let cacheCap = 48
@@ -115,9 +74,6 @@ final class PreviewModel: ObservableObject {
             return
         }
 
-        // The same per-clip verdict the export uses: a clip that doesn't match the
-        // target is conformed (re-timed to the target's rate); a matching clip passes
-        // through 1:1 (ADR-0011, ADR-0012).
         let target = document.project.targetClip ?? clips.first { $0.video != nil }
         guard let targetVideo = target?.video, let target else {
             statusMessage = "No clip has video to preview yet."
@@ -126,19 +82,15 @@ final class PreviewModel: ObservableObject {
         }
 
         do {
-            // The conform makes every output frame the target's shape, so the target's
-            // display size is the canvas every clip renders onto (ADR-0012).
             let (canvasW, canvasH) = CutEditorModel.previewSize(for: targetVideo)
             var specs: [PreviewTimeline.ClipSpec] = []
             var clipAudio: [UUID: PreviewAudioPlan.ClipAudio] = [:]
             for clip in clips {
-                guard let video = clip.video else { continue }   // audio-only: no frames to show
+                guard let video = clip.video else { continue }
                 guard let url = document.url(for: clip) else {
                     throw FFError.indexFailed("Source file not found for “\(clip.displayName)”.")
                 }
                 let index = try await document.frameIndex(for: clip)
-                // Reuse the document's cached start_time — the import already filled it, so a
-                // repeated preview load probes nothing (issue #85). A miss populates once.
                 let containerStart = await document.containerStart(for: clip)
                 let conformed = !MatchEvaluator.matches(clip, target: target)
                 specs.append(PreviewTimeline.ClipSpec(
@@ -157,10 +109,6 @@ final class PreviewModel: ObservableObject {
                         : nil,
                     decoder: nil
                 )
-                // The clip's audio legs, resolved by the same resolver the export uses
-                // (ADR-0014): one source per output track — its own stream, an external
-                // file, or nil for silence. Where the export errors on a missing
-                // external file, the preview degrades to silence (best-effort playback).
                 clipAudio[clip.id] = PreviewAudioPlan.ClipAudio(
                     url: url,
                     containerStart: containerStart,
@@ -174,9 +122,6 @@ final class PreviewModel: ObservableObject {
             fps = built.targetFps
             frameCount = built.totalFrames
             joinFrames = built.joinFrames
-            // The same track list the export resolves (count from the richest clip,
-            // formats target-first — ADR-0014), so the picker shows exactly the
-            // output's tracks. The saved choice is clamped in case clips changed.
             let tracks = AudioSourceResolver.resolveOutputTracks(
                 target: document.project.targetClip, clips: clips)
             audioPlan = PreviewAudioPlan.build(
@@ -195,11 +140,9 @@ final class PreviewModel: ObservableObject {
         }
     }
 
-    // MARK: - Navigation
-
     func seek(to frame: Int) {
         guard frameCount > 0 else { return }
-        if isPlaying { stopPlayback() }   // scrubbing/stepping pauses playback
+        if isPlaying { stopPlayback() }
         let previous = currentFrame
         let clamped = min(max(0, frame), lastFrame)
         currentFrame = clamped
@@ -219,18 +162,8 @@ final class PreviewModel: ObservableObject {
     func goToStart() { seek(to: 0) }
     func goToEnd() { seek(to: lastFrame) }
 
-    // MARK: - Save frame as image (issue #89)
-
-    /// Whether a frame is on screen to save — the menu item's enabled state.
     var canSaveFrame: Bool { image != nil && timeline != nil }
 
-    /// A request to save the frame under the playhead as a full-resolution PNG (issue
-    /// #89). Saves the **source** frame of the clip under the playhead at that clip's
-    /// coded dimensions (storage pixels; anamorphic content saves at its storage shape).
-    /// The deinterlace decision matches the on-screen display: a conformed
-    /// interlaced→progressive clip whose preview chain deinterlaces (`bwdif`) is saved
-    /// deinterlaced too, so what-you-see-is-what-saves for field-coded sources. `nil`
-    /// when nothing is loaded. The filename uses the output timecode shown in the readout.
     func frameSnapshotRequest() -> FrameSnapshotRequest? {
         guard let timeline, image != nil,
               let (segmentIndex, local) = timeline.locate(currentFrame) else { return nil }
@@ -239,8 +172,6 @@ final class PreviewModel: ObservableObject {
               let clip = document?.project.clips.first(where: { $0.id == segment.clipID }),
               let video = clip.video, video.width > 0, video.height > 0 else { return nil }
         let source = timeline.sourceFrame(in: segment, local: local, pts: runtime.index.pts)
-        // Mirror the display's deinterlace decision exactly: the preview's conform chain
-        // begins with bwdif iff it deinterlaces this clip (PreviewFilter.spatialConformChain).
         let deinterlaces = runtime.filter?.hasPrefix("bwdif") ?? false
         let filter = deinterlaces ? "bwdif=mode=0,scale=\(video.width):\(video.height)" : nil
         let url = runtime.url
@@ -258,17 +189,12 @@ final class PreviewModel: ObservableObject {
         }
     }
 
-    /// Jump to the previous keyframe anchor (⇧← — the cut-editor's keys). Anchors
-    /// include the joins, so the jump walks back across clips; like the cut-editor's
-    /// frame-0 floor, the timeline start is always an anchor.
     func stepToPreviousKeyframe() {
         if let previous = keyframeAnchors.last(where: { $0 < currentFrame }) {
             seek(to: previous)
         }
     }
 
-    /// Jump to the next keyframe anchor (⇧→); stays put past the last one, like
-    /// the cut-editor.
     func stepToNextKeyframe() {
         if let next = keyframeAnchors.first(where: { $0 > currentFrame }) {
             seek(to: next)
@@ -281,8 +207,6 @@ final class PreviewModel: ObservableObject {
         if currentClipName != name { currentClipName = name }
     }
 
-    /// Drives the decoders toward `pendingFrame`, retargeting whenever the user moves
-    /// again. Only one worker runs at a time; subsequent seeks just update the target.
     private func startDecodeWorker() {
         guard decodeTask == nil else { return }
         decodeTask = Task { @MainActor [weak self] in
@@ -301,10 +225,6 @@ final class PreviewModel: ObservableObject {
         }
     }
 
-    /// Decodes (and caches) global output frame `target`, creating the clip's decoder
-    /// on first use. With `maskJumpWithKeyframe` (the worker's jump path) the GOP
-    /// keyframe is shown immediately to mask the seek-and-decode warm-up, and the
-    /// decode is abandoned (nil) if the user has already moved on.
     private func produce(_ target: Int, maskJumpWithKeyframe jump: Bool = false) async -> NSImage? {
         guard let timeline, let (segmentIndex, local) = timeline.locate(target) else { return nil }
         let segment = timeline.segments[segmentIndex]
@@ -326,7 +246,7 @@ final class PreviewModel: ObservableObject {
             cacheDecoded(frame: preview.frame, image: preview.image,
                          segment: segment, requested: (target, source))
             if currentFrame == target { image = preview.image }
-            if pendingFrame != target { return nil } // user moved on
+            if pendingFrame != target { return nil }
         }
 
         let result = await decoder.image(at: source)
@@ -347,14 +267,10 @@ final class PreviewModel: ObservableObject {
         return produced
     }
 
-    // MARK: - Playback (audio-clocked on the monitored output track — issue #8;
-    // sleep-paced fallback when there is nothing to play, as shipped under ADR-0012)
-
     func togglePlay() { isPlaying ? stopPlayback() : play() }
 
     func play() {
         guard !isPlaying, frameCount > 0 else { return }
-        // Playback owns the decoders while running; stand the seek worker down.
         decodeTask?.cancel()
         decodeTask = nil
         pendingFrame = nil
@@ -366,11 +282,6 @@ final class PreviewModel: ObservableObject {
             while self.isPlaying && !Task.isCancelled {
                 if self.currentFrame >= self.lastFrame { self.stopPlayback(); break }
 
-                // Pick the next frame to show. With the audio clock running it is
-                // whatever frame the audio has reached — ahead of +1 when decode
-                // lagged (frames are skipped to hold sync), or not yet due (sleep
-                // until the next frame's presentation time). The output timeline is
-                // uniform at the target rate, so frame ↔ time is plain arithmetic.
                 var next = self.currentFrame + 1
                 if !self.audioFallback {
                     if let elapsed = self.audioPlayer?.elapsedSeconds {
@@ -383,20 +294,14 @@ final class PreviewModel: ObservableObject {
                             continue
                         }
                         next = target
-                        // Crossing a join hands the stream to the next clip's leg —
-                        // a clean restart (the spawn's `-t` cap already silenced any
-                        // overshoot past the old clip's out point).
                         if let (segment, _) = self.timeline?.locate(next),
                            segment != self.audioSegment {
                             self.startAudio(atFrame: next)
                         }
                     } else if Date() < self.audioPrimeDeadline {
-                        // Audio spawned but hasn't produced its first samples yet.
                         try? await Task.sleep(nanoseconds: 10_000_000)
                         continue
                     } else {
-                        // No samples in time — this session paces by sleep instead
-                        // of stalling.
                         self.audioFallback = true
                         self.audioPlayer?.stop()
                     }
@@ -427,9 +332,6 @@ final class PreviewModel: ObservableObject {
         audioSegment = nil
     }
 
-    /// Switches the monitored output track: persisted with the project, and a
-    /// switch mid-play restarts the stream on the new track at the playhead (like
-    /// the cut-editor's monitor switch).
     func setMonitoredTrack(_ slot: Int) {
         guard slot != monitoredTrack else { return }
         monitoredTrack = slot
@@ -437,11 +339,6 @@ final class PreviewModel: ObservableObject {
         if isPlaying { startAudio(atFrame: currentFrame) }
     }
 
-    /// Starts (or restarts) the monitored track's leg at output frame `frame`,
-    /// making the audio the playback clock: a real source spawns a conformed PCM
-    /// decode capped to the leg's remainder; a silence-filled span spawns generated
-    /// silence so the clock still runs (ADR-0014 semantics). With no output tracks
-    /// at all the session paces by sleep, as before audio.
     private func startAudio(atFrame frame: Int) {
         let outputTime = Double(frame) / max(1.0, fps)
         guard let plan = audioPlan, !plan.tracks.isEmpty,
@@ -468,10 +365,6 @@ final class PreviewModel: ObservableObject {
         }
     }
 
-    /// Caches a frame the decoder produced. The cache is keyed by output frame, but the
-    /// decoder reports **source** frames: in a matching segment the two map 1:1 so the
-    /// whole decoded window backfills the cache; in a conformed segment several output
-    /// frames can share one source frame, so only the exact frame requested is cached.
     private func cacheDecoded(frame: Int, image: NSImage, segment: PreviewTimeline.Segment,
                               requested: (output: Int, source: Int)) {
         if segment.conformed {
@@ -492,11 +385,6 @@ final class PreviewModel: ObservableObject {
         }
     }
 
-    // MARK: - Lifecycle
-
-    /// Stop the worker and every clip's ffmpeg decoder. The preview is a sidebar
-    /// section, not a window, so this runs on navigate-away (ADR-0012) — nothing may
-    /// keep streaming once the section is hidden.
     func teardown() {
         stopPlayback()
         decodeTask?.cancel()
@@ -506,13 +394,11 @@ final class PreviewModel: ObservableObject {
             runtimes[id]?.decoder?.stop()
             runtimes[id]?.decoder = nil
         }
-        audioPlayer?.stop() // kills the audio ffmpeg process (same no-orphans rule)
+        audioPlayer?.stop()
         audioPlayer = nil
         cache.removeAll()
         cacheOrder.removeAll()
     }
-
-    // MARK: - Readout
 
     func timecode(forFrame frame: Int) -> String {
         guard fps > 0 else { return "--:--:--:--" }

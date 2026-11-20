@@ -50,3 +50,8 @@ mislabelled or unplayable file. AAC is the right fallback: it is audibly transpa
 - Bitrate is a fixed 192 kbps and rate/channels follow the source. Making the audio export
   settings user-configurable (codec, bitrate, sample rate, channels) is deferred to a later
   feature (tracked as a GitHub issue).
+- **Audio-only exports write elementary streams:** When `OutputType.audioOnly` is selected, the
+  video container picker is hidden and ignored; the export writes directly to the resolved
+  audio codec's natural elementary extension (`mp2`→`.mp2`, `ac3`→`.ac3`, `libmp3lame`→`.mp3`,
+  `aac`/fallback→`.m4a`) via `AudioCodecPolicy.resolveAudioOnlyCodec` without video-container
+  filtering.

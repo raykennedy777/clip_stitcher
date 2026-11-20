@@ -40,3 +40,9 @@ decoder (`FrameStreamDecoder`) unchanged.
 - One `FrameStreamDecoder` (an ffmpeg process) per visited clip lives while the Preview
   section is shown; navigating away must tear them all down — the preview is a sidebar
   section, not a window with a close lifecycle like the cut-editor.
+- **Cache backfill asymmetry & join keyframes:** `PreviewModel`'s frame cache is keyed by
+  global output frame: matching segments backfill the entire decoded source window 1:1, whereas
+  conformed segments cache only the exact requested output frame because multiple output frames
+  can map to one source frame. `⇧←`/`⇧→` keyframe navigation includes every segment's first
+  frame (joins) alongside kept source keyframes because export re-encodes from each clip's in
+  point and users need keyframe stepping to cross clip boundaries.

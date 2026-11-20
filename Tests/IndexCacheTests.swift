@@ -2,10 +2,6 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// The index cache's two promises (R2 of the 2026 R16 review): a changed source misses —
-/// size, mtime or content — and a hit returns exactly the values that were stored. The
-/// plan-level promise (a cached plan equals an uncached one) is in
-/// `StitchPipelineIntegrationTests`, where real sources exist.
 struct IndexCacheTests {
     private static func tempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -14,8 +10,6 @@ struct IndexCacheTests {
         return dir
     }
 
-    /// A file larger than both hashed spans together, so a byte in its middle is outside
-    /// the head/tail hash.
     private static func makeFile(in dir: URL) throws -> URL {
         let url = dir.appendingPathComponent("source.bin")
         var bytes = [UInt8](repeating: 0, count: 3 * SourceIdentity.hashedSpan)
@@ -38,7 +32,6 @@ struct IndexCacheTests {
                                        colorTransfer: "bt709", colorRange: "tv"),
                 audio: nil, audioTracks: [], duration: 7062.16, containerStart: 1.4,
                 videoCodecFrameRate: "50/1"),
-            // Values whose decimal text would not round-trip in a lossy store.
             pts: [0.1 + 0.2, 1.0 / 3.0, 1e-300, 7062.1599999999999],
             dts: [0.02, 0.04, 0.06, 0.08],
             keyframeFlags: [true, false, false, true],
@@ -88,7 +81,6 @@ struct IndexCacheTests {
         #expect(await cache.load(after) == nil)
     }
 
-    /// A rewrite that keeps size and mtime (`touch -r`) is what the content hash is for.
     @Test func aChangedTailWithTheSameSizeAndMtimeMisses() async throws {
         let dir = try Self.tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -121,7 +113,6 @@ struct IndexCacheTests {
         #expect(try SourceIdentity.of(source).headTailSHA256 != before.headTailSHA256)
     }
 
-    /// A damaged entry file is a miss, never an error.
     @Test func anUnreadableEntryMisses() async throws {
         let dir = try Self.tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

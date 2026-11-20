@@ -1,16 +1,11 @@
 import Testing
 @testable import ClipStitcher
 
-/// Pins the shared encoder-selection tables (issue #29) both re-encode paths build
-/// from: codec → encoder, profile-string → -profile:v token, and the level tokens.
-/// The full argument arrays they feed stay pinned in the two engines' own tests.
 struct EncoderSelectionTests {
-
     @Test func codecMapsToItsEncoder() {
         #expect(EncoderSelection.encoder(for: "hevc") == "libx265")
         #expect(EncoderSelection.encoder(for: "mpeg2video") == "mpeg2video")
         #expect(EncoderSelection.encoder(for: "h264") == "libx264")
-        // any codec without its own entry re-encodes as H.264
         #expect(EncoderSelection.encoder(for: "vp9") == "libx264")
         #expect(EncoderSelection.encoder(for: nil) == "libx264")
     }
@@ -33,7 +28,6 @@ struct EncoderSelectionTests {
     }
 
     @Test func unknownProfilesAreNilNeverGuessed() {
-        // a wrong -profile:v token aborts the encode, so unrecognised input maps to nil
         #expect(EncoderSelection.encoderProfile(nil, codec: "h264") == nil)
         #expect(EncoderSelection.encoderProfile("Some Exotic Profile", codec: "h264") == nil)
         #expect(EncoderSelection.encoderProfile("Main 10", codec: "mpeg2video") == nil)
@@ -47,17 +41,12 @@ struct EncoderSelectionTests {
         #expect(EncoderSelection.h264Level("High") == nil)
     }
 
-    // MARK: reorder depth (ADR-0026, issue #106)
-
-    /// A shallow join drops the encoders' default B-pyramid; a deep one keeps it (the
-    /// default already produces depth 2). MPEG-2 has no pyramid to switch off.
     @Test func reorderDepthParamsSwitchThePyramidOnlyForAShallowJoin() {
         #expect(EncoderSelection.reorderDepthParams(depth: 1, forCodec: "h264") == ["b-pyramid=0"])
         #expect(EncoderSelection.reorderDepthParams(depth: 1, forCodec: "hevc") == ["b-pyramid=0"])
         #expect(EncoderSelection.reorderDepthParams(depth: 0, forCodec: "h264") == ["b-pyramid=0"])
         #expect(EncoderSelection.reorderDepthParams(depth: 2, forCodec: "h264") == [])
         #expect(EncoderSelection.reorderDepthParams(depth: 2, forCodec: "hevc") == [])
-        // MPEG-2's B-frames never reference other B-frames: nothing to say, either way.
         #expect(EncoderSelection.reorderDepthParams(depth: 1, forCodec: "mpeg2video") == [])
         #expect(EncoderSelection.reorderDepthParams(depth: 2, forCodec: "mpeg2video") == [])
     }
@@ -69,13 +58,10 @@ struct EncoderSelectionTests {
             == ["-x265-params", "b-pyramid=0"])
         #expect(EncoderSelection.encoderParams(["a=1", "b=2"], forCodec: "h264")
             == ["-x264-params", "a=1:b=2"])
-        // Nothing to carry, and a codec with no such flag, both emit no args.
         #expect(EncoderSelection.encoderParams([], forCodec: "h264") == [])
         #expect(EncoderSelection.encoderParams(["b-pyramid=0"], forCodec: "mpeg2video") == [])
     }
 
-    /// ffmpeg honours only the last `-x264-params`, so entries merge into an existing flag
-    /// (Clip Doctor's MBAFF repair args carry their own) rather than being appended twice.
     @Test func encoderParamsMergeIntoAnExistingFlagNeverDuplicateIt() {
         let mbaff = ["-c:v", "libx264", "-x264-params", "ref=5:b-pyramid=0", "-bsf:v", "dump_extra"]
         #expect(EncoderSelection.withEncoderParams(["keyint=25"], in: mbaff, forCodec: "h264")
@@ -88,7 +74,6 @@ struct EncoderSelectionTests {
     }
 
     @Test func hevcLevelIdcFromGeneralLevelIdc() {
-        // HEVC's probed level is general_level_idc = level × 30: 123 → 4.1, 120 → 4.0
         #expect(EncoderSelection.hevcLevel("123") == "4.1")
         #expect(EncoderSelection.hevcLevel("120") == "4.0")
         #expect(EncoderSelection.hevcLevel("93") == "3.1")

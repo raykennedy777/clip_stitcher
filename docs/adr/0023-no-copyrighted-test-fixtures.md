@@ -58,3 +58,16 @@ exactly why it can't be committed. The same rule governs every future fixture of
     `xcodebuild test … -skip-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests`
   - on demand / before a release:
     `xcodebuild test … -only-testing:ClipStitcherTests/FieldCodedRepairIntegrationTests`
+
+## Other fixture generation recipes
+
+- **Synthetic open-GOP periodic-IDR fixtures (`BoundedVerifyIntegrationTests`):** x264 and x265
+  emit an IDR only at the start of an encode, so synthesizing a broadcast-shaped open-GOP
+  stream with periodic IDRs concatenates short (`chunkSeconds`) encodes.
+- **Truncated-ending capture slice (`TruncatedEndingRepairIntegrationTests`):** Slicing a
+  stopped-live-capture fixture must use `-sseof` with `-c copy` over the file's true end so
+  the partial final frame is preserved.
+- **Synthetic dropout fixtures (`scripts/make_corrupt_fixtures.sh`):** Stream-copies a 90 s
+  excerpt starting at byte 0 (so open-GOP HEVC loses no leading pictures to a head cut;
+  tail-only cut is safe) and zeroes three deterministic 4 KiB-aligned 256 KiB ranges at
+  40 / 55 / 70 % of file size, recording exact byte ranges to `manifest.txt`.

@@ -1,17 +1,7 @@
 import SwiftUI
 
-/// The trailing inspector's read-only technical read-out of the selected clip (issue #88):
-/// container/duration/size, the full video and audio spec, and — the point of it — a Match
-/// section naming every strict-compare property that differs from the target clip. The
-/// mismatch list is driven entirely by `MatchEvaluator.differences`, so it can never disagree
-/// with the row's smart-render / re-encode verdict.
-///
-/// Read-only for 1.0 — no editing controls. Adds no probing: every value comes from data
-/// already on the `Clip` (plus the source file's on-disk size, a plain filesystem stat).
 struct ClipInspectorView: View {
     @ObservedObject var document: ProjectDocument
-    /// The Source list's live selection — the inspector re-renders as it moves (arrow keys
-    /// included), showing the single selected clip or an N-selected / no-selection placeholder.
     let selection: Set<Clip.ID>
 
     var body: some View {
@@ -25,17 +15,11 @@ struct ClipInspectorView: View {
         .frame(minWidth: 260, idealWidth: 300)
     }
 
-    /// The one selected clip, or nil when zero or many are selected.
     private var singleSelectedClip: Clip? {
         guard selection.count == 1, let id = selection.first else { return nil }
         return document.project.clips.first { $0.id == id }
     }
 
-    // MARK: - Placeholder (multi / empty selection)
-
-    /// HIG "No Selection" convention: an empty selection reads "No Clip Selected"; a
-    /// multi-selection reads "N Clips Selected" — the inspector describes exactly one clip,
-    /// so it steps aside rather than trying to merge readings.
     private var placeholder: some View {
         let title = selection.isEmpty ? "No Clip Selected" : "\(selection.count) Clips Selected"
         return VStack(spacing: 8) {
@@ -52,8 +36,6 @@ struct ClipInspectorView: View {
         .accessibilityValue(Text(title))
     }
 
-    // MARK: - Clip detail
-
     @ViewBuilder
     private func clipDetail(_ clip: Clip) -> some View {
         Form {
@@ -66,8 +48,6 @@ struct ClipInspectorView: View {
         }
         .formStyle(.grouped)
     }
-
-    // MARK: - File / container
 
     @ViewBuilder
     private func fileSection(_ clip: Clip) -> some View {
@@ -89,14 +69,11 @@ struct ClipInspectorView: View {
         }
     }
 
-    /// The source's container, from its file extension (uppercased) — a fact of the source
-    /// file, not a media probe.
     private func container(for clip: Clip) -> String? {
         let ext = (document.url(for: clip)?.pathExtension ?? (clip.displayName as NSString).pathExtension)
         return ext.isEmpty ? nil : ext.uppercased()
     }
 
-    /// The source file's on-disk size, read from the resolved URL; nil when unresolved.
     private func fileSize(for clip: Clip) -> String? {
         guard let url = document.url(for: clip),
               let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
@@ -114,9 +91,6 @@ struct ClipInspectorView: View {
         }
     }
 
-    /// The damage read-out: zone count, naming a truncated ending where the shared
-    /// classification (`ProjectDocument.hasTruncatedEnding`) finds one. nil hides the row
-    /// for a clip that predates detection or hasn't been scanned. "None detected" when clean.
     private func damageText(_ clip: Clip) -> String? {
         guard let zones = clip.damageZones else { return nil }
         if zones.isEmpty { return "None detected" }
@@ -128,8 +102,6 @@ struct ClipInspectorView: View {
         }
         return count == 1 ? "1 damage zone" : "\(count) damage zones"
     }
-
-    // MARK: - Video
 
     @ViewBuilder
     private func videoSection(_ clip: Clip, _ video: VideoProperties) -> some View {
@@ -152,7 +124,6 @@ struct ClipInspectorView: View {
         }
     }
 
-    /// Codec plus profile/level when known, e.g. "H264 · High @ L4.0".
     private func codecText(_ v: VideoProperties) -> String {
         var text = v.codec.uppercased()
         if let profile = v.profile, !profile.isEmpty {
@@ -162,29 +133,21 @@ struct ClipInspectorView: View {
         return text
     }
 
-    /// Display aspect ratio with the sample (pixel) aspect noted when the pixels aren't
-    /// square, e.g. "16:9 (PAR 64:45)".
     private func aspectText(sar: String?, dar: String) -> String {
         if let sar, !sar.isEmpty, sar != "1:1" { return "\(dar) (PAR \(sar))" }
         return dar
     }
 
-    /// Scan type, appending the field-coded (PAFF) gloss (CONTEXT.md) when the source stores
-    /// two field pictures per frame — the app's frame numbering runs at 2× there.
     private func scanTypeText(_ clip: Clip, _ v: VideoProperties) -> String {
         let base = MediaFormatting.scanType(v.fieldOrder)
         return clip.fieldCoded == true ? "\(base) · field-coded (two half-pictures per frame)" : base
     }
 
-    /// The color triple + range as a compact line, omitted entirely when the stream carries
-    /// no color tags at all (a common untagged SD source).
     private func colorText(_ v: VideoProperties) -> String? {
         let parts = [v.colorPrimaries, v.colorTransfer, v.colorSpace, v.colorRange]
             .compactMap { $0 }.filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
-
-    // MARK: - Audio
 
     @ViewBuilder
     private func audioSection(_ clip: Clip) -> some View {
@@ -198,8 +161,6 @@ struct ClipInspectorView: View {
         }
     }
 
-    /// One audio track's spec, e.g. "AAC · 48 kHz · stereo"; "—" when the feeding stream's
-    /// properties are unknown (an unprobed external file).
     private func audioText(_ track: AudioProperties?) -> String {
         guard let track else { return "—" }
         var parts = ["\(track.codec.uppercased())", "\(track.sampleRate / 1000) kHz"]
@@ -211,14 +172,9 @@ struct ClipInspectorView: View {
         return parts.joined(separator: " · ")
     }
 
-    // MARK: - Match (why it doesn't match)
-
     @ViewBuilder
     private func matchSection(_ clip: Clip) -> some View {
         Section("Match") {
-            // The verdict is the single pure source (`MatchEvaluator.matchVerdict`), so the
-            // explanation shown here can never disagree with the smart-render router — including
-            // the target-has-no-video case, which routes to re-encode rather than a bogus match.
             switch MatchEvaluator.matchVerdict(for: clip, target: document.project.targetClip) {
             case .isTarget:
                 verdictRow("This is the target clip.", systemImage: "target", tint: .accentColor)
@@ -248,9 +204,6 @@ struct ClipInspectorView: View {
         }
     }
 
-    /// One mismatch, named with both values ("Frame rate 25 → 29.997"). The clip's value and
-    /// the target's are shown side by side; the whole line is exposed to AX as one value so a
-    /// probe can assert the exact difference.
     private func differenceRow(_ diff: MatchEvaluator.VideoDifference, index: Int) -> some View {
         let value = "\(diff.clipValue) → \(diff.targetValue)"
         return VStack(alignment: .leading, spacing: 2) {
@@ -275,8 +228,6 @@ struct ClipInspectorView: View {
             .accessibilityIdentifier("inspector.match.verdict")
             .accessibilityValue(Text(text))
     }
-
-    // MARK: - Row helper
 
     private func row(_ label: String, _ value: String, id: String) -> some View {
         LabeledContent(label) {

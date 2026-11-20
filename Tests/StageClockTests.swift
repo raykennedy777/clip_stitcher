@@ -2,8 +2,6 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// The spellings of the CLI's stage-timing lines (R5 of the 2026 R16 review). The slot
-/// logs grep these, so their shape is pinned here.
 struct StageClockTests {
     @Test func aRunTotalPrintsAsHoursMinutesSecondsAndTenths() {
         #expect(StageClock.clockLabel(0) == "00:00:00.0")

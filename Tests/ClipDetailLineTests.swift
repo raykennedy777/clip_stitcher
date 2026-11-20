@@ -2,8 +2,6 @@ import Foundation
 import Testing
 @testable import ClipStitcher
 
-/// The Source view's clip-row detail line (issue #11): it must summarize the clip's
-/// *edited* audio track list (ADR-0014's slots), not the source file's probed streams.
 struct ClipDetailLineTests {
     private func track(codec: String = "aac", sampleRate: Int = 48000, channels: Int = 2,
                        title: String? = nil) -> AudioProperties {
@@ -27,8 +25,6 @@ struct ClipDetailLineTests {
     }
 
     @Test func removingSlotsLowersTheCount() {
-        // Four probed streams cut down to one slot in Audio Settings: the row must
-        // say one track (no count suffix), not "4 audio tracks".
         var clip = videoClip()
         clip.audio = track(codec: "mp2")
         clip.audioTracks = [clip.audio!, track(), track(), track()]
@@ -38,8 +34,6 @@ struct ClipDetailLineTests {
     }
 
     @Test func externalTrackInSlotOneDrivesTheSummaryAndCount() {
-        // One own stream plus an external AC3 file promoted to slot 1: two tracks,
-        // and the codec summary describes the external, not the probed first stream.
         var clip = videoClip()
         clip.audio = track(codec: "mp2")
         clip.audioTracks = [clip.audio!]
@@ -53,8 +47,6 @@ struct ClipDetailLineTests {
                 == "H264 1024×576 · 50 fps · AC3 6ch 44kHz · 2 audio tracks")
     }
 
-    /// An interlaced source names its field order between the frame rate and the audio
-    /// (ClipRowView.detailLine field-order branch): the raw label is shown in parens.
     @Test func interlacedClipNamesItsFieldOrder() {
         var clip = videoClip()
         clip.video?.fieldOrder = "tt"
@@ -63,7 +55,6 @@ struct ClipDetailLineTests {
                 == "H264 1024×576 · 50 fps · interlaced (tt)")
     }
 
-    /// A progressive source reads "progressive", not "interlaced (progressive)".
     @Test func progressiveClipReadsProgressive() {
         var clip = videoClip()
         clip.video?.fieldOrder = "progressive"
@@ -72,11 +63,6 @@ struct ClipDetailLineTests {
                 == "H264 1024×576 · 50 fps · progressive")
     }
 
-    /// An "unknown" field order reads "progressive", not "interlaced (unknown)" — the row now
-    /// classifies through `MediaFormatting.isProgressive`, so it agrees with the inspector's
-    /// scan-type (which glosses "unknown" as Progressive) instead of drifting. "unknown" is
-    /// genuinely ambiguous; treating it as progressive matches how a clean progressive stream
-    /// that reports no field order is already handled everywhere (ADR-0011 normalization).
     @Test func unknownFieldOrderReadsProgressive() {
         var clip = videoClip()
         clip.video?.fieldOrder = "unknown"
@@ -94,8 +80,6 @@ struct ClipDetailLineTests {
     }
 
     @Test func unknownFirstSlotStillShowsTheTrackCount() {
-        // Slot 1 is an unprobed external (no codec to describe), slot 2 is known:
-        // skip the codec summary but keep the audio visible via the count.
         var clip = videoClip()
         clip.audio = track(codec: "mp2")
         clip.audioTracks = [clip.audio!]
@@ -110,15 +94,11 @@ struct ClipDetailLineTests {
 
     @Test func singleUnknownSlotStillShowsAudioExists() {
         var clip = videoClip()
-        clip.audioSelections = [.stream(3)]  // out-of-range: properties unknown
+        clip.audioSelections = [.stream(3)]
         #expect(ClipRowView.detailLine(for: clip)
                 == "H264 1024×576 · 50 fps · 1 audio track")
     }
 
-    /// The copied-share readout (issue #15): whole-percent rounding, but a partial share
-    /// never rounds up to "100% copied" — boundary slivers still re-encode, and claiming
-    /// otherwise repeats the false footer this issue removed. "0% copied" is the
-    /// open-GOP poster child.
     @Test func copiedShareTextRoundsButNeverInflatesTo100() {
         #expect(ClipRowView.copiedShareText(fraction: 0) == "0% copied")
         #expect(ClipRowView.copiedShareText(fraction: 0.921) == "92% copied")

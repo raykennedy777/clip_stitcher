@@ -4,7 +4,6 @@ import AppKit
 struct OutputView: View {
     @ObservedObject var document: ProjectDocument
     @State private var showCancelAlert = false
-    /// The shared "start where I last saved / at my fixed folder" mechanism (issue #87).
     private let panelDefaults = ExportPanelDefaults()
 
     private var output: Binding<OutputSettings> {
@@ -26,8 +25,6 @@ struct OutputView: View {
                     ForEach(OutputMode.allCases) { Text($0.title).tag($0) }
                 }
                 .accessibilityIdentifier("output.mode")
-                // Cut-only is a separate-mode rendering choice (ADR-0018) — connect
-                // mode always conforms, so the picker only appears here.
                 if document.project.output.mode == .separate {
                     Picker("Rendering", selection: output.rendering) {
                         ForEach(SeparateRendering.allCases) { Text($0.title).tag($0) }
@@ -38,8 +35,6 @@ struct OutputView: View {
                     ForEach(OutputType.allCases) { Text($0.title).tag($0) }
                 }
                 .accessibilityIdentifier("output.type")
-                // The video container doesn't apply to an audio-only export — it's written as
-                // an audio-elementary file whose type follows the audio codec (#1).
                 if document.project.output.type != .audioOnly {
                     Picker("Container", selection: output.container) {
                         ForEach(Container.allCases) { Text($0.title).tag($0) }
@@ -49,9 +44,6 @@ struct OutputView: View {
             }
 
             Section {
-                // Prominent only when re-encode dominates the planned export (issue #15) —
-                // below the threshold closed-GOP sources re-encode mere boundary slivers
-                // and a warning would be noise.
                 if let warning = reencodeDominanceWarning {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -64,10 +56,6 @@ struct OutputView: View {
                         .accessibilityIdentifier("output.export")
                     Spacer()
                 }
-                // Why Export is disabled (issue #78): clips still being analysed name
-                // their count; a failed/source-missing clip points to its own row (which
-                // shows the specific error). Hidden while exporting — the progress and
-                // outcome speak for themselves then.
                 if !isExporting, let reason = exportDisabledReason {
                     Label(reason, systemImage: "hourglass")
                         .font(.callout)
@@ -76,10 +64,6 @@ struct OutputView: View {
                         .accessibilityValue(Text(reason))
                 }
                 if isExporting {
-                    // Prominent progress (issue #9): a full-width determinate bar with
-                    // percent and a damped "About X remaining" readout beneath it.
-                    // The ellipsis on Cancel Export… is deliberate — the command asks
-                    // for confirmation first (issue #32).
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 12) {
                             ProgressView(value: exportFraction)
@@ -100,9 +84,6 @@ struct OutputView: View {
                 }
                 exportOutcome
             } footer: {
-                // Honest about the plan (issue #15): how much is actually stream-copied
-                // depends on clean cut points and on clips matching the target — each
-                // clip's row shows its own split.
                 Text("Cuts land on the exact frame you chose. Footage is stream-copied "
                      + "untouched wherever clean cut points allow; the rest is re-encoded. "
                      + "Each clip's row shows its copied share.")
@@ -110,8 +91,6 @@ struct OutputView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Output")
-        // The export keeps running while the alert is up; Continue Exporting is the
-        // default (Return), the destructive confirm actually cancels (issue #32).
         .alert("Cancel the export?", isPresented: $showCancelAlert) {
             Button("Cancel Export", role: .destructive) { document.cancelExport() }
             Button("Continue Exporting", role: .cancel) {}
@@ -119,24 +98,17 @@ struct OutputView: View {
         } message: {
             Text("Progress so far will be discarded.")
         }
-        // If the export finishes (or fails) while the alert is still up, there is
-        // nothing left to cancel — dismiss it and let the outcome show.
         .onChange(of: isExporting) { _, running in
             if !running { showCancelAlert = false }
         }
     }
 
-    /// The dominance warning (issue #15): the export-wide re-encoded share, summed
-    /// duration-weighted over every clip with a computed split. Irrelevant to an
-    /// audio-only export (no video plan runs at all).
     private var reencodeDominanceWarning: String? {
         guard document.project.output.type != .audioOnly else { return nil }
         let shares = document.project.clips.compactMap { document.copyShares[$0.id] }
         return ExportPlanner.reencodeDominanceWarning(shares: shares)
     }
 
-    /// Why Export is disabled (issue #78), or nil when it can proceed — clips still
-    /// analysing, or a failed/source-missing clip needing the user to act.
     private var exportDisabledReason: String? {
         ProjectDocument.exportDisabledReason(
             clips: document.project.clips, states: document.importStates)
@@ -176,7 +148,6 @@ struct OutputView: View {
                 .accessibilityIdentifier("output.status")
                 .accessibilityValue(Text(message))
         case .cancelled(let detail):
-            // Neutral, not red — nothing went wrong (issue #32).
             Label(detail.map { "Export cancelled — \($0)" } ?? "Export cancelled.",
                   systemImage: "xmark.circle")
                 .foregroundStyle(.secondary)
@@ -185,12 +156,7 @@ struct OutputView: View {
     }
 
     private func chooseDestinationAndExport() {
-        // Separate mode writes one file per clip, named `NN <clip name>.<ext>` in
-        // timeline order — so the user picks the folder they all land in, not a
-        // filename (issue #30). Connect mode keeps the filename save panel.
         if document.project.output.mode == .separate {
-            // Automation bypass (issue #37): the destination folder comes from the
-            // environment instead of a panel; the export itself is unchanged.
             if let dest = AutomationOverrides.current?.exportDestination {
                 document.startExport(to: dest)
                 return
@@ -203,8 +169,6 @@ struct OutputView: View {
             panel.canChooseFiles = false
             panel.canCreateDirectories = true
             panel.allowsMultipleSelection = false
-            // The configured folder / last choice wins (issue #87); with nothing
-            // recorded yet it falls back to the clips' folder.
             if let dir = panelDefaults.startingDirectory ?? defaultExportDirectory {
                 panel.directoryURL = dir
             }
@@ -214,8 +178,6 @@ struct OutputView: View {
             document.startExport(to: url)
             return
         }
-        // An audio-only export is an audio-elementary file named for the (target-derived)
-        // audio codec, not the video container (#1 / ADR-0010).
         let out = document.project.output
         let ext: String
         if out.type == .audioOnly {
@@ -224,7 +186,6 @@ struct OutputView: View {
         } else {
             ext = out.container.fileExtension
         }
-        // Automation bypass (issue #37): same extension fix-up the panel path does.
         if var url = AutomationOverrides.current?.exportDestination {
             if url.pathExtension.lowercased() != ext { url.appendPathExtension(ext) }
             document.startExport(to: url)
@@ -236,8 +197,6 @@ struct OutputView: View {
         panel.canCreateDirectories = true
         panel.showsTagField = false
         panel.nameFieldStringValue = "\(defaultName).\(ext)"
-        // The configured folder / last choice wins (issue #87); with nothing recorded
-        // yet it falls back to the clips' folder.
         if let dir = panelDefaults.startingDirectory ?? defaultExportDirectory {
             panel.directoryURL = dir
         }
@@ -248,8 +207,6 @@ struct OutputView: View {
         document.startExport(to: url)
     }
 
-    /// Where the export panel opens: the target clip's folder, else the first clip's.
-    /// Nil (unresolvable bookmarks, no clips) leaves the panel at the system default.
     private var defaultExportDirectory: URL? {
         let candidates = [document.project.targetClip, document.project.clips.first]
         for clip in candidates {
@@ -260,7 +217,6 @@ struct OutputView: View {
         return nil
     }
 
-    /// A starting filename: the first clip's name without its extension, else a default.
     private var defaultName: String {
         if let first = document.project.clips.first {
             let stem = (first.displayName as NSString).deletingPathExtension

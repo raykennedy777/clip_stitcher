@@ -1,67 +1,27 @@
 import Foundation
 
-/// The headless CLI's job description (issue #105): everything the GUI collects
-/// interactively — the ordered clips, their in/out points, each clip's audio track
-/// selection, which clip is the target, and the output settings — as one JSON file
-/// referencing sources by **plain file path** (no security-scoped bookmarks; the CLI
-/// runs unsandboxed). `docs/stitch-job.md` is the public, cross-repo contract this
-/// type decodes; the shape deliberately mirrors the Codable project model
-/// (`VidProject`/`Clip`/`OutputSettings`) so the two can't drift apart in meaning.
-///
-/// Decoding and validation are pure — no file IO — so the whole contract is
-/// unit-testable from JSON literals. Checks that need the probed source (frame
-/// ranges vs the real frame count, audio stream indices vs the real stream list)
-/// live in `StitchPipeline`, which owns the IO.
 struct StitchJob: Codable, Equatable {
-    /// Contract version. The CLI refuses versions it doesn't know rather than
-    /// half-reading a future job shape.
     static let supportedVersion = 1
 
     var version: Int
     var clips: [JobClip]
     var output: JobOutput? = nil
 
-    /// One timeline entry. `inFrame`/`outFrame` are 0-based frame numbers in
-    /// **presentation order** — exactly the GUI's `Clip.inPoint`/`outPoint` semantics
-    /// (ADR-0006): `outFrame` is the last kept frame (inclusive), and an omitted end
-    /// means the clip boundary. On a field-coded (PAFF) source the index counts
-    /// *fields*, as everywhere else in the app.
     struct JobClip: Codable, Equatable {
         var path: String
-        /// Display name for warnings/errors; the file name when omitted.
         var name: String? = nil
         var inFrame: Int? = nil
         var outFrame: Int? = nil
-        /// Which of this file's own audio streams feed the output tracks, in output
-        /// track order (0-based indices among the file's **audio** streams — `0:a:N`).
-        /// Omitted means all of the clip's own audio streams in container order, the
-        /// GUI default (ADR-0014). Different clips may select different streams —
-        /// that is the point (each output track's leg is chosen per clip).
         var audioTracks: [Int]? = nil
-        /// Marks the target clip — the clip whose properties define the output spec
-        /// (ADR-0005): non-matching clips are conformed to it (ADR-0011). Exactly one
-        /// entry must set this.
         var target: Bool? = nil
     }
 
-    /// Output settings, all optional. `mode` is not part of the contract: the CLI
-    /// always connects into the one output file it was given (`OutputMode.connect`);
-    /// per-clip output splitting stays a GUI affordance.
     struct JobOutput: Codable, Equatable {
-        /// "mkv" (default), "ts", or "mp4" — `Container`'s raw values.
         var container: String? = nil
-        /// "videoAndAudio" (default), "videoOnly", or "audioOnly" — `OutputType`'s
-        /// raw values.
         var type: String? = nil
-        /// The CRF conformed (non-matching) clips encode at, 0–51. Omitted keeps the
-        /// encoder default (libx264 23, libx265 28). This is how a fill clip's conform
-        /// is pinned to the quality class of the footage around it; applies to
-        /// x264/x265 conform encoders only — an MPEG-2 target ignores it.
         var conformCrf: Int? = nil
     }
 
-    /// Decodes and structurally validates a job in one step — the only entry the CLI
-    /// uses, so no path can act on a decoded-but-unvalidated job.
     static func parse(_ data: Data) throws -> StitchJob {
         let job: StitchJob
         do {
@@ -73,10 +33,6 @@ struct StitchJob: Codable, Equatable {
         return job
     }
 
-    /// The structural checks that need no probed source: version, at least one clip,
-    /// exactly one target, sane frame ranges, non-negative audio stream indices, and
-    /// known output enum strings. Everything else (ranges vs the real file) is the
-    /// pipeline's post-probe validation.
     func validate() throws {
         guard version == Self.supportedVersion else {
             throw StitchJobError.unsupportedVersion(version)
@@ -106,15 +62,10 @@ struct StitchJob: Codable, Equatable {
         _ = try outputSettings()
     }
 
-    /// The index of the target clip. Force-unwrappable after `validate()`; optional so
-    /// pre-validation callers can't trap.
     var targetIndex: Int? {
         clips.firstIndex { $0.target == true }
     }
 
-    /// The job's output settings mapped onto the GUI model: mode is always `.connect`
-    /// (the CLI writes the one file it was told to), and the container/type strings
-    /// must be exact raw values — a typo'd "MKV" is refused, never silently defaulted.
     func outputSettings() throws -> OutputSettings {
         var settings = OutputSettings()
         settings.mode = .connect
@@ -131,7 +82,6 @@ struct StitchJob: Codable, Equatable {
             settings.type = type
         }
         if let crf = output?.conformCrf {
-            // Both conform encoders accept 0–51 (x264/x265's shared CRF scale).
             guard (0...51).contains(crf) else {
                 throw StitchJobError.badConformCrf(crf)
             }
@@ -140,8 +90,6 @@ struct StitchJob: Codable, Equatable {
         return settings
     }
 
-    /// A `JSONDecoder` failure as one legible line (path + reason) — the raw
-    /// `DecodingError` description is a nested enum dump nobody can script against.
     private static func describeDecodingError(_ error: Error) -> String {
         guard let decoding = error as? DecodingError else {
             return error.localizedDescription
@@ -164,13 +112,6 @@ struct StitchJob: Codable, Equatable {
 }
 
 extension StitchJob.JobClip {
-    /// The GUI-model clip this entry denotes once its source is probed: probed
-    /// properties filled exactly as import fills them, the job's in/out as
-    /// `inPoint`/`outPoint`, and the audio selection as own-stream slots at the
-    /// Original mix (the CLI contract has no external audio files or channel mixes).
-    /// The bookmark is empty — the pipeline resolves sources by path and never
-    /// touches it. `fieldCoded`/`damageZones` are stamped by the pipeline afterward,
-    /// once its index/detection pass has them.
     func modelClip(probe: MediaProbe.Result, frameCount: Int?) -> Clip {
         var clip = Clip(bookmark: Data(),
                         displayName: name ?? (path as NSString).lastPathComponent)
@@ -186,11 +127,6 @@ extension StitchJob.JobClip {
     }
 }
 
-/// Why a Stitch Job was refused — the CLI's "invalid job" failure class (exit code
-/// 65, EX_DATAERR): the job file itself is wrong, or it doesn't fit the sources it
-/// names. Distinct from probe/index failures (the source couldn't be *read* — exit
-/// 66) and export failures (planning/producing the output failed — exit 70), so a
-/// driving script can tell whose fault the failure is.
 enum StitchJobError: LocalizedError, Equatable {
     case malformed(String)
     case unsupportedVersion(Int)
@@ -203,18 +139,8 @@ enum StitchJobError: LocalizedError, Equatable {
     case unknownContainer(String)
     case unknownOutputType(String)
     case badConformCrf(Int)
-    /// A named source doesn't exist on disk. Job-class, not probe-class: the path is
-    /// the job's claim, and it's checked before any tool runs.
     case missingSource(String)
-    /// Post-probe: a frame number outruns the source's real frame count. The CLI
-    /// refuses rather than adopting the GUI's reset-to-whole-clip reconciliation
-    /// (issue #74) — a script asked for an exact range; silently exporting a
-    /// different one would corrupt the caller's timeline math.
     case frameOutOfRange(clip: Int, frame: Int, frameCount: Int)
-    /// Post-probe: a selected audio stream doesn't exist in the source. Refused for
-    /// the same reason — the GUI's silence fallback (ADR-0014) exists for slots a
-    /// *richer* clip created, not for an explicit selection that names a missing
-    /// stream.
     case audioTrackOutOfRange(clip: Int, index: Int, available: Int)
 
     var errorDescription: String? {

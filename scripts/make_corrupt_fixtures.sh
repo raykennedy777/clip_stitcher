@@ -1,20 +1,4 @@
 #!/bin/bash
-# Manufactures corrupted test footage for the corruption-tolerant export work (issue #43).
-#
-# For each clean source it stream-copies a 90 s excerpt (video + first audio stream) in
-# the source's own container, keeps that excerpt as the clean control fixture, then takes
-# a corrupt copy and zeroes three byte ranges mid-file — what a reception dropout does to
-# a broadcast stream. The excerpt starts at the file's beginning so an open-GOP source
-# (the HEVC sprint) loses no leading pictures to a head cut; a tail-only cut is safe.
-#
-# Zeroed ranges land at fixed fractions of the file size (40 / 55 / 70 %), aligned to
-# 4 KiB, 256 KiB each — deterministic, so the fixtures are reproducible from the same
-# sources. The exact ranges are written to manifest.txt next to the fixtures.
-#
-# Usage: make_corrupt_fixtures.sh [output-dir]
-#   You supply your own clean sources (no media is committed; ADR-0023). Set SAMPLES_DIR to a
-#   folder holding source_mpeg2.mpg / source_h264.mkv / source_hevc.mkv, or override each path
-#   individually with MPEG2_SRC / H264_SRC / HEVC_SRC.
 
 set -euo pipefail
 
@@ -51,7 +35,6 @@ make_fixture() {
     size=$(stat -f%z "$corrupt")
     echo "${label}: clean=$(basename "$clean") corrupt=$(basename "$corrupt") size=${size}" >> "$MANIFEST"
     for frac in $DAMAGE_FRACTIONS; do
-        # 4 KiB-aligned offset at this fraction of the file.
         local offset
         offset=$(python3 -c "print(int($size * $frac) // 4096 * 4096)")
         dd if=/dev/zero of="$corrupt" bs=4096 seek=$((offset / 4096)) \

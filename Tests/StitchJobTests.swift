@@ -2,18 +2,10 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Exercises the Stitch Job contract behind the `clipstitch` CLI (issue #105) — all
-/// pure, no file IO: JSON decode + structural validation, the mapping onto the GUI
-/// model (`Clip`/`OutputSettings`), and the planned export items a job produces
-/// through the same `ExportPlanner.planItem` the app calls. The schema is the public
-/// cross-repo contract (docs/stitch-job.md); these tests are what pin it.
 struct StitchJobTests {
-
     private func parse(_ json: String) throws -> StitchJob {
         try StitchJob.parse(Data(json.utf8))
     }
-
-    // MARK: - Decode + structural validation
 
     @Test func parsesAFullJob() throws {
         let job = try parse("""
@@ -38,8 +30,6 @@ struct StitchJobTests {
 
     @Test func malformedJSONIsRefusedLegibly() {
         #expect(throws: StitchJobError.self) { try self.parse("not json") }
-        // The decode failure is reported as one line naming the path, never the raw
-        // DecodingError dump — a script's stderr should be readable.
         do {
             _ = try parse("{\"version\": 1, \"clips\": [{ }]}")
             Issue.record("expected malformed")
@@ -86,7 +76,6 @@ struct StitchJobTests {
             {"version": 1, "clips": [{"path": "/a", "inFrame": 10, "outFrame": 9, "target": true}]}
             """)
         }
-        // in == out is a legal single-frame keep, matching Clip.inPoint/outPoint.
         #expect((try? parse("""
         {"version": 1, "clips": [{"path": "/a", "inFrame": 10, "outFrame": 10, "target": true}]}
         """)) != nil)
@@ -115,8 +104,6 @@ struct StitchJobTests {
         }
     }
 
-    // MARK: - Output settings mapping
-
     @Test func outputSettingsDefaultToConnectedMKV() throws {
         let job = try parse("{\"version\": 1, \"clips\": [{\"path\": \"/a\", \"target\": true}]}")
         let settings = try job.outputSettings()
@@ -132,7 +119,7 @@ struct StitchJobTests {
          "output": {"container": "ts", "type": "videoOnly"}}
         """)
         let settings = try job.outputSettings()
-        #expect(settings.mode == .connect)   // never anything else via the CLI
+        #expect(settings.mode == .connect)
         #expect(settings.container == .ts)
         #expect(settings.type == .videoOnly)
         #expect(try StitchPipeline.requiredExtension(job: job) == "ts")
@@ -166,8 +153,6 @@ struct StitchJobTests {
         #expect(try StitchPipeline.requiredExtension(job: job) == nil)
     }
 
-    // MARK: - Model mapping (job entry → Clip)
-
     private func probeResult(codec: String = "h264",
                              audioCodecs: [String] = ["aac"]) -> MediaProbe.Result {
         let video = VideoProperties(codec: codec, profile: "High", level: "41",
@@ -186,13 +171,11 @@ struct StitchJobTests {
         let entry = StitchJob.JobClip(path: "/media/fill.mkv", inFrame: 3, outFrame: 7,
                                       audioTracks: [1])
         let clip = entry.modelClip(probe: probeResult(audioCodecs: ["mp2", "aac"]), frameCount: 250)
-        #expect(clip.displayName == "fill.mkv")   // file name when no name given
+        #expect(clip.displayName == "fill.mkv")
         #expect(clip.video?.codec == "h264")
         #expect(clip.frameCount == 250)
         #expect(clip.inPoint == 3)
         #expect(clip.outPoint == 7)
-        // The selection maps to own-stream slots at the Original mix — so the shared
-        // AudioSourceResolver reads it exactly as it reads a GUI clip's (ADR-0014).
         #expect(clip.audioSelections == [.stream(1)])
         let sources = try AudioSourceResolver.resolveSources(for: clip, missingExternal: .throwError)
         #expect(sources == [.stream(1)])
@@ -202,15 +185,11 @@ struct StitchJobTests {
         let entry = StitchJob.JobClip(path: "/media/a.mkv", name: "A")
         let clip = entry.modelClip(probe: probeResult(audioCodecs: ["mp2", "aac"]), frameCount: 100)
         #expect(clip.displayName == "A")
-        #expect(clip.audioSelections == nil)   // the GUI default: all own streams
+        #expect(clip.audioSelections == nil)
         let sources = try AudioSourceResolver.resolveSources(for: clip, missingExternal: .throwError)
         #expect(sources == [.stream(0), .stream(1)])
     }
 
-    // MARK: - Job → planned export items (the CLI's planning altitude, pure)
-
-    /// 8 frames at 25 fps, keyframes at 0 and 4, no B-frames — the ExportPlannerTests
-    /// index shape, reused so the verdicts here can't drift from the planner suite's.
     private let index = FrameIndex(
         pts: [0.0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.24, 0.28],
         keyframeFlags: [true, false, false, false, true, false, false, false])
@@ -242,20 +221,15 @@ struct StitchJobTests {
                 target: targetClip, settings: settings)
         }
 
-        // The target matches itself: a whole-clip keep plans as one pure copy (ADR-0009).
         let targetItem = try item(for: targetClip)
         #expect(targetItem.conform == nil)
         #expect(targetItem.segments == [PlannedSegment(kind: .copy, range: 0..<8)])
         #expect(targetItem.audioSources == [.stream(0)])
 
-        // The MPEG-2 fill doesn't match the H.264 target: conformed to its spec
-        // (ADR-0011), and its audio leg comes from the job-selected stream 1.
         let fillItem = try item(for: fillClip)
         #expect(fillItem.conform != nil)
         #expect(fillItem.conform?.targetVideo.codec == "h264")
         #expect(fillItem.audioSources == [.stream(1)])
-        // The job's conformCrf rides the settings onto the planned conform (and only
-        // there — the smart-rendered target has no conform to carry it).
         #expect(fillItem.conform?.crf == 21)
     }
 
@@ -268,14 +242,10 @@ struct StitchJobTests {
                 containerStart: 0,
                 audioSources: AudioSourceResolver.resolveSources(for: clip, missingExternal: .throwError)),
             target: clip, settings: OutputSettings())
-        // Frames [2, 5] kept: the window starts at pts[2] and ends at the out frame's
-        // display end pts[6], the span every audio leg is forced to (ADR-0014, #75).
         #expect(item.audioStart == 0.08)
         #expect(item.audioEnd == 0.24)
         #expect(abs((item.audioDuration ?? 0) - 0.16) < 0.0001)
     }
-
-    // MARK: - Output track derivation matches the GUI's (ADR-0014)
 
     @Test func outputTracksFollowTheRichestClipTargetFirst() throws {
         let target = StitchJob.JobClip(path: "/t.mkv", audioTracks: [0], target: true)
@@ -283,7 +253,6 @@ struct StitchJobTests {
         let fill = StitchJob.JobClip(path: "/f.mkv", audioTracks: [0, 1])
             .modelClip(probe: probeResult(audioCodecs: ["aac", "aac"]), frameCount: 8)
         let tracks = AudioSourceResolver.resolveOutputTracks(target: target, clips: [target, fill])
-        // Two tracks (the fill selects two); track 1's format comes target-first.
         #expect(tracks.count == 2)
         #expect(tracks[0].sampleRate == 48000)
     }

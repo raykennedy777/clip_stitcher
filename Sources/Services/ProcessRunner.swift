@@ -6,25 +6,7 @@ struct ProcessResult: Sendable {
     var status: Int32
 }
 
-/// Accumulates a subprocess's stderr while keeping only a bounded recent tail in
-/// memory. stderr is *diagnostic*, not data: every callsite that reads the result's
-/// `stderr` does so only to report a failure, and a tool writes its fatal summary
-/// last — so the final ~256 KB is all anyone needs. Retaining the whole stream would
-/// grow unbounded: a damaged multi-hour decode with `-xerror` floods stderr with a
-/// per-frame `mmco`/corrupt-packet warning on every frame (issue #59), megabytes of
-/// it. (stdout, by contrast, *is* data — `MediaProbe` parses the whole JSON — so it is
-/// never bounded; large stdout uses `stdoutTo`/`onStdout` instead.)
-///
-/// Thread-safe (an `NSLock` guards `buffer`) — though in practice only one reader, the
-/// pipe's `readabilityHandler`, appends, and the snapshot runs after it reaches EOF (see
-/// `ProcessRunner`). When trimming, the retained tail is realigned to the next line
-/// boundary — or, lacking one, the next UTF-8 codepoint boundary — so it begins on a clean
-/// boundary rather than mid-byte and stays valid UTF-8 for `String(data:encoding:)`.
-/// Trimming only kicks in once the buffer passes twice the cap, amortising the copy across
-/// many small writes (so the retained tail is bounded by 2× cap, not cap).
-///
-/// Not `private`: the long-lived `FrameStreamDecoder` reuses it to capture its own
-/// ffmpeg's stderr (issue #86) rather than fork a second bounded-tail implementation.
+// ADR-0034
 final class StderrTail: @unchecked Sendable {
     private let cap: Int
     private let lock = NSLock()
@@ -38,12 +20,12 @@ final class StderrTail: @unchecked Sendable {
         defer { lock.unlock() }
         buffer.append(chunk)
         guard buffer.count > cap * 2 else { return }
-        buffer = Data(buffer.suffix(cap))              // rebase to a fresh 0-indexed Data
-        if let nl = buffer.firstIndex(of: 0x0A) {      // drop the partial leading line
+        buffer = Data(buffer.suffix(cap))
+        if let nl = buffer.firstIndex(of: 0x0A) {
             buffer = Data(buffer[buffer.index(after: nl)...])
         } else if let start = buffer.firstIndex(where: { $0 & 0xC0 != 0x80 }) {
-            buffer = Data(buffer[start...])            // no newline: drop leading UTF-8
-        }                                              // continuation bytes to a codepoint start
+            buffer = Data(buffer[start...])
+        }
     }
 
     func snapshot() -> Data {
@@ -53,42 +35,8 @@ final class StderrTail: @unchecked Sendable {
     }
 }
 
-/// Runs a bundled command-line tool (ffprobe/ffmpeg) as a subprocess.
-///
-/// When `stdoutTo` is nil, stdout is captured via a pipe and read in the
-/// termination handler — safe only for small output (< ~64 KB pipe buffer), which
-/// covers the ffprobe queries and frame-to-file extraction used here. For large
-/// output (the frame index dump), pass `stdoutTo` to stream it straight to a file
-/// and avoid filling the pipe.
-///
-/// **stderr** is always drained live (a `readabilityHandler` empties the pipe as the
-/// subprocess writes, so it can never back up and deadlock the process mid-write —
-/// issue #59) and the result's `stderr` carries a bounded recent tail (see
-/// `StderrTail`). That handler is the *sole* reader and signals EOF; the termination
-/// handler waits for it before snapshotting, so the final fatal line can't be lost to a
-/// second reader racing the drain. Pass `stderrTo` when a callsite needs the *whole*
-/// stderr stream on disk to parse it (e.g. `DamageDetector` reads a per-frame `showinfo`
-/// dump); the result's in-memory `stderr` is then empty.
-///
-/// `onStdout` streams stdout incrementally instead (ffmpeg `-progress pipe:1`,
-/// issue #9): each chunk arrives on a FileHandle queue as the subprocess writes —
-/// the callback must be thread-safe, and around termination chunk *order* isn't
-/// guaranteed either (the tail drain can race a last in-flight read) — and the
-/// result's `stdout` is then empty.
-///
-/// `stdoutTo` **and** `onStdout` together *tee* stdout (issue #81): the authoritative
-/// stream is still written whole to the file, while each chunk is also handed to the
-/// callback for a live progress signal (e.g. the verify scan's pts vs duration). Unlike
-/// the pure-`onStdout` streaming path, the tee has a *single* serial reader that both
-/// writes the file (so the on-disk order is exact) and reports progress, and it signals
-/// EOF via a semaphore the termination handler waits on — so no second read races the
-/// last write and truncates the file the caller then parses.
 enum ProcessRunner {
     #if DEBUG
-    /// Counts subprocess launches inside the enclosing `$launchCounter.withValue` scope, so a
-    /// test can prove an optimization removed a process launch (issue #85). Task-local, so a
-    /// test's count is isolated from other tests running in parallel — only launches within
-    /// the current structured-concurrency tree are counted, not another suite's ffmpeg runs.
     final class LaunchCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
@@ -104,8 +52,7 @@ enum ProcessRunner {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
-        // stdin is /dev/null: ffmpeg reads stdin for its interactive keys, and a read from a
-        // background process group (a detached tmux chain) gets SIGTTIN and stops the child.
+        // ADR-0034
         process.standardInput = FileHandle.nullDevice
 
         let errPipe: Pipe?
@@ -124,18 +71,13 @@ enum ProcessRunner {
             process.standardError = pipe
             errPipe = pipe
             errHandle = nil
-            // Drain stderr live into a bounded tail so the pipe never fills and blocks the
-            // subprocess mid-write (issue #59) — the deadlock that froze the 4.8 h PAFF
-            // repair. This handler is the sole reader; it signals `done` once it sees EOF
-            // (the exited child's write end closing), and the termination handler waits on
-            // that before snapshotting — so no second read races the drain for the tail.
             let tail = StderrTail(cap: 256 * 1024)
             let done = DispatchSemaphore(value: 0)
             errTail = tail
             errDone = done
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
-                if chunk.isEmpty {            // EOF — write end closed; stop observing
+                if chunk.isEmpty {
                     handle.readabilityHandler = nil
                     done.signal()
                 } else {
@@ -153,11 +95,6 @@ enum ProcessRunner {
             let handle = try? FileHandle(forWritingTo: fileURL)
             outHandle = handle
             if let onStdout {
-                // Tee: report each chunk for progress while still writing the whole
-                // authoritative stream to the file (issue #81). A single serial reader
-                // does both, so the on-disk order is exact; it signals EOF and the
-                // termination handler waits on that before closing, so nothing races the
-                // final write and truncates the file the caller parses.
                 let pipe = Pipe()
                 process.standardOutput = pipe
                 outPipe = pipe
@@ -166,7 +103,7 @@ enum ProcessRunner {
                 outDone = done
                 pipe.fileHandleForReading.readabilityHandler = { fh in
                     let chunk = fh.availableData
-                    if chunk.isEmpty {            // EOF — write end closed; stop observing
+                    if chunk.isEmpty {
                         fh.readabilityHandler = nil
                         done.signal()
                     } else {
@@ -187,18 +124,11 @@ enum ProcessRunner {
             outPipe = pipe
             teeToFile = false
             if let onStdout {
-                // Single serial reader with an EOF semaphore, mirroring the tee (issue #84):
-                // this handler is the sole consumer and signals `done` at EOF, and the
-                // termination handler waits on it before draining any remainder — so no second
-                // read races an in-flight handler invocation and reorders or duplicates chunks.
-                // Chunk order and completeness are load-bearing now: the streamed all-streams
-                // scan parses these chunks into per-stream packet arrays, not just the
-                // running-max progress signal they were for #81.
                 let done = DispatchSemaphore(value: 0)
                 outDone = done
                 pipe.fileHandleForReading.readabilityHandler = { handle in
                     let chunk = handle.availableData
-                    if chunk.isEmpty {            // EOF — write end closed; stop observing
+                    if chunk.isEmpty {
                         handle.readabilityHandler = nil
                         done.signal()
                     } else {
@@ -210,18 +140,11 @@ enum ProcessRunner {
             }
         }
 
-        // Terminate the subprocess if the awaiting task is cancelled (e.g. a newer
-        // frame seek supersedes this one, or the user cancels an export) so ffmpeg
-        // processes don't pile up.
         let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ProcessResult, Error>) in
                 process.terminationHandler = { proc in
                     var err = Data()
                     if let errPipe {
-                        // Wait for the live drain to reach EOF so the tail is complete, then
-                        // snapshot it (the recent tail — the final fatal lines). EOF arrives
-                        // as soon as the exited child's write end closes; the timeout is a
-                        // belt-and-suspenders backstop so a termination can never hang here.
                         if errDone?.wait(timeout: .now() + 5) == .timedOut {
                             errPipe.fileHandleForReading.readabilityHandler = nil
                         }
@@ -231,28 +154,12 @@ enum ProcessRunner {
                     var out = Data()
                     if let outPipe {
                         if teeToFile {
-                            // Wait for the live tee to reach EOF so every chunk has been
-                            // written to the file before it's closed. The timeout is a
-                            // backstop so a termination can never hang here — but on that
-                            // backstop, clearing the handler doesn't wait for an in-flight
-                            // invocation, and closing the file underneath a mid-flight
-                            // `write` could silently truncate the CSV the caller parses. So
-                            // clear the handler first (no new invocations; the process has
-                            // exited, so the serial handler queue quiesces), then drain the
-                            // pipe's remaining data straight to the file — recovering the
-                            // buffered tail instead of dropping it, exactly as the streaming
-                            // path's tail handling does below (issue #81).
                             if outDone?.wait(timeout: .now() + 5) == .timedOut {
                                 outPipe.fileHandleForReading.readabilityHandler = nil
                                 let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
                                 if !rest.isEmpty { try? outHandle?.write(contentsOf: rest) }
                             }
                         } else if let onStdout {
-                            // Streaming mode: wait for the live reader to reach EOF so every
-                            // chunk was delivered in order (issue #84). Only on the 5 s
-                            // backstop — a reader that somehow never saw EOF — do we drain the
-                            // remainder here, after clearing the handler so this is then the
-                            // sole reader, exactly as the tee path above recovers its tail.
                             if outDone?.wait(timeout: .now() + 5) == .timedOut {
                                 outPipe.fileHandleForReading.readabilityHandler = nil
                                 let rest = outPipe.fileHandleForReading.readDataToEndOfFile()
@@ -277,9 +184,7 @@ enum ProcessRunner {
         } onCancel: {
             if process.isRunning { process.terminate() }
         }
-        // A cancel-caused termination must surface as cancellation, not as the tool
-        // failing — the exit status after terminate() is indistinguishable from a real
-        // error, so the discrimination happens here (issue #32).
+        // ADR-0034
         try Task.checkCancellation()
         return result
     }

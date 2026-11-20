@@ -2,13 +2,8 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Pins the pure halves of the keyframe prefetch (issue #34): which keyframes get
-/// warmed around a landing (nearest first, alternating directions, bounded), and the
-/// keyframe cache's LRU bound.
 struct KeyframePrefetcherTests {
-    // MARK: neighborhood
-
-    private let keyframes = Array(stride(from: 0, through: 2000, by: 100))   // 21 keyframes
+    private let keyframes = Array(stride(from: 0, through: 2000, by: 100))
 
     @Test func neighborhoodStartsAtTheAnchorAndAlternatesNearestFirst() {
         let wanted = KeyframePrefetcher.neighborhood(position: 10, keyframes: keyframes, cap: 5)
@@ -38,13 +33,11 @@ struct KeyframePrefetcherTests {
         #expect(KeyframePrefetcher.neighborhood(position: 0, keyframes: [], cap: 5).isEmpty)
     }
 
-    // MARK: bounded LRU
-
     @Test func lruEvictsTheLeastRecentlyUsedAtCapacity() {
         var lru = BoundedLRU<String>(capacity: 2)
         lru.insert("a", at: 1)
         lru.insert("b", at: 2)
-        #expect(lru.value(at: 1) == "a")   // refreshes 1 — 2 is now oldest
+        #expect(lru.value(at: 1) == "a")
         lru.insert("c", at: 3)
         #expect(lru.count == 2)
         #expect(lru.contains(1))
@@ -66,13 +59,11 @@ struct KeyframePrefetcherTests {
         var lru = BoundedLRU<String>(capacity: 2)
         lru.insert("a", at: 1)
         lru.insert("b", at: 2)
-        _ = lru.contains(1)                // a peek, not a use — 1 stays oldest
+        _ = lru.contains(1)
         lru.insert("c", at: 3)
         #expect(!lru.contains(1))
         #expect(lru.contains(2))
     }
-
-    // MARK: emitted-frame verification (the open-GOP CRA mislabel fix)
 
     @Test func showinfoPtsIsParsedFromTheFirstFrameLine() {
         let stderr = """
@@ -90,16 +81,14 @@ struct KeyframePrefetcherTests {
     @Test func nearestFrameMatchesAnExactPts() {
         let pts = (0..<100).map { Double($0) * 0.02 }
         #expect(KeyframePrefetcher.nearestFrame(forPts: 0.40, in: pts) == 20)
-        #expect(KeyframePrefetcher.nearestFrame(forPts: 0.401, in: pts) == 20)   // FP fuzz
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 0.401, in: pts) == 20)
         #expect(KeyframePrefetcher.nearestFrame(forPts: 0.0, in: pts) == 0)
         #expect(KeyframePrefetcher.nearestFrame(forPts: 1.98, in: pts) == 99)
     }
 
     @Test func nearestFrameRefusesAMidGapPts() {
-        // A pts landing between frames means the decode emitted something we can't
-        // name — the image must not be filed under a guess.
         let pts = (0..<100).map { Double($0) * 0.02 }
         #expect(KeyframePrefetcher.nearestFrame(forPts: 0.41, in: pts) == nil)
-        #expect(KeyframePrefetcher.nearestFrame(forPts: 5.0, in: pts) == nil)    // far past the end
+        #expect(KeyframePrefetcher.nearestFrame(forPts: 5.0, in: pts) == nil)
     }
 }

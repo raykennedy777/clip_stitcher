@@ -1,15 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// Wires the enclosing List's underlying `NSTableView.doubleAction` so a
-/// double-click invokes `action(row)` via AppKit's native mechanism — which does
-/// not interfere with single-click selection or the focused highlight at all
-/// (unlike a SwiftUI `.onTapGesture`, which swallows the selection click).
-///
-/// Place as a `.background` on each List **row** — a row's backing view is a
-/// genuine descendant of the `NSTableView`, so walking *up* reliably finds the
-/// detail table (and never the sidebar's). `action` receives the double-clicked
-/// row index.
 struct ListDoubleClickAction: NSViewRepresentable {
     let action: (Int) -> Void
 
@@ -33,8 +24,6 @@ struct ListDoubleClickAction: NSViewRepresentable {
 
         func bindIfNeeded(from view: NSView) {
             guard let table = tableView ?? Self.enclosingTableView(of: view) else { return }
-            // Reaffirm each update so a surviving row keeps the table's (weak) target
-            // valid even after the originally-binding row is removed.
             tableView = table
             table.target = self
             table.doubleAction = #selector(handleDoubleClick)

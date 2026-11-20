@@ -2,9 +2,6 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// The piece cache's key and store (R1 of the 2026 R16 review), without an encoder. The
-/// render-level promises — a warm render is stream-identical to a cold one, and an edit
-/// re-encodes only the pieces it touches — are in `StitchPipelineIntegrationTests`.
 struct PieceCacheTests {
     private static func tempDir() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -19,7 +16,6 @@ struct PieceCacheTests {
         return url
     }
 
-    /// `/usr/bin/true` stands in for ffmpeg: its `-version` output is the fingerprint.
     private static let tool = URL(fileURLWithPath: "/usr/bin/true")
 
     private static func args(source: URL, output: URL, crf: String = "18") -> [String] {
@@ -36,8 +32,6 @@ struct PieceCacheTests {
                         output: output, segment: segment, ffmpeg: Self.tool)
     }
 
-    /// The output piece's path is not part of the key: a clip that moves to another index,
-    /// in another render's work directory, still hits.
     @Test func theKeyIgnoresTheOutputPath() async throws {
         let dir = try Self.tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -74,8 +68,6 @@ struct PieceCacheTests {
         #expect(await key(cache, source: source, output: out, segment: nil) != base)
     }
 
-    /// One changed source byte is a different source. A fresh cache object measures the
-    /// identity again (one object serves one render, and memoises it).
     @Test func aChangedSourceChangesTheKey() async throws {
         let dir = try Self.tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

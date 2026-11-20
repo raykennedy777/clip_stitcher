@@ -2,11 +2,6 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// The Clip Doctor sheet (issue #53, ADR-0021): confirm a repair-only export of one
-/// damaged clip, watch it run, then read the **verdict** — the headline is whether the
-/// repaired copy re-scanned clean, not merely that the recipe ran. Reachable from the
-/// Source action panel and the import banner (#55). Same sheet pattern as Audio Settings
-/// / Relink; the work itself lives in `ClipDoctorModel` + `ClipDoctorEngine`.
 struct ClipDoctorView: View {
     @StateObject private var model: ClipDoctorModel
     @Environment(\.dismiss) private var dismiss
@@ -36,8 +31,6 @@ struct ClipDoctorView: View {
         .task { await model.probeOmittedStreams() }
     }
 
-    // MARK: - Header
-
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Clip Doctor — \(model.clip?.displayName ?? "")")
@@ -52,12 +45,8 @@ struct ClipDoctorView: View {
         .padding()
     }
 
-    // MARK: - Configuration / progress
-
     private var configuration: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Field-coded (PAFF) sources are re-encoded in full (issue #54): say so up
-            // front, with a time estimate, and require an explicit opt-in before Repair.
             if let notice = model.fieldCodedReencodeNotice {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(notice, systemImage: "exclamationmark.triangle.fill")
@@ -92,9 +81,6 @@ struct ClipDoctorView: View {
                         .accessibilityIdentifier("clipDoctor.change")
                 }
                 if let destError = model.destinationError {
-                    // Validated on pick (issue #83): a source collision or an unwritable
-                    // folder is caught here and disables Repair, rather than failing after
-                    // the click. Takes precedence over the overwrite notice.
                     Label(destError, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.red)
@@ -102,8 +88,6 @@ struct ClipDoctorView: View {
                         .accessibilityIdentifier("clipDoctor.destinationError")
                         .accessibilityValue(Text(destError))
                 } else if model.destinationExists {
-                    // Explicit, never silent (ADR-0021): the action button below reads
-                    // "Replace" and the user opts in; the source is never the target.
                     Label("A repaired copy already exists here — Repair will replace it.",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption)
@@ -111,7 +95,6 @@ struct ClipDoctorView: View {
                 }
             }
 
-            // Video + audio only (ADR-0021): name what won't be carried, never silent.
             if let notice = model.omittedStreamsNotice {
                 Label(notice, systemImage: "info.circle")
                     .font(.caption)
@@ -150,14 +133,10 @@ struct ClipDoctorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Outcome (verdict is the headline)
-
     @ViewBuilder
     private var outcome: some View {
         VStack(alignment: .leading, spacing: 10) {
             if model.isVerifying {
-                // Re-verify in flight (issue #82): show the scan's progress in place of the
-                // stale not-verified verdict; the footer offers Cancel.
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Verifying the repaired file…", systemImage: "arrow.triangle.2.circlepath")
                         .font(.headline)
@@ -199,12 +178,6 @@ struct ClipDoctorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The supporting report under the verdict — the shared "Repaired N damage zones at …"
-    /// wording (ExportPlanner), so the sheet, the row, and the export report can't drift.
-    /// Whole-file, so no kept window bounds the count. The "and a truncated ending" naming reads
-    /// the engine's own truncated-ending decision off the result (`truncatedEndingTrim`), so it
-    /// survives a nil probed `duration` — the classification comes off the frame index, not the
-    /// container duration (issue #79).
     private var supportingReport: String? {
         guard let clip = model.clip else { return nil }
         return ExportPlanner.repairReport(
@@ -230,8 +203,6 @@ struct ClipDoctorView: View {
         }
     }
 
-    // MARK: - Footer
-
     @ViewBuilder
     private var footer: some View {
         HStack {
@@ -253,8 +224,6 @@ struct ClipDoctorView: View {
                 Button("Reveal in Finder") { model.reveal() }
                     .accessibilityIdentifier("clipDoctor.reveal")
                 Spacer()
-                // A cancelled verify (issue #82) left the file unchecked — offer to re-run
-                // verification on the kept file rather than only reporting the cancel.
                 if model.canVerifyNow {
                     Button("Verify Now") { model.verifyNow() }
                         .accessibilityIdentifier("clipDoctor.verifyNow")
@@ -273,10 +242,6 @@ struct ClipDoctorView: View {
         .padding()
     }
 
-    // MARK: - Destination panel
-
-    /// Lets the user move the repaired copy elsewhere. The source's extension is kept —
-    /// same container in, same container out (ADR-0021) — so it's re-appended if dropped.
     private func changeDestination() {
         let ext = model.destination.pathExtension
         let panel = NSSavePanel()
@@ -285,8 +250,6 @@ struct ClipDoctorView: View {
         panel.canCreateDirectories = true
         panel.showsTagField = false
         panel.nameFieldStringValue = model.destination.lastPathComponent
-        // The configured folder / last choice wins (issue #87); with nothing recorded
-        // yet it falls back to the default repaired-copy sibling's folder.
         panel.directoryURL = ExportPanelDefaults().startingDirectory
             ?? model.destination.deletingLastPathComponent()
         if let type = UTType(filenameExtension: ext) { panel.allowedContentTypes = [type] }

@@ -2,16 +2,11 @@ import Foundation
 import Testing
 @testable import ClipStitcher
 
-/// Multi-track audio model rules (ADR-0014): track display naming from container
-/// metadata with the "Track N" fallback, and project-JSON backward compatibility for
-/// saves made before `audioTracks` existed.
 struct AudioTrackModelTests {
     private func track(language: String? = nil, title: String? = nil) -> AudioProperties {
         AudioProperties(codec: "aac", sampleRate: 48000, channels: 2,
                         channelLayout: "stereo", language: language, title: title)
     }
-
-    // MARK: - Display naming
 
     @Test func titleAndLanguageBothShown() {
         #expect(track(language: "eng", title: "World Feed").displayName(trackNumber: 2) == "World Feed (eng)")
@@ -30,15 +25,12 @@ struct AudioTrackModelTests {
     }
 
     @Test func undeterminedLanguageIsNotShown() {
-        // "und" is ffmpeg's explicit "no language" marker, not a name worth showing.
         #expect(track(language: "und").displayName(trackNumber: 1) == "Track 1")
     }
 
     @Test func emptyTagsCountAsAbsent() {
         #expect(track(language: "", title: "").displayName(trackNumber: 2) == "Track 2")
     }
-
-    // MARK: - Save compatibility
 
     @Test func oldSaveWithoutAudioTracksFallsBackToTheSingleTrack() throws {
         var clip = Clip(bookmark: Data(), displayName: "old.mpg")
@@ -51,7 +43,6 @@ struct AudioTrackModelTests {
     }
 
     @Test func preMultiTrackJSONDecodesWithNilAudioTracks() throws {
-        // A literal pre-slice-9 clip payload: no audioTracks key, no language/title.
         let json = """
         {"id":"6F1E9A2B-1111-2222-3333-444455556666","bookmark":"","displayName":"a.mp4",
          "audio":{"codec":"mp2","sampleRate":48000,"channels":2}}
@@ -86,8 +77,6 @@ struct AudioTrackModelTests {
         try JSONDecoder().decode(Clip.self, from: JSONEncoder().encode(clip))
     }
 
-    // MARK: - Track selections (ADR-0014)
-
     @Test func defaultSelectionIsAllOwnStreamsInOrder() {
         var clip = Clip(bookmark: Data(), displayName: "multi.mkv")
         clip.audioTracks = [track(title: "A"), track(title: "B")]
@@ -106,13 +95,11 @@ struct AudioTrackModelTests {
         ]
         #expect(clip.effectiveAudioTracks[1]?.title == "Commentary")
         #expect(clip.audioTrackName(1) == "Commentary (eng)")
-        // 45 s of audio against 60 s of video: 15 s short — silence fills, with a notice.
         #expect(clip.externalAudioMismatch(slot: 1) == -15)
         #expect(clip.externalAudioMismatch(slot: 0) == nil)
     }
 
     @Test func externalSelectionPicksAmongTheFilesStreams() {
-        // demo.mkv carries two audio streams; the slot points at its second one.
         var clip = Clip(bookmark: Data(), displayName: "a.mp4")
         clip.audioTracks = [track(title: "Own")]
         clip.audioSelections = [
@@ -144,21 +131,15 @@ struct AudioTrackModelTests {
         #expect(decoded.monitoredAudioTrack == 0)
     }
 
-    // MARK: - Channel mix (ADR-0019)
-
     @Test func noOpTableMatchesTheADR() {
-        // Stereo is a surround fold-down: no-op for mono & stereo sources.
         #expect(ChannelMix.stereo.isNoOp(sourceChannels: 1))
         #expect(ChannelMix.stereo.isNoOp(sourceChannels: 2))
         #expect(!ChannelMix.stereo.isNoOp(sourceChannels: 6))
-        // Left/Right/Mono act on the stereo image: no-op only for mono sources.
         for mix in [ChannelMix.leftOnly, .rightOnly, .mono] {
             #expect(mix.isNoOp(sourceChannels: 1))
             #expect(!mix.isNoOp(sourceChannels: 2))
             #expect(!mix.isNoOp(sourceChannels: 6))
         }
-        // Original is the identity; an unknown source (unprobed external, missing
-        // stream — the slot plays silence) makes every mix a no-op.
         #expect(ChannelMix.original.isNoOp(sourceChannels: 6))
         for mix in ChannelMix.allCases {
             #expect(mix.isNoOp(sourceChannels: nil))
@@ -172,8 +153,6 @@ struct AudioTrackModelTests {
     }
 
     @Test func preMixSlotJSONDecodesWithOriginalEverywhere() throws {
-        // A literal pre-#38 clip payload: audioSelections is an array of the bare
-        // selection enum. Old documents must load with every track at Original.
         let json = """
         {"id":"6F1E9A2B-1111-2222-3333-444455556666","bookmark":"","displayName":"a.mkv",
          "audioSelections":[{"stream":{"_0":1}},
@@ -205,7 +184,6 @@ struct AudioTrackModelTests {
         let a = AudioProperties(codec: "aac", sampleRate: 48000, channels: 2)
         var rich = Clip(bookmark: Data(), displayName: "r")
         rich.audioTracks = [a]
-        // one own stream, but three selected slots (the third is an external file)
         rich.audioSelections = [.stream(0), .stream(0),
                                 .external(bookmark: Data(), name: "x.mp3", streamIndex: 0,
                                           tracks: [a], duration: nil)]

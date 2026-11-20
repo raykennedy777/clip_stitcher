@@ -17,11 +17,6 @@ enum FFError: LocalizedError {
     }
 }
 
-/// Locates the ffprobe / ffmpeg binaries.
-///
-/// For a release build these are bundled inside the app (ADR-0002). During
-/// development we fall back to a Homebrew/system install so the app is runnable
-/// before the bundling step is set up.
 enum FFTools {
     static func ffprobeURL() throws -> URL { try locate("ffprobe") }
     static func ffmpegURL() throws -> URL { try locate("ffmpeg") }

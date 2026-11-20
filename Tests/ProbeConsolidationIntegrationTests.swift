@@ -2,21 +2,8 @@ import Testing
 import Foundation
 @testable import ClipStitcher
 
-/// Verifies the redundant-probe cuts (issue #85): `MediaProbe.probe` surfaces the container
-/// start_time in a **single** ffprobe launch (so the import path no longer probes twice), and
-/// the document's container-start cache means a repeated preview-style lookup probes **zero**
-/// times.
-///
-/// Owns no copyrighted bytes (ADR-0023): it synthesises a tiny clip with ffmpeg's `testsrc`
-/// into a temp dir on demand, and skips loudly (returns without asserting) when ffmpeg isn't
-/// reachable. Its own suite so the fast unit run can `-skip-testing` it and it runs on demand
-/// with `-only-testing:ClipStitcherTests/ProbeConsolidationIntegrationTests`.
 @Suite("Probe consolidation (integration)")
 struct ProbeConsolidationIntegrationTests {
-
-    /// A synthetic MPEG-TS clip (no copyrighted media): 1 s of `testsrc` + a sine tone muxed to
-    /// TS so it carries a non-zero container start_time — the value the consolidation surfaces.
-    /// Returns `nil` (the test then skips) when ffmpeg isn't available on this machine.
     private static func makeClip(codec: String = "mpeg2video") async throws -> URL? {
         guard let ffmpeg = try? FFTools.ffmpegURL() else { return nil }
         let dir = FileManager.default.temporaryDirectory
@@ -32,9 +19,6 @@ struct ProbeConsolidationIntegrationTests {
         return url
     }
 
-    /// Item 1: one properties probe carries start_time, so the second dedicated probe import
-    /// used to pay is gone. Counts subprocess launches via the task-local counter so parallel
-    /// suites can't corrupt the tally.
     @Test func probeSurfacesContainerStartInASingleLaunch() async throws {
         guard let url = try await Self.makeClip(codec: "libx264") else { return }
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -44,9 +28,6 @@ struct ProbeConsolidationIntegrationTests {
         try await ProcessRunner.$launchCounter.withValue(probeCounter) {
             probe = try await MediaProbe.probe(url: url)
         }
-        // The full `-show_streams -show_format` probe is a single process — and it already
-        // carried start_time, so the import path reads it from here, not a second launch.
-        // A CRF-capable source adds nothing: only MPEG-2 pays for a bitrate sample (#110).
         #expect(probeCounter.count == 1)
 
         let dedicatedCounter = ProcessRunner.LaunchCounter()
@@ -54,17 +35,11 @@ struct ProbeConsolidationIntegrationTests {
         await ProcessRunner.$launchCounter.withValue(dedicatedCounter) {
             dedicated = await MediaProbe.containerStartTime(url: url)
         }
-        // The old dedicated start_time probe is its own separate launch — the one import used
-        // to pay on top of the properties probe, now saved — and it agrees with the folded value.
         #expect(dedicatedCounter.count == 1)
         #expect(probe?.containerStart == dedicated)
-        #expect((probe?.containerStart ?? 0) > 0)   // TS carries a real non-zero start
+        #expect((probe?.containerStart ?? 0) > 0)
     }
 
-    /// An MPEG-2 source is the one exception to the single-launch import probe (issue #110):
-    /// MPEG-PS/TS generally report no video-stream `bit_rate`, and mpeg2video has no CRF mode
-    /// to fall back on, so its re-encode target has to be *measured* — one extra bounded
-    /// packet sample, once at import, and never for a CRF-capable codec.
     @Test func mpeg2PaysOneExtraLaunchToMeasureItsBitrate() async throws {
         guard let url = try await Self.makeClip() else { return }
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -74,14 +49,11 @@ struct ProbeConsolidationIntegrationTests {
         try await ProcessRunner.$launchCounter.withValue(counter) {
             probe = try await MediaProbe.probe(url: url)
         }
-        #expect(counter.count == 2)   // properties + the bitrate sample
+        #expect(counter.count == 2)
         #expect(probe?.video?.codec == "mpeg2video")
-        // A real measurement, not a placeholder: testsrc at 320x240 encodes well above zero.
         #expect((probe?.video?.bitrate ?? 0) > 0)
     }
 
-    /// Item 2: the document's container-start lookup (what the Output Preview now reads on every
-    /// load) probes once on a miss and never again — a repeated preview load probes nothing.
     @MainActor
     @Test func repeatedContainerStartLookupsProbeOnlyOnce() async throws {
         guard let url = try await Self.makeClip() else { return }
@@ -92,7 +64,6 @@ struct ProbeConsolidationIntegrationTests {
                         displayName: url.lastPathComponent)
         doc.project.clips = [clip]
 
-        // First lookup misses the cache and probes once.
         let miss = ProcessRunner.LaunchCounter()
         var first = -1.0
         await ProcessRunner.$launchCounter.withValue(miss) {
@@ -100,7 +71,6 @@ struct ProbeConsolidationIntegrationTests {
         }
         #expect(miss.count == 1)
 
-        // Every later lookup — the preview's per-load read — hits the cache and probes nothing.
         let hit = ProcessRunner.LaunchCounter()
         var second = -1.0
         await ProcessRunner.$launchCounter.withValue(hit) {

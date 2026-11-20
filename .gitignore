@@ -51,9 +51,14 @@ scratch_screenshots/
 # Local signing override (see Config/Local.xcconfig.example)
 Config/Local.xcconfig
 
-# Agent tooling — local to whoever is working on the repo, not part of the project.
-# `.claude/skills/*` are symlinks into `.agents/skills/`, and skills-lock.json pins what
-# is installed there; all of it is managed by the skills installer, not by hand.
-.agents/
-.claude/
+# Agent tooling — third-party installed skills stay local, while repo-owned skills
+# (such as delete-comment) are explicitly un-ignored below.
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/delete-comment/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/delete-comment
 skills-lock.json

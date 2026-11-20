@@ -5,7 +5,11 @@ frame index computes (ADR-0008). The muxer has no notion of "start here" — it 
 and writes *every* segment the split points imply. Two of those are throwaway: everything before
 the in-cut, and everything after the out-cut.
 
-The tail was bounded first (issue #107, output `-t`). That left the **head**, whose size is the
+The tail was bounded first (issue #107, output `-t` — never `-to`, because the bound is
+evaluated on the unreset start-relative output timeline matching `-segment_times`, with
+`copyReadMargin = 2.0 s` strictly exceeding one frame interval at 23.976 fps because stopping
+level with the cut time silently drops 1–2 trailing frames with exit 0 and empty stderr,
+measured on HEVC: 0 → 2 short, 0.02 → 1 short, 0.05 → knife-edge). That left the **head**, whose size is the
 clip's in-point — the wrong axis for this app's workload, and the one that grows. A combined
 Sunday recording is one 4h36 / 16.8 GB capture from which each class takes a later slice, so
 every class discards more than the last. Measured on the real render (issue #108): one 54 s copy
