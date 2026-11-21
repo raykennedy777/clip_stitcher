@@ -194,6 +194,18 @@ the tail one. The out side is conservative: it reports keyframes a copy may *sta
 and the planner can also end a copy just before an open keyframe — a mark moved here is
 always copyable, a mark the planner also copies may sit closer.
 
+**In-point splice on HEVC.** On an HEVC clip, a copy that starts at a cut in-point can
+start at the first keyframe at or after it, even an open keyframe (a CRA with leading
+pictures). The copy drops that keyframe's leading pictures and rewrites it to a BLA picture
+(ADR-0038). The head re-encode then ends at that keyframe, and its `reason` reads
+`in point is not a keyframe; the copy starts at keyframe 205748 and drops its 1 leading
+picture`. On an open-GOP x265 source this is less than one GOP, where the copy-safe rule
+re-encoded to the next IDR. `copySafeKeyframes` keeps the copy-safe meaning; an HEVC
+`inFrame` moved onto any later keyframe is also a pure copy. H.264, MPEG-2, a source with
+damage zones and a field-coded clip keep the copy-safe rule. If a spliced clip fails its
+verification, the render prints `clip N in-point splice refused; …` and renders that clip
+again with the copy-safe rule, so its re-encode is then longer than the plan said.
+
 **Frame counts on a field-coded source.** `kept` and `segments` stay in the job's own
 coordinates, which count *fields* on a PAFF source (two per displayed frame, ADR-0022).
 `expectedFrames` counts what the output carries: frames.
@@ -275,7 +287,8 @@ Total: 00:13:20.5
 ```
 
 A re-encode's frame count is its planned range, and `fps` is that count over the run's
-wall time. A repaired segment shows as `reEncode (repair)`. A conform's count is its
+wall time. A copy that splices at an open keyframe ends `, N leading pictures dropped`
+(ADR-0038). A repaired segment shows as `reEncode (repair)`. A conform's count is its
 expected output frames at the target rate.
 
 ## The verdict line

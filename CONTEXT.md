@@ -40,10 +40,19 @@ _Avoid_: I-frame cut, clean cut
 Frames that present *before* their keyframe but decode *after* it (HEVC RASL frames; the
 B-frames before an open-GOP MPEG-2 I-frame). They make copy boundaries asymmetric: a copy
 span may *start* only at a keyframe with none (they would be orphaned at the
-re-encode→copy seam), but may *end* at any keyframe — the segment-muxer cut before the
+re-encode→copy seam) unless an In-point splice drops them, but may *end* at any keyframe —
+the segment-muxer cut before the
 keyframe sends its leading pictures into the discarded segment, so the copy ends exactly
 at presentation index `keyframe − count` (#16, ADR-0009).
 _Avoid_: open-GOP frames, RASL (except when HEVC-specific)
+
+**In-point splice**:
+How an HEVC copy starts at an *open* keyframe `k` (a CRA with leading pictures) right after
+the in-point's re-encode (ADR-0038): the copy run drops `k`'s leading pictures (they present
+inside the re-encode), moves `k`'s DTS into the hole they leave, and rewrites `k` to a
+BLA_N_LP picture, the HEVC type for a splice. The in-point mirror of the out-point rule under
+Leading pictures. HEVC only; a refused splice renders the clip again under the copy-safe rule.
+_Avoid_: open-GOP cut, CRA copy, smart splice
 
 **Discarded segment**:
 A piece the segment muxer writes because a copy run's split points imply it, and which no
@@ -302,7 +311,8 @@ _Avoid_: PAFF cutting, field-coded export mode
 **Copy-safe keyframe**:
 A keyframe with zero leading pictures — the only kind an in point or split point may snap to on
 the copy-cut route, since a copy may only *start* where no leading picture would be orphaned at
-the seam. An out point may snap to any keyframe (copy-safe or not), landing just before its
+the seam. An HEVC in-point copy may also start at an open keyframe (see In-point splice).
+An out point may snap to any keyframe (copy-safe or not), landing just before its
 leading pictures so they fall in the discarded range (see Leading pictures).
 _Avoid_: clean keyframe (that's the closed-GOP cut-point concept from ADR-0008), safe cut point
 

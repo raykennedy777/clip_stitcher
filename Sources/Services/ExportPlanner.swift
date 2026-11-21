@@ -48,7 +48,8 @@ enum ExportPlanner {
         }
         let segments = BoundaryReencodePlanner.plan(
             leadingCounts: leadingCounts, frameCount: index.count,
-            inFrame: clip.inPoint, outFrame: clip.outPoint, damage: damage)
+            inFrame: clip.inPoint, outFrame: clip.outPoint, damage: damage,
+            openInPoint: purpose == .export && allowsOpenInPoint(clip, copyCutRoute: copyCutRoute))
         guard !segments.isEmpty else { throw ExportError.invalidPlan }
         if purpose == .export, copyCutRoute,
            segments.contains(where: { $0.kind == .reEncode }) {
@@ -61,6 +62,21 @@ enum ExportPlanner {
             fieldOrder: clip.video?.fieldOrder,
             bitrate: clip.video?.bitrate)
         return .smartRender(segments: segments, encoder: encoder)
+    }
+
+    // ADR-0038
+    static func allowsOpenInPoint(_ clip: Clip, copyCutRoute: Bool) -> Bool {
+        clip.video?.codec == "hevc" && !copyCutRoute && (clip.damageZones ?? []).isEmpty
+    }
+
+    static func spliceFallback(for clip: Clip, segments: [PlannedSegment],
+                               index: FrameIndex) -> [PlannedSegment]? {
+        guard segments.contains(where: { $0.droppedLeadingPictures > 0 }) else { return nil }
+        let strict = BoundaryReencodePlanner.plan(
+            leadingCounts: CopySafeBoundaryDetector.leadingPictureCounts(
+                keyframeFlags: index.keyframeFlags, dts: index.dts),
+            frameCount: index.count, inFrame: clip.inPoint, outFrame: clip.outPoint)
+        return strict.isEmpty ? nil : strict
     }
 
     static func effectiveTarget(_ target: Clip?, settings: OutputSettings) -> Clip? {
@@ -105,7 +121,10 @@ enum ExportPlanner {
         case .smartRender(let segments, let encoder):
             return ExportItem(source: input.url, displayName: clip.displayName,
                               codec: clip.video?.codec,
-                              segments: segments, index: index, encoder: encoder,
+                              segments: segments,
+                              fallbackSegments: spliceFallback(for: clip, segments: segments,
+                                                               index: index),
+                              index: index, encoder: encoder,
                               containerStart: input.containerStart,
                               frameRate: clip.video?.frameRate,
                               sourceDamaged: !(clip.damageZones ?? []).isEmpty,

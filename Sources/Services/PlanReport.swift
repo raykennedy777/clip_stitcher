@@ -175,8 +175,9 @@ struct PlanReport: Codable, Equatable {
 
         let copySafe = conformed ? [] : CopySafeBoundaryDetector.copySafeFlags(
             keyframeFlags: index.keyframeFlags, dts: index.dts)
-        let segments = conformed ? nil : item.segments.map {
-            segment($0, kept: kept, copySafe: copySafe, index: index)
+        let segments = conformed ? nil : item.segments.indices.map { s in
+            segment(item.segments[s], kept: kept, copySafe: copySafe, index: index,
+                    next: s + 1 < item.segments.count ? item.segments[s + 1] : nil)
         }
         let share = conformed
             ? ExportPlanner.CopyShare(copiedSeconds: 0,
@@ -206,18 +207,24 @@ struct PlanReport: Codable, Equatable {
     }
 
     private static func segment(_ planned: PlannedSegment, kept: Range<Int>,
-                                copySafe: [Bool], index: FrameIndex) -> Segment {
+                                copySafe: [Bool], index: FrameIndex,
+                                next: PlannedSegment?) -> Segment {
         Segment(kind: planned.kind == .copy ? .copy : .reEncode,
                 frames: [planned.range.lowerBound, planned.range.upperBound],
                 seconds: rounded(ExportPlanner.duration(of: planned.range, index: index)),
                 reason: planned.kind == .copy ? nil
-                    : reEncodeReason(planned, kept: kept, copySafe: copySafe))
+                    : reEncodeReason(planned, kept: kept, copySafe: copySafe, next: next))
     }
 
     private static func reEncodeReason(_ planned: PlannedSegment, kept: Range<Int>,
-                                       copySafe: [Bool]) -> String {
+                                       copySafe: [Bool], next: PlannedSegment?) -> String {
         var causes: [String] = []
-        if planned.range.lowerBound == kept.lowerBound {
+        if planned.range.lowerBound == kept.lowerBound, let next, next.kind == .copy,
+           next.droppedLeadingPictures > 0 {
+            causes.append("in point is not a keyframe; the copy starts at keyframe "
+                + "\(next.range.lowerBound) and drops its "
+                + StageClock.count(next.droppedLeadingPictures, "leading picture"))
+        } else if planned.range.lowerBound == kept.lowerBound {
             causes.append("in point is not a copy-safe keyframe; "
                 + describe(nearestCopySafe(copySafe, from: kept.lowerBound, forward: true),
                            "nearest copy-safe keyframe at or after it"))

@@ -241,4 +241,55 @@ struct BoundaryReencodePlannerTests {
             zones: [zone], pts: pts, dts: garbled, containerStart: 10.0)
         #expect(swept == [BoundaryReencodePlanner.DamageSpan(range: 25..<38, zone: zone)])
     }
+
+    @Test func anOpenInPointReEncodesOnlyToTheNextKeyframe() {
+        let c = counts(count: 1500, boundaries: [0], open: [250: 1, 500: 2, 750: 1, 1000: 1, 1250: 1])
+        #expect(BoundaryReencodePlanner.plan(leadingCounts: c, frameCount: 1500, inFrame: 630,
+                                             outFrame: nil, openInPoint: true)
+                == [PlannedSegment(kind: .reEncode, range: 630..<750),
+                    PlannedSegment(kind: .copy, range: 750..<1500, droppedLeadingPictures: 1)])
+    }
+
+    @Test func withoutTheSpliceTheCopySafeRuleIsUnchanged() {
+        let c = counts(count: 1500, boundaries: [0], open: [250: 1, 500: 2, 750: 1, 1000: 1, 1250: 1])
+        #expect(BoundaryReencodePlanner.plan(leadingCounts: c, frameCount: 1500, inFrame: 630,
+                                             outFrame: nil)
+                == [PlannedSegment(kind: .reEncode, range: 630..<1500)])
+    }
+
+    @Test func anInPointOnAnOpenKeyframeIsAPureCopy() {
+        let c = counts(count: 1500, boundaries: [0], open: [250: 1, 500: 2, 750: 1])
+        #expect(BoundaryReencodePlanner.plan(leadingCounts: c, frameCount: 1500, inFrame: 500,
+                                             outFrame: nil, openInPoint: true)
+                == [PlannedSegment(kind: .copy, range: 500..<1500, droppedLeadingPictures: 2)])
+    }
+
+    @Test func aCopySafeKeyframeFirstPlansAsBefore() {
+        let c = counts(count: 1083, boundaries: [0, 250, 500, 750, 1000], open: [400: 1])
+        for open in [false, true] {
+            #expect(BoundaryReencodePlanner.plan(leadingCounts: c, frameCount: 1083, inFrame: 243,
+                                                 outFrame: 507, openInPoint: open)
+                    == [PlannedSegment(kind: .reEncode, range: 243..<250),
+                        PlannedSegment(kind: .copy, range: 250..<500, outCutKeyframe: 500),
+                        PlannedSegment(kind: .reEncode, range: 500..<508)])
+        }
+    }
+
+    @Test func aKeyframeWithAnUnknownCountIsSkipped() {
+        let c = counts(count: 1500, boundaries: [0], open: [1000: 1])
+        #expect(BoundaryReencodePlanner.plan(leadingCounts: c, frameCount: 1500, inFrame: 630,
+                                             outFrame: nil, openInPoint: true)
+                == [PlannedSegment(kind: .reEncode, range: 630..<1000),
+                    PlannedSegment(kind: .copy, range: 1000..<1500, droppedLeadingPictures: 1)])
+    }
+
+    @Test func aDamagedPlanIgnoresTheSplice() {
+        let c = counts(count: 1500, boundaries: [0], open: [250: 1, 500: 2, 750: 1, 1000: 1, 1250: 1])
+        let zone = DamageZone(start: 26, end: 26.1, affectsVideo: true)
+        let plan = BoundaryReencodePlanner.plan(
+            leadingCounts: c, frameCount: 1500, inFrame: 630, outFrame: nil,
+            damage: [BoundaryReencodePlanner.DamageSpan(range: 1300..<1305, zone: zone)],
+            openInPoint: true)
+        #expect(plan.allSatisfy { $0.droppedLeadingPictures == 0 })
+    }
 }

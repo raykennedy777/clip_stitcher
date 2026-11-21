@@ -269,4 +269,25 @@ struct PlanReportTests {
             tracks: [], warnings: ["first", "second"]))
         #expect(report.warnings == ["first", "second"])
     }
+
+    @Test func aSplicedInPointNamesTheKeyframeAndTheDroppedPictures() {
+        let targetClip = clip(name: "part 1", video: video(codec: "hevc"), inPoint: 5)
+        let targetItem = ExportItem(
+            source: URL(fileURLWithPath: "/media/target.mkv"), displayName: "part 1",
+            codec: "hevc",
+            segments: [PlannedSegment(kind: .reEncode, range: 5..<10),
+                       PlannedSegment(kind: .copy, range: 10..<60, droppedLeadingPictures: 2)],
+            index: Self.index, frameRate: "25/1")
+        let fillClip = clip(name: "Fill", video: video(sar: "64:45"))
+        let fillItem = ExportItem(
+            source: URL(fileURLWithPath: "/media/fill.mkv"), displayName: "Fill",
+            codec: "h264", audioStart: 0, audioEnd: 2.4,
+            conform: ConformEngine.VideoConform(sourceVideo: video(sar: "64:45"),
+                                                targetVideo: video()))
+        let report = PlanReport.make(prepared: prepared(
+            target: targetClip, targetItem: targetItem, fill: fillClip, fillItem: fillItem,
+            tracks: []))
+        #expect(report.clips[0].segments?[0].reason
+                == "in point is not a keyframe; the copy starts at keyframe 10 and drops its 2 leading pictures")
+    }
 }

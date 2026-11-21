@@ -309,9 +309,13 @@ enum BoundaryReencodeEngine {
         fieldCoded: Bool = false, reorderDepth: Int? = nil,
         onProgress: @escaping @Sendable (Double) -> Void = { _ in },
         log: (String) -> Void = { _ in },
-        pieceCache: PieceCache? = nil
+        pieceCache: PieceCache? = nil,
+        inPointSplice: Bool = true
     ) async throws -> URL {
         guard !plan.isEmpty else { throw ExportError.invalidPlan }
+        // ADR-0038
+        let splices = plan.contains { $0.droppedLeadingPictures > 0 } && inPointSplice
+        guard !splices || copyStrategy == .segmentMux else { throw ExportError.invalidPlan }
         let encoder = reorderDepth.map {
             EncoderSelection.withEncoderParams(
                 EncoderSelection.reorderDepthParams(depth: $0, forCodec: codec),
@@ -361,7 +365,7 @@ enum BoundaryReencodeEngine {
         var pendingStores: [(key: String, piece: URL)] = []
         var hitKeys: [String] = []
         for (s, segment) in plan.enumerated() {
-            let bsf = copyFilters[s] ?? []
+            var bsf = copyFilters[s] ?? []
             let copyPlan: SegmentPlan? = segment.kind == .copy && copyStrategy == .segmentMux
                 ? copySegmentPlan(copyRange: segment.range,
                                   outCutKeyframe: segment.outCutKeyframe, index: index)
@@ -372,6 +376,16 @@ enum BoundaryReencodeEngine {
                     ffmpeg, source: source, plan: copyPlan, index: index,
                     containerStart: containerStart,
                     probeOutput: work.appendingPathComponent("c\(clipIndex)_s\(s)_seek.nut"))
+            }
+            // ADR-0038
+            let spliced = segment.kind == .copy && segment.droppedLeadingPictures > 0 && inPointSplice
+            if spliced {
+                bsf = OpenGopSplice.prependingDrop(
+                    OpenGopSplice.leadingPictureDropFilter(
+                        keyframe: segment.range.lowerBound,
+                        count: segment.droppedLeadingPictures, index: index,
+                        containerStart: containerStart, seek: headSeek?.seek ?? 0),
+                    to: bsf)
             }
             let expected: Double?
             switch segment.kind {
@@ -445,6 +459,10 @@ enum BoundaryReencodeEngine {
             }
             guard FileManager.default.fileExists(atPath: piece.path) else {
                 throw ExportError.missingSegment
+            }
+            if spliced {
+                // ADR-0038
+                try await OpenGopSplice.rewriteFirstIrapToBLA(try FFTools.ffprobeURL(), piece: piece)
             }
             log(segmentTimingLine(clipIndex: clipIndex, segment: s, planned: segment,
                                   seconds: segmentClock.seconds, cached: cached))
@@ -532,6 +550,9 @@ enum BoundaryReencodeEngine {
         let frames = planned.range.count
         var line = "clip \(clipIndex) s\(s) \(kind) [\(planned.range.lowerBound),\(planned.range.upperBound)): "
             + "\(StageClock.label(seconds)), \(StageClock.count(frames, "frame"))"
+        if planned.droppedLeadingPictures > 0 {
+            line += ", \(StageClock.count(planned.droppedLeadingPictures, "leading picture")) dropped"
+        }
         if cached {
             line += ", piece cache hit"
         } else if planned.kind == .reEncode,

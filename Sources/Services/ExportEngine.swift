@@ -5,6 +5,7 @@ struct ExportItem {
     var displayName: String = ""
     var codec: String? = nil
     var segments: [PlannedSegment] = []
+    var fallbackSegments: [PlannedSegment]? = nil
     var index: FrameIndex = FrameIndex(pts: [], keyframeFlags: [])
     var encoder: [String] = []
     var containerStart: Double = 0
@@ -158,6 +159,14 @@ enum ExportEngine {
     static func firstPieceIsEncoded(_ item: ExportItem) -> Bool {
         if item.conform != nil { return true }
         return item.segments.first?.kind == .reEncode
+    }
+
+    // ADR-0038
+    static func spliceFailureFallsBack(_ error: ExportError) -> Bool {
+        switch error {
+        case .verificationFailed, .cutFailed, .concatFailed, .missingSegment: return true
+        default: return false
+        }
     }
 
     static func wantedSegmentIndex(plan: SegmentPlan) -> Int {
@@ -671,14 +680,31 @@ enum ExportEngine {
                         trackTimescale: exportTimescale, reorderDepth: depth,
                         onProgress: withinClip, log: log, pieceCache: pieceCache))
                 } else {
-                    videoPieces.append(try await BoundaryReencodeEngine.produceVideoPiece(
-                        ffmpeg, source: item.source, plan: item.segments, index: item.index,
-                        encoder: item.encoder, work: work, ext: pieceExts[i], clipIndex: i,
-                        displayName: item.displayName, codec: item.codec, trackTimescale: exportTimescale,
-                        containerStart: item.containerStart, frameRate: item.frameRate,
-                        sourceDamaged: item.sourceDamaged,
-                        fieldCoded: item.fieldCoded, reorderDepth: depth,
-                        onProgress: withinClip, log: log, pieceCache: pieceCache))
+                    func produce(_ plan: [PlannedSegment]) async throws -> URL {
+                        try await BoundaryReencodeEngine.produceVideoPiece(
+                            ffmpeg, source: item.source, plan: plan, index: item.index,
+                            encoder: item.encoder, work: work, ext: pieceExts[i], clipIndex: i,
+                            displayName: item.displayName, codec: item.codec, trackTimescale: exportTimescale,
+                            containerStart: item.containerStart, frameRate: item.frameRate,
+                            sourceDamaged: item.sourceDamaged,
+                            fieldCoded: item.fieldCoded, reorderDepth: depth,
+                            onProgress: withinClip, log: log, pieceCache: pieceCache)
+                    }
+                    do {
+                        videoPieces.append(try await produce(item.segments))
+                    } catch let error as ExportError {
+                        // ADR-0038
+                        guard let fallback = item.fallbackSegments,
+                              Self.spliceFailureFallsBack(error) else { throw error }
+                        log("clip \(i) in-point splice refused; rendering with the copy-safe "
+                            + "in-point rule: \(error.localizedDescription.prefix(300))")
+                        let fm = FileManager.default
+                        for name in (try? fm.contentsOfDirectory(atPath: work.path)) ?? []
+                        where name.hasPrefix("c\(i)_") {
+                            try? fm.removeItem(at: work.appendingPathComponent(name))
+                        }
+                        videoPieces.append(try await produce(fallback))
+                    }
                 }
                 log("clip \(i) done (\(i + 1)/\(items.count)): \(clipClock.label)")
                 progress(0.7 * Double(i + 1) / Double(items.count))

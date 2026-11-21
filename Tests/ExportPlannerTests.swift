@@ -618,4 +618,52 @@ struct ExportPlannerTests {
                    sourceReorderDepth: depth)
     }
 
+    private var openGopIndex: FrameIndex {
+        var dts = (0..<100).map { Double($0) * 0.04 }
+        dts[50] = 1.95
+        dts[49] = 1.97
+        return FrameIndex(pts: (0..<100).map { Double($0) * 0.04 }, dts: dts,
+                          keyframeFlags: (0..<100).map { $0 == 0 || $0 == 50 })
+    }
+
+    private func segments(_ treatment: ExportPlanner.VideoTreatment) -> [PlannedSegment]? {
+        guard case .smartRender(let segments, _) = treatment else { return nil }
+        return segments
+    }
+
+    @Test func anHevcInPointSplicesAtTheNextKeyframe() throws {
+        let hevc = clip(video: video(codec: "hevc"), inPoint: 10)
+        #expect(segments(try ExportPlanner.videoTreatment(for: hevc, target: nil, index: openGopIndex))
+                == [PlannedSegment(kind: .reEncode, range: 10..<50),
+                    PlannedSegment(kind: .copy, range: 50..<100, droppedLeadingPictures: 1)])
+    }
+
+    @Test func otherCodecsAndDamagedSourcesKeepTheCopySafeRule() throws {
+        let strict = [PlannedSegment(kind: .reEncode, range: 10..<100)]
+        for codec in ["h264", "mpeg2video"] {
+            #expect(segments(try ExportPlanner.videoTreatment(
+                for: clip(video: video(codec: codec), inPoint: 10), target: nil, index: openGopIndex))
+                    == strict)
+        }
+        var damaged = clip(video: video(codec: "hevc"), inPoint: 10)
+        damaged.damageZones = [DamageZone(start: 3.0, end: 3.1, affectsVideo: false)]
+        #expect(!ExportPlanner.allowsOpenInPoint(damaged, copyCutRoute: false))
+        var clean = clip(video: video(codec: "hevc"), inPoint: 10)
+        clean.damageZones = []
+        #expect(ExportPlanner.allowsOpenInPoint(clean, copyCutRoute: false))
+        #expect(!ExportPlanner.allowsOpenInPoint(clean, copyCutRoute: true))
+    }
+
+    @Test func aSplicedItemCarriesItsCopySafeFallback() throws {
+        func item(_ codec: String) throws -> ExportItem {
+            try ExportPlanner.planItem(
+                for: ExportPlanner.ClipInput(clip: clip(video: video(codec: codec), inPoint: 10),
+                                             url: URL(fileURLWithPath: "/media/a.mkv"),
+                                             index: openGopIndex, containerStart: 0,
+                                             audioSources: []),
+                target: nil)
+        }
+        #expect(try item("hevc").fallbackSegments == [PlannedSegment(kind: .reEncode, range: 10..<100)])
+        #expect(try item("h264").fallbackSegments == nil)
+    }
 }

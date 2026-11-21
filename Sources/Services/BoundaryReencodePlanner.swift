@@ -6,6 +6,7 @@ struct PlannedSegment: Equatable {
     var range: Range<Int>
     var outCutKeyframe: Int? = nil
     var damage: [DamageZone] = []
+    var droppedLeadingPictures: Int = 0
 }
 
 enum BoundaryReencodePlanner {
@@ -39,7 +40,7 @@ enum BoundaryReencodePlanner {
 
     static func plan(
         leadingCounts: [Int?], frameCount: Int, inFrame: Int?, outFrame: Int?,
-        damage: [DamageSpan] = []
+        damage: [DamageSpan] = [], openInPoint: Bool = false
     ) -> [PlannedSegment] {
         let inStart = inFrame ?? 0
         let outEx = outFrame.map { $0 + 1 } ?? frameCount
@@ -50,7 +51,7 @@ enum BoundaryReencodePlanner {
             .sorted { $0.range.lowerBound < $1.range.lowerBound }
         guard !relevant.isEmpty else {
             return planUndamaged(leadingCounts: leadingCounts, frameCount: frameCount,
-                                 inFrame: inFrame, outFrame: outFrame)
+                                 inFrame: inFrame, outFrame: outFrame, openInPoint: openInPoint)
         }
 
         struct Repair { var lo: Int; var hi: Int; var loCut: Int?; var zones: [DamageZone] }
@@ -137,16 +138,20 @@ enum BoundaryReencodePlanner {
     }
 
     private static func planUndamaged(
-        leadingCounts: [Int?], frameCount: Int, inFrame: Int?, outFrame: Int?
+        leadingCounts: [Int?], frameCount: Int, inFrame: Int?, outFrame: Int?,
+        openInPoint: Bool
     ) -> [PlannedSegment] {
         let inStart = inFrame ?? 0
         let outEx = outFrame.map { $0 + 1 } ?? frameCount
 
+        // ADR-0038
         let copyStart: Int? = inFrame == nil
             ? inStart
             : leadingCounts.indices.first {
-                leadingCounts[$0] == 0 && $0 >= inStart && $0 < outEx
+                guard $0 >= inStart, $0 < outEx, let n = leadingCounts[$0] else { return false }
+                return n == 0 || openInPoint
             }
+        let dropped = inFrame == nil ? 0 : copyStart.flatMap { leadingCounts[$0] } ?? 0
 
         let copyEnd: (end: Int, cutKeyframe: Int?)? = {
             guard let start = copyStart else { return nil }
@@ -166,7 +171,8 @@ enum BoundaryReencodePlanner {
 
         var segments: [PlannedSegment] = []
         if start > inStart { segments.append(PlannedSegment(kind: .reEncode, range: inStart..<start)) }
-        segments.append(PlannedSegment(kind: .copy, range: start..<end, outCutKeyframe: cutKeyframe))
+        segments.append(PlannedSegment(kind: .copy, range: start..<end, outCutKeyframe: cutKeyframe,
+                                       droppedLeadingPictures: dropped))
         if end < outEx { segments.append(PlannedSegment(kind: .reEncode, range: end..<outEx)) }
         return segments
     }
